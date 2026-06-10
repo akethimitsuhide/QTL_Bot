@@ -1,0 +1,75 @@
+# QTL_Bot - Python 依存パッケージ
+
+# Discord Bot フレームワーク
+discord.py>=2.0.0
+
+# HTTP クライアント / Web サーバー
+aiohttp>=3.8.0
+
+# WebSocket クライアント
+websockets>=10.0
+
+# 音声合成・MP3 再生
+pygame>=2.1.0
+
+# 環境変数管理
+python-dotenv>=0.19.0
+
+# メモリ監視（Web ダッシュボード・パフォーマンス監視用）
+# 推奨：Web ダッシュボードを使用する場合は必須
+psutil>=5.8.0
+
+# ===============================================
+# 開発用（オプション）
+# ===============================================
+# テスト実行時に使用
+pytest>=6.0.0
+pytest-asyncio>=0.18.0
+
+# コード品質チェック
+flake8>=4.0.0
+black>=22.0.0
+isort>=5.0.0
+
+# ===============================================
+# 注記
+# ===============================================
+# 
+# 【必須】
+# - discord.py: Discord Bot の基盤
+# - aiohttp: HTTP/HTTPS リクエスト、Web サーバー
+# - websockets: WebSocket 接続（Wolfx/P2P）
+# - pygame: MP3 再生
+# - python-dotenv: 環境変数読み込み
+#
+# 【推奨】
+# - psutil: メモリ監視（Web ダッシュボード使用時）
+#
+# 【オプション】
+# - pytest / pytest-asyncio: テスト実行時
+# - flake8 / black / isort: コード品質管理
+#
+# ===============================================
+# インストール方法
+# ===============================================
+#
+# すべてのパッケージをインストール:
+#   pip install -r requirements.txt
+#
+# 必須パッケージのみインストール:
+#   pip install discord.py aiohttp websockets pygame python-dotenv
+#
+# 推奨パッケージも含めてインストール:
+#   pip install -r requirements.txt psutil
+#
+# 開発用パッケージも含めてインストール:
+#   pip install -r requirements.txt pytest pytest-asyncio flake8 black isort
+#
+# ===============================================
+# バージョン確認
+# ===============================================
+#
+# インストール後、以下でバージョンを確認:
+#   pip list | grep -E "discord|aiohttp|websockets|pygame|psutil"
+#
+# ===============================================
