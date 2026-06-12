@@ -44,29 +44,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QTLBot")
 
-# ===== A-2: ログローテーション設定 =====
-try:
-    from logging.handlers import RotatingFileHandler
-    
-    # RotatingFileHandler を追加
-    file_handler = RotatingFileHandler(
-        'qtlbot.log',
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT
-    )
-    file_handler.setLevel(getattr(logging, LOG_LEVEL))
-    file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-    logger.info(f"ロギング設定: RotatingFileHandler (maxBytes={LOG_MAX_BYTES}, backupCount={LOG_BACKUP_COUNT})")
-except Exception as e:
-    logger.warning(f"ログローテーション設定エラー: {e}")
-
-
 # ===============================
-# 環境変数読み込み
+# 環境変数読み込み & ヘルパー関数
 # ===============================
 load_dotenv()
+
+# ===== ロギング設定定数（load_dotenv 直後） =====
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", "10485760"))  # 10 MB
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 def _require_env(key: str) -> str:
     value = os.getenv(key)
@@ -74,6 +60,18 @@ def _require_env(key: str) -> str:
         logger.critical(f"❌ 環境変数 {key} が設定されていません。.env を確認してください。")
         raise SystemExit(1)
     return value
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key, "")
+    if not v:
+        return default
+    return v.strip().lower() in ("1", "true", "yes")
 
 BOT_TOKEN = _require_env("BOT_TOKEN")
 
@@ -115,21 +113,31 @@ LMONI_EEW_CHANNEL_ID = int(os.getenv("LMONI_EEW_CHANNEL_ID", os.getenv("EEW_CHAN
 ADMIN_CHANNEL_ID   = int(os.getenv("ADMIN_CHANNEL_ID",   "0"))
 VOLCANO_CHANNEL_ID   = int(os.getenv("VOLCANO_CHANNEL_ID",   os.getenv("CHANNEL_ID", "0")))
 
+# USGS 地震情報設定（_env_bool定義後）
+USGS_ENABLED        = _env_bool("USGS_ENABLED", True)
+USGS_CHANNEL_ID     = int(os.getenv("USGS_CHANNEL_ID", os.getenv("QUAKE_CHANNEL_ID", os.getenv("CHANNEL_ID", "0"))))
+USGS_MAGNITUDE_MIN  = float(os.getenv("USGS_MAGNITUDE_MIN", "5.0"))
+USGS_FETCH_INTERVAL = int(os.getenv("USGS_FETCH_INTERVAL", "600"))  # 10分
+USGS_REGION_LAT_MIN = float(os.getenv("USGS_REGION_LAT_MIN", "20"))
+USGS_REGION_LAT_MAX = float(os.getenv("USGS_REGION_LAT_MAX", "50"))
+USGS_REGION_LON_MIN = float(os.getenv("USGS_REGION_LON_MIN", "120"))
+USGS_REGION_LON_MAX = float(os.getenv("USGS_REGION_LON_MAX", "180"))
+USGS_NOTIFICATION_COOLDOWN = int(os.getenv("USGS_NOTIFICATION_COOLDOWN", "300"))  # 5分
+
+# ===== リソース監視設定 =====
+RESOURCE_MONITORING_ENABLED = _env_bool("RESOURCE_MONITORING_ENABLED", True)
+RESOURCE_CHECK_INTERVAL = _env_int("RESOURCE_CHECK_INTERVAL", 3600)  # 1時間
+DISK_WARNING_THRESHOLD = _env_int("DISK_WARNING_THRESHOLD", 80)  # 80%
+DISK_ERROR_THRESHOLD = _env_int("DISK_ERROR_THRESHOLD", 90)  # 90%
+
+# ===== ヘルスチェック設定 =====
+HEALTH_CHECK_TIMEOUT = 5  # API ping のタイムアウト（秒）
+HEALTH_CHECK_CACHE_TTL = 30  # ヘルスチェック結果キャッシュ時間（秒）
+ERROR_NOTIFICATION_TTL = 3600  # エラー通知の重複防止時間（秒）
+
 # ===============================
 # フィルター設定（情報種別ごと）
 # ===============================
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(os.getenv(key, str(default)))
-    except ValueError:
-        return default
-
-def _env_bool(key: str, default: bool) -> bool:
-    v = os.getenv(key, "")
-    if not v:
-        return default
-    return v.strip().lower() in ("1", "true", "yes")
 
 # EEW フィルター（Wolfx）
 EEW_MIN_INTENSITY   = _env_int("EEW_MIN_INTENSITY",   0)   # 0=全て通知（INT_MAP の数値キー）
@@ -2344,7 +2352,7 @@ class QuakeTsunamiCog(commands.Cog):
             # 遠地地震
             speak_text = (
                 f"{title}。"
-                f"{time_str}海外で規模の大きな地震がありました。"
+                f"{time_str}遠地地震がありました。"
                 f" 震源地は {name}。"
                 f" マグニチュードは {mag_str}。{tsunami_speak}"
             )
@@ -2428,11 +2436,11 @@ class QuakeTsunamiCog(commands.Cog):
                 # 警報レベル別の注意喚起文
                 alert_msg = ""
                 if max_grade == "MajorWarning":
-                    alert_msg = "**東日本大震災を思い出して！**\n"
+                    alert_msg = "\n🚨 **東日本大震災を思い出して！** 🚨\n"
                 elif max_grade == "Warning":
-                    alert_msg = "**すぐ逃げて！**\n"
+                    alert_msg = "\n⚠️ **すぐ逃げて！** ⚠️\n"
                 elif "Watch" in str(area_groups.keys()):
-                    alert_msg = "**海岸から離れて！**\n"
+                    alert_msg = "\n⚠️ **海岸から離れて！** ⚠️\n"
                 
                 for grade in sorted(area_groups.keys(), key=lambda g: ["MajorWarning","Warning","Watch","Unknown"].index(g)):
                     items = area_groups[grade]
@@ -2653,6 +2661,7 @@ class QuakeTsunamiCog(commands.Cog):
         except Exception as e:
             logger.error(f"notify_tsunami_observation エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
+
 
     async def notify_long_period(self, list_item, is_test=False, extra_note=None):
         if not ENABLE_LONG_PERIOD and not is_test:
@@ -3559,21 +3568,10 @@ async def main():
             raise
 
 
-# ===== ロギング設定 =====
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", "10485760"))  # 10 MB
-LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-# ===== リソース監視設定 =====
-RESOURCE_MONITORING_ENABLED = os.getenv("RESOURCE_MONITORING_ENABLED", "true").lower() == "true"
-RESOURCE_CHECK_INTERVAL = int(os.getenv("RESOURCE_CHECK_INTERVAL", "3600"))  # 1時間
-DISK_WARNING_THRESHOLD = int(os.getenv("DISK_WARNING_THRESHOLD", "80"))  # 80%
-DISK_ERROR_THRESHOLD = int(os.getenv("DISK_ERROR_THRESHOLD", "90"))  # 90%
-
-
 # ===== ロギング設定関数 =====
 def setup_logging():
     """ロギングハンドラーをセットアップ（ローテーション対応）"""
+    from logging.handlers import RotatingFileHandler
     global logger
     
     # ロギングレベルを設定
