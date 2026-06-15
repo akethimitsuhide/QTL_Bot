@@ -387,7 +387,8 @@ class QuakeTsunamiCog(commands.Cog):
         self.recent_eews_max_size = 50
 
         # 火山情報ポーリング管理
-        self._last_volcano_event_id = None  # eventId監視（差分検知）
+        self._last_volcano_event_id = None        # 最後に通知した eventId（status 表示用）
+        self._last_volcano_info_map: dict = {}    # 前回の info.json を {eventId: item} で保持（差分検知用）
         self.volcano_task = None
         self._last_volcano_recv_time: datetime | None = None  # 最後の火山情報受信時刻
         self._volcano_recv_count: int = 0  # 火山情報受信回数
@@ -765,88 +766,117 @@ class QuakeTsunamiCog(commands.Cog):
 
     @tasks.loop(seconds=USGS_FETCH_INTERVAL)
     async def fetch_usgs_quake(self):
-        """USGS GeoJSON から地震情報を取得し、フィルタリング後に通知"""
+        """USGS GeoJSON から地震情報を取得し、フィルタリング後に通知
+
+        - エンドポイント: all_day（過去24時間）を使用
+          all_hour（過去1時間）はポーリング間隔10分と相性が悪く、
+          cooldown が切れた既存IDを再通知してしまう。
+        - 新規判定: last_usgs_ids に存在しない event_id のみ通知
+        - cooldown: 通知済み ID を USGS_NOTIFICATION_COOLDOWN 秒保持し、
+          時刻切れエントリは都度削除してメモリリークを防止
+        """
         if not USGS_ENABLED:
             return
-        
+
+        # 使用エンドポイント: significant_week より all_day が網羅性高い
+        # M5.0+ に絞るなら significant_week でも可だが、地域フィルターと組み合わせるため all_day を使用
+        url = (
+            "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+        )
+
         try:
             async with self.session.get(
-                "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
-                timeout=aiohttp.ClientTimeout(total=20, connect=10, sock_read=10)
+                url,
+                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
+                headers={"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"},
             ) as resp:
                 if resp.status != 200:
                     logger.warning(f"USGS fetch failed: HTTP {resp.status}")
+                    self._record_fetch_failure("usgs", f"HTTP {resp.status}")
                     return
-                
-                data = await resp.json()
+
+                data = await resp.json(content_type=None)
                 features = data.get("features", [])
-                
+
                 if not features:
-                    logger.debug("USGS: no earthquakes in the past hour")
+                    logger.debug("USGS: no earthquakes in the past 24 hours")
                     return
-                
+
                 self._last_recv["usgs"] = datetime.now()
-                
-                # Cooldown チェック：古いエントリを削除
+                self._reset_fetch_backoff("usgs")
+
                 now = time.time()
+
+                # cooldown 切れエントリを削除（メモリリーク防止）
                 self.last_usgs_ids = {
                     eid: ts for eid, ts in self.last_usgs_ids.items()
                     if now - ts < USGS_NOTIFICATION_COOLDOWN
                 }
-                
-                # 各地震をフィルタリング＆通知
+
+                notified = 0
                 for feature in features:
                     try:
                         props = feature.get("properties", {})
-                        geom = feature.get("geometry", {})
+                        geom  = feature.get("geometry", {})
                         coords = geom.get("coordinates", [None, None, None])
-                        
+
                         event_id = feature.get("id", "")
-                        mag = props.get("mag")
+                        if not event_id:
+                            continue
+
+                        mag  = props.get("mag")
                         place = props.get("place", "Unknown")
-                        time_ms = props.get("time")
-                        
-                        # フィルター 1: Magnitude
+
+                        # フィルター①: マグニチュード下限
                         if mag is None or mag < USGS_MAGNITUDE_MIN:
                             continue
-                        
-                        # フィルター 2: 地域（緯度・経度）
-                        lon, lat = coords[0], coords[1]
+
+                        # フィルター②: 地域（緯度・経度）
+                        lon = coords[0] if len(coords) > 0 else None
+                        lat = coords[1] if len(coords) > 1 else None
                         if lat is None or lon is None:
                             continue
-                        
+
                         if not (USGS_REGION_LAT_MIN <= lat <= USGS_REGION_LAT_MAX and
                                 USGS_REGION_LON_MIN <= lon <= USGS_REGION_LON_MAX):
-                            logger.debug(
-                                f"USGS {event_id}: 地域外（lat={lat}, lon={lon}）"
-                            )
+                            logger.debug(f"USGS skip: 地域外 {event_id} lat={lat:.1f} lon={lon:.1f}")
                             continue
-                        
-                        # フィルター 3: 重複通知防止（Cooldown）
+
+                        # フィルター③: 重複通知防止（cooldown 内は通知しない）
                         if event_id in self.last_usgs_ids:
                             logger.debug(
-                                f"USGS {event_id}: cooldown 中（{now - self.last_usgs_ids[event_id]:.0f}秒）"
+                                f"USGS skip: cooldown {event_id} "
+                                f"({now - self.last_usgs_ids[event_id]:.0f}s ago)"
                             )
                             continue
-                        
-                        # 通知フラグを立てる
+
+                        # 通知済みとして登録
                         self.last_usgs_ids[event_id] = now
-                        self._recv_count["usgs"] += 1
-                        
-                        # 通知実行
-                        logger.info(
-                            f"USGS地震検知: {event_id} / M{mag} / {place}"
-                        )
+                        self._recv_count["usgs"] = self._recv_count.get("usgs", 0) + 1
+
+                        logger.info(f"USGS地震検知: {event_id} M{mag} {place}")
                         await self.notify_usgs_quake(feature)
-                    
+                        notified += 1
+
+                        # 過剰通知防止: 1回のポーリングで最大3件まで
+                        if notified >= 3:
+                            logger.info("USGS: 1ポーリングあたりの上限(3件)に達しました")
+                            break
+
                     except Exception as e:
-                        logger.error(f"USGS feature processing error: {e}", exc_info=True)
+                        logger.error(f"USGS feature処理エラー: {e}", exc_info=True)
                         continue
-        
+
+                logger.debug(f"USGS: {len(features)}件中 {notified}件通知")
+
         except asyncio.TimeoutError:
             logger.warning("USGS fetch timeout")
+            self._record_fetch_failure("usgs", "timeout")
+        except aiohttp.ClientError as e:
+            logger.warning(f"USGS fetch network error: {e}")
+            self._record_fetch_failure("usgs", f"ClientError: {e}")
         except Exception as e:
-            logger.error(f"Fetch USGS error: {e}", exc_info=True)
+            logger.error(f"USGS fetch error: {e}", exc_info=True)
 
     @fetch_usgs_quake.before_loop
     async def before_fetch_usgs_quake(self):
@@ -854,58 +884,58 @@ class QuakeTsunamiCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _fetch_and_notify_latest_usgs(self):
-        """起動時に最新のUSGS地震情報を取得・通知する"""
+        """起動時に最新のUSGS地震情報を取得・通知する（all_day から最新1件）"""
         try:
-            await asyncio.sleep(2)  # ポーリングタスク起動まで少し待機
-            
+            await asyncio.sleep(3)  # ポーリングタスク起動まで少し待機
+
             async with self.session.get(
-                "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
-                timeout=aiohttp.ClientTimeout(total=20, connect=10, sock_read=10)
+                "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson",
+                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
+                headers={"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"},
             ) as resp:
                 if resp.status != 200:
                     logger.debug(f"USGS startup fetch failed: HTTP {resp.status}")
                     return
-                
-                data = await resp.json()
+
+                data = await resp.json(content_type=None)
                 features = data.get("features", [])
-                
+
                 if not features:
                     logger.debug("USGS: no earthquakes at startup")
                     return
-                
-                # 最新 1件を通知
-                feature = features[0]
-                props = feature.get("properties", {})
-                mag = props.get("mag")
-                
-                # フィルター: マグニチュード
-                if mag is None or mag < USGS_MAGNITUDE_MIN:
-                    return
-                
-                # フィルター: 地域
-                geom = feature.get("geometry", {})
-                coords = geom.get("coordinates", [None, None])
-                lon, lat = coords[0], coords[1]
-                
-                if not (USGS_REGION_LAT_MIN <= lat <= USGS_REGION_LAT_MAX and
-                        USGS_REGION_LON_MIN <= lon <= USGS_REGION_LON_MAX):
-                    return
-                
-                event_id = feature.get("id", "")
-                
-                # Cooldown に登録（重複通知防止）
+
                 now = time.time()
-                self.last_usgs_ids[event_id] = now
-                self._recv_count["usgs"] += 1
-                self._last_recv["usgs"] = datetime.now()
-                
-                # 通知実行
-                logger.info(f"USGS起動時最新情報: {event_id} / M{mag}")
-                await self.notify_usgs_quake(
-                    feature,
-                    extra_note="（ボット起動時の最新情報）"
-                )
-        
+
+                # フィルター通過した最新1件を通知
+                for feature in features:
+                    props  = feature.get("properties", {})
+                    geom   = feature.get("geometry", {})
+                    coords = geom.get("coordinates", [None, None, None])
+                    mag      = props.get("mag")
+                    event_id = feature.get("id", "")
+                    lon = coords[0] if len(coords) > 0 else None
+                    lat = coords[1] if len(coords) > 1 else None
+
+                    if mag is None or mag < USGS_MAGNITUDE_MIN:
+                        continue
+                    if lat is None or lon is None:
+                        continue
+                    if not (USGS_REGION_LAT_MIN <= lat <= USGS_REGION_LAT_MAX and
+                            USGS_REGION_LON_MIN <= lon <= USGS_REGION_LON_MAX):
+                        continue
+
+                    # Cooldown に登録して通知（以後ポーリングで重複しない）
+                    self.last_usgs_ids[event_id] = now
+                    self._recv_count["usgs"] = self._recv_count.get("usgs", 0) + 1
+                    self._last_recv["usgs"] = datetime.now()
+
+                    logger.info(f"USGS起動時最新情報: {event_id} M{mag}")
+                    await self.notify_usgs_quake(
+                        feature,
+                        extra_note="（ボット起動時の最新情報）"
+                    )
+                    break  # 最新1件のみ
+
         except asyncio.TimeoutError:
             logger.debug("USGS startup fetch timeout")
         except Exception as e:
@@ -3200,172 +3230,197 @@ class QuakeTsunamiCog(commands.Cog):
 # ===============================
 
     async def fetch_volcano_info(self):
-        """JMA 火山情報を取得（1分ごと、jsonフィールドで差分検知 + 警戟レベル変化検知）"""
+        """
+        JMA 火山情報を取得・通知する。
+
+        【処理手順】
+        ① info.json をフェッチし、全オブジェクトの eventId を取得
+        ② 前回取得と比較して変更・追加されたオブジェクトの eventId を抽出
+        ③ 各 eventId で info/{eventId}.json をフェッチして Discord に通知
+        ④ 次回ループのために現在の info.json を保存
+
+        差分検知キー: _last_volcano_info_list（前回の info.json 全体を dict で保持）
+        """
+        HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
+
         try:
-            # Step①: info.json から火山情報リストを取得
+            # Step①: info.json をフェッチ
             async with self.session.get(
                 "https://www.jma.go.jp/bosai/volcano/data/info.json",
-                timeout=aiohttp.ClientTimeout(total=35, connect=10, sock_read=25)
+                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
+                headers=HEADERS,
             ) as resp:
                 if resp.status != 200:
-                    logger.debug(f"Volcano list fetch failed: {resp.status}")
+                    logger.debug(f"Volcano list fetch failed: HTTP {resp.status}")
                     return
-                
-                info_list = await resp.json()
+
+                info_list: list[dict] = await resp.json(content_type=None)
                 if not info_list:
-                    return
-                
-                # Step②: 先頭（最新）の火山情報のファイル名を取得
-                # JMA 火山APIは地震・津波・長周期地震動と同様に
-                # "json" フィールドにファイルパスが格納されている
-                latest_event = info_list[0]
-                json_filename = latest_event.get("json")
-                if not json_filename:
-                    json_filename = latest_event.get("fileName") or latest_event.get("file")
-                if not json_filename:
-                    logger.debug(f"Volcano: json field not found in list item. keys={list(latest_event.keys())}")
+                    logger.debug("Volcano: info.json is empty")
                     return
 
-                # 識別子として json フィールド値を使用（他JMA APIと同じパターン）
-                current_event_id = json_filename
-
-                # Step③: 前回と同一ファイルなら変化なし
-                if current_event_id == self._last_volcano_event_id:
-                    logger.debug(f"Volcano: no change (json={current_event_id})")
-                    return
-                
-                logger.info(f"Volcano: new event detected ({self._last_volcano_event_id} → {current_event_id})")
-                
-                # Step④: 詳細情報を取得
-                try:
-                    detail_url = f"https://www.jma.go.jp/bosai/volcano/data/{json_filename}"
-                    async with self.session.get(
-                        detail_url,
-                        timeout=aiohttp.ClientTimeout(total=35, connect=10, sock_read=25)
-                    ) as detail_resp:
-                        if detail_resp.status != 200:
-                            logger.debug(f"Volcano detail fetch failed: {detail_resp.status}")
-                            return
-                        
-                        detail = await detail_resp.json()
-                        
-                        # データ抽出
-                        control_title = detail.get("controlTitle", "火山情報")
-                        info_type = detail.get("infoType", "発表")
-                        publish_office = detail.get("publishingOffice", "気象庁")
-                        report_datetime = detail.get("reportDatetime", "")
-                        volcano_name = detail.get("volcanoName", "不明")
-                        volcano_headline = detail.get("volcanoHeadline", "")
-                        volcanoActivity = detail.get("volcanoActivity", "")
-                        volcanoPrevention = detail.get("volcanoPrevention", "")
-                        nextAdvisory = detail.get("nextAdvisory", "")
-
-                        # 警戒レベルを抽出
-                        alert_code = "00"
-                        if detail.get("volcanoInfos"):
-                            items = detail["volcanoInfos"][0].get("items", [])
-                            if items:
-                                alert_code = items[0].get("code", "00")
-                        
-                        # 色分け（気象庁準拠 L1-L5）
-                        color_map = {
-                            "01": discord.Color.from_rgb(153, 50, 204),    # 紫
-                            "02": discord.Color.red(),                     # 赤
-                            "03": discord.Color.orange(),                  # 橙
-                            "04": discord.Color.gold(),                    # 黄
-                            "05": discord.Color.blue(),                    # 青
-                        }
-                        embed_color = color_map.get(alert_code, discord.Color.greyple())
-                        
-                        # Step⑤: Discord に通知
-                        embed = discord.Embed(
-                            title=f"{control_title}（{info_type}）",
-                            description=volcano_headline.split("\n")[0] if volcano_headline else "火山情報を発表しました",
-                            color=embed_color
-                        )
-                        embed.add_field(name="発表機関", value=publish_office, inline=False)
-                        
-                        # 時刻フォーマット（「2026年6月5日16時00分頃」形式）
-                        if report_datetime:
-                            try:
-                                import datetime
-                                dt = datetime.datetime.fromisoformat(report_datetime.replace("+09:00", ""))
-                                formatted_time = f"{dt.year}年{dt.month}月{dt.day}日{dt.hour}時{dt.minute:02d}分頃"
-                                embed.add_field(name="発表時刻", value=formatted_time, inline=False)
-                            except:
-                                embed.add_field(name="発表時刻", value=report_datetime, inline=False)
-                        
-                        embed.add_field(name="火山名", value=volcano_name, inline=False)
-                        
-                        # 活動状況を追加（1024文字制限に対応）
-                        activity_text = volcanoActivity.strip() if volcanoActivity else "情報なし"
-                        if len(activity_text) > 1024:
-                            activity_text = activity_text[:1020] + "..."
-                        embed.add_field(name="活動状況", value=activity_text, inline=False)
-                        
-                        # 予防措置を追加（1024文字制限に対応）
-                        if volcanoPrevention:
-                            prevention_text = volcanoPrevention.strip()
-                            if len(prevention_text) > 1024:
-                                prevention_text = prevention_text[:1020] + "..."
-                            embed.add_field(name="予防措置", value=prevention_text, inline=False)
-                        
-                        # 次回発表予定を追加
-                        if nextAdvisory:
-                            next_text = nextAdvisory.strip()
-                            if len(next_text) > 1024:
-                                next_text = next_text[:1020] + "..."
-                            embed.add_field(name="次回発表予定", value=next_text, inline=False)
-                        
-                        embed.set_footer(text="気象庁")
-                        
-                        # 通知チャンネルに送信（専用チャンネル > デフォルト）
-                        notification_sent = False
-                        target_channel = self.volcano_channel if self.volcano_channel else None
-                        
-                        # 専用チャンネルがない場合は「火山」という名前のチャンネルを探す
-                        if not target_channel:
-                            for channel in self.bot.get_all_channels():
-                                if isinstance(channel, discord.TextChannel) and "火山" in channel.name.lower():
-                                    target_channel = channel
-                                    break
-                        
-                        if target_channel:
-                            try:
-                                await target_channel.send(embed=embed)
-                                notification_sent = True
-                                logger.info(f"Volcano notification sent: {volcano_name}")
-                            except Exception as e:
-                                logger.error(f"Failed to send volcano notification: {e}")
-                        else:
-                            logger.warning(f"Volcano: notification channel not found")
-                        
-                        # Step⑥: 読み上げキューに追加
-                        if notification_sent and alert_code in ["01", "02", "03"]:
-                            level_text = {"01": "1", "02": "2", "03": "3"}.get(alert_code, "")
-                            speech_text = f"火山情報。{volcano_name}。警戒レベル{level_text}。"
-                            priority = 1 if alert_code in ["01", "02", "03"] else 2
-                            await self.add_speech_queue(speech_text, priority)
-                            logger.info(f"Volcano speech queued: {volcano_name}")
-                        
-                        # Step⑦: eventIdを更新（詳細取得成功後、通知の成否に関わらず）
-                        self._last_volcano_event_id = current_event_id
-                        
-                        # 受信統計を更新
-                        self._last_recv["volcano"] = datetime.now()
-                        self._recv_count["volcano"] = self._recv_count.get("volcano", 0) + 1
-                        self._last_volcano_recv_time = datetime.now()
-                        self._volcano_recv_count += 1
-                        
-                        logger.info(f"Volcano eventId updated to {current_event_id} (notification_sent={notification_sent}, count={self._volcano_recv_count})")
-                
-                except Exception as e:
-                    logger.error(f"Volcano detail processing error: {e}")
-                    
         except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-            logger.debug(f"Volcano fetch error: {type(e).__name__}")
+            logger.debug(f"Volcano info.json fetch error: {type(e).__name__}")
+            return
         except Exception as e:
-            logger.error(f"Volcano fetch error: {e}")
+            logger.error(f"Volcano info.json fetch unexpected error: {e}")
+            return
+
+        # Step②: 前回リストと比較して変更・追加された eventId を抽出
+        # 初回は先頭1件のみ通知し、2回目以降は差分をすべて通知
+        prev: dict[str, dict] = getattr(self, "_last_volcano_info_map", {})
+        curr: dict[str, dict] = {item["eventId"]: item for item in info_list if item.get("eventId")}
+
+        if not prev:
+            # 初回: 先頭1件だけ通知（大量通知を防ぐ）
+            first_item = info_list[0]
+            event_id = first_item.get("eventId")
+            if event_id:
+                target_ids = [event_id]
+                logger.info(f"Volcano: 初回起動 先頭1件を通知 eventId={event_id}")
+            else:
+                logger.debug("Volcano: 初回起動 eventId なし")
+                self._last_volcano_info_map = curr
+                return
+        else:
+            # 2回目以降: 前回にない eventId = 新規 or 更新として通知
+            target_ids = [
+                eid for eid in curr
+                if eid not in prev
+            ]
+            if not target_ids:
+                logger.debug("Volcano: no change")
+                self._last_volcano_info_map = curr
+                return
+            logger.info(f"Volcano: {len(target_ids)}件の新規/更新を検知 {target_ids}")
+
+        # Step③: 各 eventId で詳細を取得して通知
+        for event_id in target_ids:
+            try:
+                detail_url = f"https://www.jma.go.jp/bosai/volcano/data/info/{event_id}.json"
+                async with self.session.get(
+                    detail_url,
+                    timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
+                    headers=HEADERS,
+                ) as detail_resp:
+                    if detail_resp.status != 200:
+                        logger.warning(f"Volcano detail fetch failed: HTTP {detail_resp.status} eventId={event_id}")
+                        continue
+
+                    detail: dict = await detail_resp.json(content_type=None)
+
+                await self._notify_volcano(detail, event_id)
+
+                # 受信統計を更新
+                self._last_recv["volcano"] = datetime.now()
+                self._recv_count["volcano"] = self._recv_count.get("volcano", 0) + 1
+                self._last_volcano_recv_time = datetime.now()
+                self._volcano_recv_count += 1
+                self._last_volcano_event_id = event_id  # status 表示用（最後に処理した ID）
+
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                logger.warning(f"Volcano detail fetch error: {type(e).__name__} eventId={event_id}")
+            except Exception as e:
+                logger.error(f"Volcano detail error: {e} eventId={event_id}", exc_info=True)
+
+            # JMAサーバーへの負荷軽減: 複数件ある場合は間隔を空ける
+            if len(target_ids) > 1:
+                await asyncio.sleep(2)
+
+        # Step④: 次回ループのために現在のリストを保存
+        self._last_volcano_info_map = curr
+
+    async def _notify_volcano(self, detail: dict, event_id: str) -> None:
+        """
+        火山情報 detail JSON から Discord Embed を作成して送信する。
+
+        使用フィールド:
+          headTitle       : Embed タイトル
+          reportDatetime  : 発表日時（JST ISO 形式）
+          volcanoHeadline : 概要
+          volcanoActivity : 詳細
+          volcanoPrevention: 防災上の注意
+        """
+        channel = self.volcano_channel or self.channel
+        if not channel:
+            logger.warning("Volcano: 通知チャンネルが見つかりません")
+            return
+
+        try:
+            head_title        = detail.get("headTitle", "火山情報")
+            report_datetime   = detail.get("reportDatetime", "")
+            volcano_headline  = (detail.get("volcanoHeadline") or "").strip()
+            volcano_activity  = (detail.get("volcanoActivity") or "").strip()
+            volcano_prevention = (detail.get("volcanoPrevention") or "").strip()
+
+            # 発表日時フォーマット
+            formatted_time = report_datetime  # フォールバック: そのまま
+            if report_datetime:
+                try:
+                    # ISO 形式 "2026-06-15T12:00:00+09:00" → "2026年6月15日12時00分"
+                    dt = datetime.fromisoformat(report_datetime)
+                    formatted_time = (
+                        f"{dt.year}年{dt.month}月{dt.day}日"
+                        f"{dt.hour}時{dt.minute:02d}分"
+                    )
+                except Exception:
+                    pass
+
+            # 警戒レベルを抽出して色を決定
+            alert_code = "00"
+            volcano_infos = detail.get("volcanoInfos") or []
+            if volcano_infos:
+                items = volcano_infos[0].get("items") or []
+                if items:
+                    alert_code = items[0].get("code", "00")
+
+            COLOR_MAP = {
+                "01": 0x9932CC,  # 紫  L1
+                "02": 0xFF0000,  # 赤  L2
+                "03": 0xFF6600,  # 橙  L3
+                "04": 0xFFD700,  # 黄  L4
+                "05": 0x0000FF,  # 青  L5
+            }
+            embed_color = COLOR_MAP.get(alert_code, 0x808080)
+
+            # Embed 組み立て
+            embed = discord.Embed(
+                title=head_title or "火山情報",
+                description=volcano_headline or "火山情報が発表されました。",
+                color=embed_color,
+                timestamp=datetime.now(),
+            )
+
+            # 発表日時
+            if formatted_time:
+                embed.add_field(name="発表日時", value=formatted_time, inline=True)
+
+            # 詳細（volcanoActivity）
+            if volcano_activity:
+                # Discord フィールド上限 1024文字
+                if len(volcano_activity) > 1020:
+                    volcano_activity = volcano_activity[:1020] + "…"
+                embed.add_field(name="詳細", value=volcano_activity, inline=False)
+
+            # 防災上の注意（volcanoPrevention）
+            if volcano_prevention:
+                if len(volcano_prevention) > 1020:
+                    volcano_prevention = volcano_prevention[:1020] + "…"
+                embed.add_field(name="防災上の注意", value=volcano_prevention, inline=False)
+
+            embed.set_footer(text=f"気象庁 | eventId: {event_id}")
+
+            await channel.send(embed=embed)
+            logger.info(f"Volcano 通知完了: {head_title} eventId={event_id}")
+
+            # 読み上げ（警戒レベル L1〜L3 のみ）
+            if alert_code in ("01", "02", "03"):
+                level = {"01": "1", "02": "2", "03": "3"}[alert_code]
+                speak_text = f"火山情報。{head_title}。警戒レベル{level}。"
+                await self.speak_local(speak_text, priority=1)
+
+        except Exception as e:
+            logger.error(f"_notify_volcano エラー: {e}", exc_info=True)
 
     # ===============================
     # !status / /qtl_status コマンド
