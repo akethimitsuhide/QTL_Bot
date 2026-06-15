@@ -50,9 +50,13 @@ logger = logging.getLogger("QTLBot")
 load_dotenv()
 
 # ===== ロギング設定定数（load_dotenv 直後） =====
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", "10485760"))  # 10 MB
-LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_MAX_BYTES       = int(os.getenv("LOG_MAX_BYTES", "10485760"))   # 10 MB
+LOG_BACKUP_COUNT    = int(os.getenv("LOG_BACKUP_COUNT", "7"))        # 7 ファイル保持
+LOG_LEVEL           = os.getenv("LOG_LEVEL", "INFO")                 # 後方互換
+LOG_LEVEL_FILE      = os.getenv("LOG_LEVEL_FILE", LOG_LEVEL)         # ファイルログレベル
+LOG_LEVEL_CONSOLE   = os.getenv("LOG_LEVEL_CONSOLE", LOG_LEVEL)      # コンソールログレベル
+LOG_DUPLICATE_THRESHOLD = int(os.getenv("LOG_DUPLICATE_THRESHOLD", "60"))  # 重複抑制秒数
+LOG_SUPPRESS_HTTP_SUCCESS = os.getenv("LOG_SUPPRESS_HTTP_SUCCESS", "true").lower() == "true"
 
 def _require_env(key: str) -> str:
     value = os.getenv(key)
@@ -315,10 +319,16 @@ class QuakeTsunamiCog(commands.Cog):
             "tsunami_obs":    None,
             "quake_advisory": None,
             "volcano":        None,  # 火山情報
+            "usgs":           None,  # USGS 地震情報
         }
         self._recv_count: dict[str, int] = {k: 0 for k in self._last_recv}
         self._bot_start_time: datetime = datetime.now()
         self._start_time: float = time.time()  # ← 追加: Web Dashboard uptime用
+
+        # USGS 地震情報管理
+        self.last_usgs_ids: dict[str, float] = {}  # USGS Event ID → 通知時刻（cooldown 用）
+        self._usgs_last_fetch_time: datetime | None = None
+        self.usgs_channel = None
 
         # Wolfx フォールバック管理
         self._wolfx_last_recv: datetime | None = None
@@ -438,6 +448,7 @@ class QuakeTsunamiCog(commands.Cog):
             self.fetch_long_period,
             self.fetch_tsunami_observation,
             self.fetch_quake_advisory,
+            self.fetch_usgs_quake,
         ):
             if loop_task.is_running():
                 loop_task.cancel()
@@ -486,6 +497,9 @@ class QuakeTsunamiCog(commands.Cog):
         self.kyoshin_channel   = self.bot.get_channel(KYOSHIN_CHANNEL_ID)   or self.other_channel
         self.lmoni_eew_channel = self.bot.get_channel(LMONI_EEW_CHANNEL_ID) or self.eew_channel
         self.volcano_channel   = self.bot.get_channel(VOLCANO_CHANNEL_ID) or self.channel  # 火山情報チャンネル
+        
+        # USGS 地震情報チャンネル
+        self.usgs_channel = self.bot.get_channel(USGS_CHANNEL_ID) or self.quake_channel
 
         if not self.fetch_quake.is_running():
             self.fetch_quake.start()
@@ -536,6 +550,26 @@ class QuakeTsunamiCog(commands.Cog):
 
             self.volcano_task = self.bot.loop.create_task(volcano_poller())
             logger.info("Volcano polling started (every 1 minute)")
+
+        # USGS 地震情報ポーリング開始
+        if USGS_ENABLED:
+            if not self.fetch_usgs_quake.is_running():
+                self.fetch_usgs_quake.start()
+                logger.info(f"✓ USGS地震情報ポーリングタスクを開始しました（間隔: {USGS_FETCH_INTERVAL}秒）")
+                
+                # 起動時最新情報を取得・通知
+                self.bot.loop.create_task(self._fetch_and_notify_latest_usgs())
+            else:
+                logger.info("⚠️ USGS地震情報ポーリングタスクは既に実行中です")
+        else:
+            logger.info("⚠️ USGS地震情報機能: 無効（USGS_ENABLED=false）")
+
+        # スラッシュコマンドを同期
+        try:
+            synced = await self.bot.tree.sync()
+            logger.info(f"✓ スラッシュコマンドを同期しました（{len(synced)}件）")
+        except Exception as e:
+            logger.warning(f"⚠️ スラッシュコマンド同期失敗: {e}")
 
         logger.info(f"✅ ログイン完了: {self.bot.user}")
 
@@ -724,6 +758,158 @@ class QuakeTsunamiCog(commands.Cog):
     async def before_fetch_quake_advisory(self):
         """セッション初期化完了まで待機"""
         await self.bot.wait_until_ready()
+
+    # ===============================
+    # USGS 地震情報 ポーリング
+    # ===============================
+
+    @tasks.loop(seconds=USGS_FETCH_INTERVAL)
+    async def fetch_usgs_quake(self):
+        """USGS GeoJSON から地震情報を取得し、フィルタリング後に通知"""
+        if not USGS_ENABLED:
+            return
+        
+        try:
+            async with self.session.get(
+                "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
+                timeout=aiohttp.ClientTimeout(total=20, connect=10, sock_read=10)
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"USGS fetch failed: HTTP {resp.status}")
+                    return
+                
+                data = await resp.json()
+                features = data.get("features", [])
+                
+                if not features:
+                    logger.debug("USGS: no earthquakes in the past hour")
+                    return
+                
+                self._last_recv["usgs"] = datetime.now()
+                
+                # Cooldown チェック：古いエントリを削除
+                now = time.time()
+                self.last_usgs_ids = {
+                    eid: ts for eid, ts in self.last_usgs_ids.items()
+                    if now - ts < USGS_NOTIFICATION_COOLDOWN
+                }
+                
+                # 各地震をフィルタリング＆通知
+                for feature in features:
+                    try:
+                        props = feature.get("properties", {})
+                        geom = feature.get("geometry", {})
+                        coords = geom.get("coordinates", [None, None, None])
+                        
+                        event_id = feature.get("id", "")
+                        mag = props.get("mag")
+                        place = props.get("place", "Unknown")
+                        time_ms = props.get("time")
+                        
+                        # フィルター 1: Magnitude
+                        if mag is None or mag < USGS_MAGNITUDE_MIN:
+                            continue
+                        
+                        # フィルター 2: 地域（緯度・経度）
+                        lon, lat = coords[0], coords[1]
+                        if lat is None or lon is None:
+                            continue
+                        
+                        if not (USGS_REGION_LAT_MIN <= lat <= USGS_REGION_LAT_MAX and
+                                USGS_REGION_LON_MIN <= lon <= USGS_REGION_LON_MAX):
+                            logger.debug(
+                                f"USGS {event_id}: 地域外（lat={lat}, lon={lon}）"
+                            )
+                            continue
+                        
+                        # フィルター 3: 重複通知防止（Cooldown）
+                        if event_id in self.last_usgs_ids:
+                            logger.debug(
+                                f"USGS {event_id}: cooldown 中（{now - self.last_usgs_ids[event_id]:.0f}秒）"
+                            )
+                            continue
+                        
+                        # 通知フラグを立てる
+                        self.last_usgs_ids[event_id] = now
+                        self._recv_count["usgs"] += 1
+                        
+                        # 通知実行
+                        logger.info(
+                            f"USGS地震検知: {event_id} / M{mag} / {place}"
+                        )
+                        await self.notify_usgs_quake(feature)
+                    
+                    except Exception as e:
+                        logger.error(f"USGS feature processing error: {e}", exc_info=True)
+                        continue
+        
+        except asyncio.TimeoutError:
+            logger.warning("USGS fetch timeout")
+        except Exception as e:
+            logger.error(f"Fetch USGS error: {e}", exc_info=True)
+
+    @fetch_usgs_quake.before_loop
+    async def before_fetch_usgs_quake(self):
+        """セッション初期化完了まで待機"""
+        await self.bot.wait_until_ready()
+
+    async def _fetch_and_notify_latest_usgs(self):
+        """起動時に最新のUSGS地震情報を取得・通知する"""
+        try:
+            await asyncio.sleep(2)  # ポーリングタスク起動まで少し待機
+            
+            async with self.session.get(
+                "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
+                timeout=aiohttp.ClientTimeout(total=20, connect=10, sock_read=10)
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(f"USGS startup fetch failed: HTTP {resp.status}")
+                    return
+                
+                data = await resp.json()
+                features = data.get("features", [])
+                
+                if not features:
+                    logger.debug("USGS: no earthquakes at startup")
+                    return
+                
+                # 最新 1件を通知
+                feature = features[0]
+                props = feature.get("properties", {})
+                mag = props.get("mag")
+                
+                # フィルター: マグニチュード
+                if mag is None or mag < USGS_MAGNITUDE_MIN:
+                    return
+                
+                # フィルター: 地域
+                geom = feature.get("geometry", {})
+                coords = geom.get("coordinates", [None, None])
+                lon, lat = coords[0], coords[1]
+                
+                if not (USGS_REGION_LAT_MIN <= lat <= USGS_REGION_LAT_MAX and
+                        USGS_REGION_LON_MIN <= lon <= USGS_REGION_LON_MAX):
+                    return
+                
+                event_id = feature.get("id", "")
+                
+                # Cooldown に登録（重複通知防止）
+                now = time.time()
+                self.last_usgs_ids[event_id] = now
+                self._recv_count["usgs"] += 1
+                self._last_recv["usgs"] = datetime.now()
+                
+                # 通知実行
+                logger.info(f"USGS起動時最新情報: {event_id} / M{mag}")
+                await self.notify_usgs_quake(
+                    feature,
+                    extra_note="（ボット起動時の最新情報）"
+                )
+        
+        except asyncio.TimeoutError:
+            logger.debug("USGS startup fetch timeout")
+        except Exception as e:
+            logger.debug(f"USGS startup fetch error: {e}")
 
     # ===============================
     # WebSocket 共通再接続ヘルパー
@@ -2450,6 +2636,20 @@ class QuakeTsunamiCog(commands.Cog):
                 if alert_msg:
                     description += alert_msg
 
+                # ===== 追加: コメント情報（Warning Comment）=====
+                warning_comment = data.get("comments", {}).get("warningComment", {}).get("text", "")
+                if warning_comment:
+                    description += f"\n⚠️ **注意**: {warning_comment}\n"
+
+            # ===== 追加: 原因地震情報の強化 =====
+            eq = data.get("earthquake", {})
+            if eq:
+                eq_source = eq.get("source", "")
+                if eq_source:
+                    # source が既に description に含まれているかチェック
+                    if "※" not in description:
+                        description += f"\n\n※原因地震情報は {eq_source} からの情報です"
+
             # Discord API の制限（4096文字）に対応した正確な切り詰め
             description = self._truncate_embed_description(
                 description,
@@ -2533,7 +2733,14 @@ class QuakeTsunamiCog(commands.Cog):
                 magnitude = eq.get("Magnitude", "不明")
                 depth = hypo.get("Depth", "")
                 depth_str = f"　深さ{depth}" if depth else ""
-                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）\n\n"
+                
+                # ===== 追加: Earthquake.Source を含める =====
+                eq_source = eq.get("Source", "")
+                source_note = ""
+                if eq_source:
+                    source_note = f" ※原因地震情報は {eq_source} からの情報です"
+                
+                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}\n\n"
             
             # 説明文の開始
             description = (
@@ -2616,6 +2823,11 @@ class QuakeTsunamiCog(commands.Cog):
             free_form = comment.get("FreeFormComment", "")
             if free_form:
                 description += f"{free_form}\n"
+            
+            # ===== 追加: Warning Comment =====
+            warning_comment = comment.get("WarningComment", {}).get("Text", "")
+            if warning_comment:
+                description += f"\n⚠️ **注意**: {warning_comment}\n"
             
             # 予報情報（参考）
             forecast = tsunami.get("Forecast", {})
@@ -2890,12 +3102,105 @@ class QuakeTsunamiCog(commands.Cog):
             logger.error(f"notify_quake_advisory エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
+    # ===============================
+    # USGS 地震情報通知
+    # ===============================
+
+    async def notify_usgs_quake(self, feature: dict, extra_note: str = ""):
+        """
+        USGS GeoJSON feature を Discord に通知する
+        
+        Parameters
+        ----------
+        feature : dict
+            USGS GeoJSON の feature オブジェクト
+        extra_note : str
+            追加の注記（例：「（ボット起動時の最新情報）」）
+        """
+        channel = self.usgs_channel or self.channel
+        if not channel:
+            return
+        
+        try:
+            props = feature.get("properties", {})
+            geom = feature.get("geometry", {})
+            coords = geom.get("coordinates", [None, None, None])
+            
+            event_id = feature.get("id", "Unknown")
+            mag = props.get("mag", 0)
+            place = props.get("place", "Unknown")
+            time_ms = props.get("time", 0)
+            lon, lat, depth_km = coords[0], coords[1], coords[2] if len(coords) > 2 else 0
+            
+            # 時刻をフォーマット（UNIX ミリ秒 → 日本時間）
+            try:
+                import datetime as dt
+                quake_time = dt.datetime.fromtimestamp(
+                    time_ms / 1000, 
+                    tz=dt.timezone(dt.timedelta(hours=9))  # JST
+                )
+                occur_time_str = quake_time.strftime("%Y年%m月%d日%H時%M分")
+            except Exception:
+                occur_time_str = "不明"
+            
+            # Embed の色（マグニチュードで変更）
+            if mag >= 7.0:
+                color = 0xFF0000  # 赤
+            elif mag >= 6.0:
+                color = 0xFF6600  # オレンジ
+            elif mag >= 5.0:
+                color = 0xFFFF00  # 黄
+            else:
+                color = 0x00FF00  # 緑
+            
+            # Embed を作成
+            title = f"🌍 USGS 地震情報 (M{mag:.1f})"
+            description = (
+                f"**発生時刻**: {occur_time_str}\n"
+                f"**震源地**: {place}\n"
+                f"**マグニチュード**: M{mag:.1f}\n"
+                f"**深さ**: {depth_km:.1f} km\n"
+                f"**座標**: {lat:.2f}°N, {lon:.2f}°E"
+            )
+            
+            if extra_note:
+                description += f"\n\n{extra_note}"
+            
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=color,
+                timestamp=datetime.now()
+            )
+            embed.set_footer(text="USGS Earthquake Hazards Program")
+            
+            # USGS リンク
+            usgs_url = f"https://earthquake.usgs.gov/earthquakes/events/{event_id}/"
+            embed.add_field(name="詳細情報", value=f"[USGS]({usgs_url})", inline=False)
+            
+            await channel.send(embed=embed)
+            
+            # 読み上げ
+            speak_text = (
+                f"USGS地震情報。"
+                f"{occur_time_str}、"
+                f"{place}で"
+                f"マグニチュード{mag:.1f}の地震が発生しました。"
+            )
+            await self.speak_local(speak_text, priority=3)
+            
+            logger.info(f"USGS地震情報を通知しました: {event_id} / M{mag:.1f}")
+        
+        except Exception as e:
+            logger.error(f"notify_usgs_quake エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
 # ===============================
 # 火山情報通知
 # ===============================
 
     async def fetch_volcano_info(self):
-        """JMA 火山情報を取得（1分ごと、eventId監視で新規通知）"""
+        """JMA 火山情報を取得（1分ごと、jsonフィールドで差分検知 + 警戟レベル変化検知）"""
         try:
             # Step①: info.json から火山情報リストを取得
             async with self.session.get(
@@ -2910,24 +3215,32 @@ class QuakeTsunamiCog(commands.Cog):
                 if not info_list:
                     return
                 
-                # Step②: 先頭（最新）の火山情報のeventIdを取得
+                # Step②: 先頭（最新）の火山情報のファイル名を取得
+                # JMA 火山APIは地震・津波・長周期地震動と同様に
+                # "json" フィールドにファイルパスが格納されている
                 latest_event = info_list[0]
-                current_event_id = latest_event.get("eventId")
-                
-                if not current_event_id:
+                json_filename = latest_event.get("json")
+                if not json_filename:
+                    json_filename = latest_event.get("fileName") or latest_event.get("file")
+                if not json_filename:
+                    logger.debug(f"Volcano: json field not found in list item. keys={list(latest_event.keys())}")
                     return
-                
-                # Step③: 前回eventIdと比較
+
+                # 識別子として json フィールド値を使用（他JMA APIと同じパターン）
+                current_event_id = json_filename
+
+                # Step③: 前回と同一ファイルなら変化なし
                 if current_event_id == self._last_volcano_event_id:
-                    logger.debug(f"Volcano: no change (eventId={current_event_id})")
+                    logger.debug(f"Volcano: no change (json={current_event_id})")
                     return
                 
-                logger.info(f"Volcano: new eventId detected ({self._last_volcano_event_id} → {current_event_id})")
+                logger.info(f"Volcano: new event detected ({self._last_volcano_event_id} → {current_event_id})")
                 
                 # Step④: 詳細情報を取得
                 try:
+                    detail_url = f"https://www.jma.go.jp/bosai/volcano/data/{json_filename}"
                     async with self.session.get(
-                        f"https://www.jma.go.jp/bosai/volcano/data/info/{current_event_id}.json",
+                        detail_url,
                         timeout=aiohttp.ClientTimeout(total=35, connect=10, sock_read=25)
                     ) as detail_resp:
                         if detail_resp.status != 200:
@@ -3055,13 +3368,11 @@ class QuakeTsunamiCog(commands.Cog):
             logger.error(f"Volcano fetch error: {e}")
 
     # ===============================
-    # !status コマンド
+    # !status / /qtl_status コマンド
     # ===============================
 
-    @commands.command(name="status")
-    @commands.has_permissions(administrator=True)
-    async def cmd_status(self, ctx):
-        """Bot の稼働状態・各API受信状況・Ping を表示する"""
+    def _build_status_embed(self) -> discord.Embed:
+        """ステータス Embed を組み立てて返す（!status と /qtl_status 共通）"""
         try:
             import psutil
             proc = psutil.Process()
@@ -3082,7 +3393,6 @@ class QuakeTsunamiCog(commands.Cog):
         ping_ms = round(self.bot.latency * 1000)
 
         def api_status(key: str, warn_sec: int = 300, err_sec: int = 600) -> tuple[str, str]:
-            """(icon, 受信情報文字列) を返す"""
             t = self._last_recv.get(key)
             count = self._recv_count.get(key, 0)
             if t is None:
@@ -3114,9 +3424,28 @@ class QuakeTsunamiCog(commands.Cog):
                 return f"🟢 ONLINE ({diff}秒前)"
             return f"🔴 OFFLINE ({diff}秒前)"
 
+        def task_status(task_loop) -> str:
+            if task_loop is None:
+                return "⚪ 未起動"
+            if task_loop.is_running():
+                return "🟢 稼働中"
+            if task_loop.failed():
+                return "🔴 エラー停止"
+            return "🟡 停止"
+
+        def asyncio_task_status(task) -> str:
+            if task is None:
+                return "⚪ 未起動"
+            if not task.done():
+                return "🟢 稼働中"
+            if task.cancelled():
+                return "🟡 キャンセル"
+            if task.exception() is not None:
+                return "🔴 エラー停止"
+            return "⚪ 完了"
+
         # Wolfx 状態
         now_mono = time.monotonic()
-
         if self._wolfx_last_heartbeat is None:
             wolfx_icon, wolfx_detail = "⚪", "heartbeat 未受信（起動中）"
         else:
@@ -3134,7 +3463,6 @@ class QuakeTsunamiCog(commands.Cog):
                 if self._fallback_active:
                     wolfx_detail += " → フォールバック中"
 
-        # Embed 組み立て
         color = 0x00FF00 if ping_ms < 100 else (0xFFFF00 if ping_ms < 300 else 0xFF0000)
         embed = discord.Embed(
             title="📊 QTL_Bot ステータス",
@@ -3156,8 +3484,9 @@ class QuakeTsunamiCog(commands.Cog):
         # ── EEW ──
         eew_lines = [
             f"{wolfx_icon} **Wolfx**: {wolfx_detail}",
-            f"{eew_source_status(self._fallback_active, self._last_recv.get('p2p_eew'))} **P2P EEW**",
-            f"{eew_source_status(self._fallback_active, self._last_recv.get('lmoni'))} **LMoni EEW**",
+            # P2P / LMoni は fallback 中のみ ACTIVE（Wolfx が正常時は STANDBY）
+            f"{eew_source_status(self._fallback_active, self._last_recv.get('p2p_eew'))} **P2P EEW (fallback)**",
+            f"{eew_source_status(self._fallback_active, self._last_recv.get('lmoni'))} **LMoni EEW (fallback)**",
         ]
         if self._fallback_active:
             eew_lines.append("⚠️ **フォールバック動作中** (Wolfx 停止検出)")
@@ -3170,12 +3499,36 @@ class QuakeTsunamiCog(commands.Cog):
             ("長周期地震動",     "long_period",      120, 600),
             ("津波観測情報",     "tsunami_obs",      120, 600),
             ("気象庁その他",     "quake_advisory",   120, 600),
+            ("火山情報",         "volcano",         120, 600),
+            ("USGS 地震情報",    "usgs",            600, 1200),
         ]
         api_lines = []
         for label, key, warn, err in api_rows:
             icon, detail = api_status(key, warn, err)
             api_lines.append(f"{icon} **{label}**: {detail}")
         embed.add_field(name="📡 API 受信状況", value="\n".join(api_lines), inline=False)
+
+        # ── タスク稼働状態 ──
+        task_lines = [
+            f"{task_status(self.fetch_quake)} **fetch_quake**",
+            f"{task_status(self.fetch_tsunami)} **fetch_tsunami**",
+            f"{task_status(self.fetch_long_period)} **fetch_long_period**",
+            f"{task_status(self.fetch_tsunami_observation)} **fetch_tsunami_observation**",
+            f"{task_status(self.fetch_quake_advisory)} **fetch_quake_advisory**",
+            f"{task_status(self.fetch_usgs_quake) if USGS_ENABLED else '⚪ 無効'} **fetch_usgs_quake**",
+            f"{asyncio_task_status(self.speech_task)} **speech_worker**",
+            f"{asyncio_task_status(self.mp3_task)} **mp3_worker**",
+            f"{asyncio_task_status(self.volcano_task)} **volcano_poller**",
+        ]
+        embed.add_field(name="⚙️ タスク稼働状態", value="\n".join(task_lines), inline=False)
+
+        # ── USGS 設定 ──
+        if USGS_ENABLED:
+            usgs_lines = [
+                f"対象地域: 緯度 {USGS_REGION_LAT_MIN}〜{USGS_REGION_LAT_MAX} / 経度 {USGS_REGION_LON_MIN}〜{USGS_REGION_LON_MAX}",
+                f"M下限: {USGS_MAGNITUDE_MIN} / ポーリング間隔: {USGS_FETCH_INTERVAL}秒 / 重複防止: {USGS_NOTIFICATION_COOLDOWN}秒",
+            ]
+            embed.add_field(name="🌍 USGS 設定", value="\n".join(usgs_lines), inline=False)
 
         # ── フィルター設定 ──
         if STATUS_SHOW_UPTIME:
@@ -3185,12 +3538,27 @@ class QuakeTsunamiCog(commands.Cog):
             ]
             embed.add_field(name="⚙️ フィルター", value="\n".join(filter_lines), inline=False)
 
+        return embed
+
+    @commands.command(name="status")
+    @commands.has_permissions(administrator=True)
+    async def cmd_status(self, ctx):
+        """Bot の稼働状態・各API受信状況・Ping を表示する"""
+        embed = self._build_status_embed()
         await ctx.send(embed=embed)
 
     @cmd_status.error
     async def cmd_status_error(self, ctx, error):
         if isinstance(error, commands.MissingPermissions):
             await ctx.send("❌ このコマンドはサーバー管理者のみ実行可能です。", delete_after=5)
+
+    @discord.app_commands.command(name="qtl_status", description="QTL_Bot の稼働状態・各API受信状況を表示します（管理者専用）")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def slash_qtl_status(self, interaction: discord.Interaction):
+        """スラッシュコマンド版ステータス表示"""
+        await interaction.response.defer(ephemeral=False)
+        embed = self._build_status_embed()
+        await interaction.followup.send(embed=embed)
 
     # ===============================
     # Web ダッシュボード
@@ -3206,37 +3574,118 @@ class QuakeTsunamiCog(commands.Cog):
         port = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
         
         async def status_handler(request):
-            """GET /status - ステータス JSON を返す"""
+            """GET /status - ステータス JSON を返す（拡充版）"""
             try:
+                now = datetime.now()
                 uptime_seconds = int(time.time() - self._start_time)
                 uptime_str = self._format_uptime(uptime_seconds)
-                
-                memory_mb = 0
+
+                # システムリソース
+                system_info: dict = {}
                 if psutil:
                     try:
-                        process = psutil.Process(os.getpid())
-                        memory_info = process.memory_info()
-                        memory_mb = round(memory_info.rss / (1024 * 1024), 1)
+                        proc = psutil.Process(os.getpid())
+                        mem = proc.memory_info().rss / 1024 / 1024
+                        mem_total = psutil.virtual_memory().total / 1024 / 1024
+                        disk = psutil.disk_usage("/")
+                        system_info = {
+                            "cpu_percent": proc.cpu_percent(interval=None),
+                            "memory_mb": round(mem, 1),
+                            "memory_total_mb": round(mem_total, 1),
+                            "memory_percent": round(mem / mem_total * 100, 1),
+                            "disk_percent": disk.percent,
+                            "disk_free_gb": round(disk.free / 1024**3, 2),
+                        }
                     except Exception:
-                        memory_mb = 0
-                
-                # 最後のEEW受信情報を取得
-                last_eew_id = None
-                last_eew_timestamp = None
-                if self.last_eew_event_id:
-                    last_eew_id = self.last_eew_event_id
-                    if self._last_recv.get("wolfx"):
-                        last_eew_timestamp = self._last_recv["wolfx"].isoformat()
-                
+                        pass
+
+                # API 受信状況ヘルパー
+                def _api_info(key: str) -> dict:
+                    t = self._last_recv.get(key)
+                    return {
+                        "last_recv_time": t.isoformat() if t else None,
+                        "recv_count": self._recv_count.get(key, 0),
+                    }
+
+                # EEW 状態
+                now_mono = time.monotonic()
+                wolfx_hb = self._wolfx_last_heartbeat
+                if wolfx_hb is None:
+                    wolfx_ws_status = "connecting"
+                    wolfx_hb_elapsed = None
+                else:
+                    wolfx_hb_elapsed = round(now_mono - wolfx_hb, 2)
+                    wolfx_ws_status = "online" if wolfx_hb_elapsed < WOLFX_HEARTBEAT_TIMEOUT else "timeout"
+
+                eew_info = {
+                    "wolfx": {
+                        "ws_status": wolfx_ws_status,
+                        "heartbeat_elapsed_sec": wolfx_hb_elapsed,
+                        "heartbeat_timeout_sec": WOLFX_HEARTBEAT_TIMEOUT,
+                        "last_eew_id": self.last_eew_event_id,
+                        **_api_info("wolfx"),
+                    },
+                    "p2p_eew": {
+                        "fallback_active": self._fallback_active,
+                        **_api_info("p2p_eew"),
+                    },
+                    "lmoni_eew": _api_info("lmoni"),
+                    "fallback_active": self._fallback_active,
+                }
+
+                # タスク稼働状態
+                def _loop_status(t) -> str:
+                    if t is None: return "not_started"
+                    if t.is_running(): return "running"
+                    if t.failed(): return "error"
+                    return "stopped"
+
+                def _task_status(t) -> str:
+                    if t is None: return "not_started"
+                    if not t.done(): return "running"
+                    if t.cancelled(): return "cancelled"
+                    try:
+                        t.exception()
+                    except Exception:
+                        return "error"
+                    return "done"
+
+                tasks_info = {
+                    "fetch_quake": _loop_status(self.fetch_quake),
+                    "fetch_tsunami": _loop_status(self.fetch_tsunami),
+                    "fetch_long_period": _loop_status(self.fetch_long_period),
+                    "fetch_tsunami_observation": _loop_status(self.fetch_tsunami_observation),
+                    "fetch_quake_advisory": _loop_status(self.fetch_quake_advisory),
+                    "fetch_usgs_quake": _loop_status(self.fetch_usgs_quake) if USGS_ENABLED else "disabled",
+                    "speech_worker": _task_status(self.speech_task),
+                    "mp3_worker": _task_status(self.mp3_task),
+                    "volcano_poller": _task_status(self.volcano_task),
+                }
+
+                # USGS
+                usgs_info: dict = {"enabled": USGS_ENABLED}
+                if USGS_ENABLED:
+                    usgs_last_ids = list(self.last_usgs_ids.keys())[-5:] if self.last_usgs_ids else []
+                    usgs_info.update({
+                        "magnitude_min": USGS_MAGNITUDE_MIN,
+                        "fetch_interval_sec": USGS_FETCH_INTERVAL,
+                        "region": {
+                            "lat": [USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX],
+                            "lon": [USGS_REGION_LON_MIN, USGS_REGION_LON_MAX],
+                        },
+                        "last_event_ids": usgs_last_ids,
+                        **_api_info("usgs"),
+                    })
+
                 status_data = {
                     "status": "online",
+                    "timestamp": now.isoformat(),
                     "bot_user": str(self.bot.user),
                     "uptime": uptime_str,
                     "uptime_seconds": uptime_seconds,
-                    "last_eew": {
-                        "event_id": last_eew_id,
-                        "timestamp": last_eew_timestamp,
-                    },
+                    "ping_ms": round(self.bot.latency * 1000),
+                    "system": system_info,
+                    "eew": eew_info,
                     "api_status": {
                         "wolfx": self._last_recv.get("wolfx").isoformat() if self._last_recv.get("wolfx") else None,
                         "p2p_eew": self._last_recv.get("p2p_eew").isoformat() if self._last_recv.get("p2p_eew") else None,
@@ -3249,7 +3698,30 @@ class QuakeTsunamiCog(commands.Cog):
                         "p2p_eew": self._recv_count.get("p2p_eew", 0),
                         "quake": self._recv_count.get("quake", 0),
                         "tsunami": self._recv_count.get("tsunami", 0),
+                        "long_period": self._recv_count.get("long_period", 0),
+                        "tsunami_obs": self._recv_count.get("tsunami_obs", 0),
                         "volcano": self._recv_count.get("volcano", 0),
+                        "usgs": self._recv_count.get("usgs", 0),
+                    },
+                    "monitoring": {
+                        "quake": _api_info("quake"),
+                        "tsunami": _api_info("tsunami"),
+                        "long_period": _api_info("long_period"),
+                        "tsunami_obs": _api_info("tsunami_obs"),
+                        "quake_advisory": _api_info("quake_advisory"),
+                        "volcano": {
+                            "last_event_id": self._last_volcano_event_id,
+                            "polling_status": _task_status(self.volcano_task),
+                            **_api_info("volcano"),
+                            "total_recv_count": self._volcano_recv_count,
+                        },
+                        "usgs": usgs_info,
+                    },
+                    "tasks": tasks_info,
+                    # 後方互換フィールド
+                    "last_eew": {
+                        "event_id": self.last_eew_event_id,
+                        "timestamp": self._last_recv.get("wolfx").isoformat() if self._last_recv.get("wolfx") else None,
                     },
                     "volcano_monitoring": {
                         "last_event_id": self._last_volcano_event_id,
@@ -3257,7 +3729,7 @@ class QuakeTsunamiCog(commands.Cog):
                         "polling_status": "active" if self.volcano_task and not self.volcano_task.done() else "inactive",
                         "total_recv_count": self._volcano_recv_count,
                     },
-                    "memory_usage_mb": memory_mb,
+                    "memory_usage_mb": system_info.get("memory_mb", 0),
                 }
                 return web.json_response(status_data)
             except Exception as e:
@@ -3375,6 +3847,7 @@ class QuakeTsunamiCog(commands.Cog):
                 "wolfx": {"ok": False, "latency_ms": None, "error": None},
                 "jma": {"ok": False, "latency_ms": None, "error": None},
                 "p2p": {"ok": False, "latency_ms": None, "error": None},
+                "usgs": {"ok": False, "latency_ms": None, "error": None},
             }
         }
         
@@ -3433,6 +3906,23 @@ class QuakeTsunamiCog(commands.Cog):
                         }
             except Exception as e:
                 result["api_status"]["p2p"]["error"] = str(type(e).__name__)
+            
+            # USGS API ping
+            try:
+                start = time.time()
+                async with self.session.get(
+                    'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson',
+                    timeout=aiohttp.ClientTimeout(total=HEALTH_CHECK_TIMEOUT)
+                ) as resp:
+                    if resp.status == 200:
+                        latency = (time.time() - start) * 1000
+                        result["api_status"]["usgs"] = {
+                            "ok": True,
+                            "latency_ms": round(latency, 1),
+                            "error": None
+                        }
+            except Exception as e:
+                result["api_status"]["usgs"]["error"] = str(type(e).__name__)
             
             # overall_status の判定
             all_ok = all(api["ok"] for api in result["api_status"].values())
@@ -3569,44 +4059,96 @@ async def main():
 
 
 # ===== ロギング設定関数 =====
+
+class _RateLimitedHandler(logging.Handler):
+    """同一メッセージの重複ログを指定秒数抑制するハンドラーラッパー"""
+    def __init__(self, inner: logging.Handler, threshold_sec: int = 60):
+        super().__init__()
+        self._inner = inner
+        self._threshold = threshold_sec
+        self._cache: dict[str, float] = {}
+        self.setFormatter(inner.formatter)
+
+    def setLevel(self, level):
+        super().setLevel(level)
+        self._inner.setLevel(level)
+
+    def emit(self, record: logging.LogRecord):
+        # ERROR/CRITICAL は常に出力
+        if record.levelno >= logging.ERROR:
+            self._inner.emit(record)
+            return
+        key = f"{record.levelno}:{record.getMessage()}"
+        now = time.monotonic()
+        last = self._cache.get(key, 0.0)
+        if now - last < self._threshold:
+            return
+        self._cache[key] = now
+        # 古いキャッシュを定期クリア（メモリリーク防止）
+        if len(self._cache) > 2000:
+            cutoff = now - self._threshold * 10
+            self._cache = {k: v for k, v in self._cache.items() if v > cutoff}
+        self._inner.emit(record)
+
+
+class _SuppressHttpSuccessFilter(logging.Filter):
+    """aiohttp.access ロガーの 2xx 成功ログを抑制するフィルター"""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        # " 200 " や " 204 " などの成功ステータスを含む行を除外
+        for code in (" 200 ", " 204 ", " 206 ", " 304 "):
+            if code in msg:
+                return False
+        return True
+
+
 def setup_logging():
-    """ロギングハンドラーをセットアップ（ローテーション対応）"""
+    """ロギングハンドラーをセットアップ（ローテーション対応 + ログ肥大化対策）"""
     from logging.handlers import RotatingFileHandler
     global logger
-    
-    # ロギングレベルを設定
-    log_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
-    
-    # RotatingFileHandler を設定
-    file_handler = RotatingFileHandler(
-        'qtlbot.log',
+
+    file_level   = getattr(logging, LOG_LEVEL_FILE.upper(),    logging.DEBUG)
+    console_level = getattr(logging, LOG_LEVEL_CONSOLE.upper(), logging.INFO)
+
+    fmt = logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # ── ファイルハンドラー（詳細・ローテーション）──
+    _file_inner = RotatingFileHandler(
+        "qtlbot.log",
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8'
+        encoding="utf-8",
     )
-    file_handler.setLevel(log_level)
-    file_formatter = logging.Formatter(
-        '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    file_handler.setFormatter(file_formatter)
-    
-    # コンソールハンドラー
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_formatter = logging.Formatter(
-        '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(console_formatter)
-    
-    # logger に追加
+    _file_inner.setLevel(file_level)
+    _file_inner.setFormatter(fmt)
+    file_handler = _RateLimitedHandler(_file_inner, LOG_DUPLICATE_THRESHOLD)
+    file_handler.setLevel(file_level)
+
+    # ── コンソールハンドラー（INFO 以上のみ + 重複抑制）──
+    _con_inner = logging.StreamHandler()
+    _con_inner.setLevel(console_level)
+    _con_inner.setFormatter(fmt)
+    console_handler = _RateLimitedHandler(_con_inner, LOG_DUPLICATE_THRESHOLD)
+    console_handler.setLevel(console_level)
+
     logger.handlers.clear()
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    logger.setLevel(log_level)
-    
-    logger.info(f"ロギングをセットアップしました (レベル: {LOG_LEVEL}, マックスサイズ: {LOG_MAX_BYTES} bytes)")
+    logger.setLevel(logging.DEBUG)  # ハンドラー側でフィルタリング
+
+    # aiohttp.access ロガーの成功ログを抑制
+    if LOG_SUPPRESS_HTTP_SUCCESS:
+        access_logger = logging.getLogger("aiohttp.access")
+        access_logger.addFilter(_SuppressHttpSuccessFilter())
+
+    logger.info(
+        f"ロギングをセットアップしました "
+        f"(FILE={LOG_LEVEL_FILE}/CONSOLE={LOG_LEVEL_CONSOLE}, "
+        f"maxSize={LOG_MAX_BYTES}bytes, dup抑制={LOG_DUPLICATE_THRESHOLD}s)"
+    )
 
 
 # ===== ヘルスチェック設定 =====
@@ -3614,10 +4156,8 @@ HEALTH_CHECK_TIMEOUT = 5  # API ping のタイムアウト（秒）
 HEALTH_CHECK_CACHE_TTL = 30  # ヘルスチェック結果キャッシュ時間（秒）
 ERROR_NOTIFICATION_TTL = 3600  # エラー通知の重複防止時間（秒）
 
-# ===== A-2: ログローテーション設定 =====
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", "10485760"))  # 10 MB
-LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))   # 7 ファイル保持
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+# ===== A-2: ログローテーション設定（重複定義は除去済）=====
+# LOG_MAX_BYTES / LOG_BACKUP_COUNT / LOG_LEVEL はファイル先頭で定義済み
 
 # ===== A-5: リソース監視設定 =====
 RESOURCE_MONITORING_ENABLED = os.getenv("RESOURCE_MONITORING_ENABLED", "true").lower() == "true"
