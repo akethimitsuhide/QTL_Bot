@@ -61,7 +61,7 @@ LOG_SUPPRESS_HTTP_SUCCESS = os.getenv("LOG_SUPPRESS_HTTP_SUCCESS", "true").lower
 def _require_env(key: str) -> str:
     value = os.getenv(key)
     if not value:
-        logger.critical(f"❌ 環境変数 {key} が設定されていません。.env を確認してください。")
+        logger.critical(f"環境変数 {key} が設定されていません。.env を確認してください。")
         raise SystemExit(1)
     return value
 
@@ -83,7 +83,7 @@ _channel_id_raw = _require_env("CHANNEL_ID")
 try:
     CHANNEL_ID = int(_channel_id_raw)
 except ValueError:
-    logger.critical(f"❌ CHANNEL_ID は数値で指定してください（現在の値: {_channel_id_raw!r}）")
+    logger.critical(f"CHANNEL_ID は数値で指定してください（現在の値: {_channel_id_raw!r}）")
     raise SystemExit(1)
 
 _raw_aquestalk = os.getenv("AQUESTALK_PATH", "").strip().rstrip("/")
@@ -126,7 +126,9 @@ USGS_REGION_LAT_MIN = float(os.getenv("USGS_REGION_LAT_MIN", "20"))
 USGS_REGION_LAT_MAX = float(os.getenv("USGS_REGION_LAT_MAX", "50"))
 USGS_REGION_LON_MIN = float(os.getenv("USGS_REGION_LON_MIN", "120"))
 USGS_REGION_LON_MAX = float(os.getenv("USGS_REGION_LON_MAX", "180"))
-USGS_NOTIFICATION_COOLDOWN = int(os.getenv("USGS_NOTIFICATION_COOLDOWN", "300"))  # 5分
+# USGS通知済みIDの保持時間: all_day(24h)フィードの全期間をカバーするため24時間
+# 5分(300)にするとcooldown切れ後に同じ地震が再通知されるため、24時間が適切
+USGS_NOTIFICATION_COOLDOWN = int(os.getenv("USGS_NOTIFICATION_COOLDOWN", "86400"))  # 24時間
 
 # ===== リソース監視設定 =====
 RESOURCE_MONITORING_ENABLED = _env_bool("RESOURCE_MONITORING_ENABLED", True)
@@ -419,7 +421,7 @@ class QuakeTsunamiCog(commands.Cog):
 
     async def cog_load(self):
         try:
-            logger.debug("■ cog_load() 実行開始")
+            logger.debug("cog_load() 実行開始")
             
             # イベントループ内で asyncio.Queue を初期化（__init__では実行不可）
             logger.debug("  → 音声キューを初期化中...")
@@ -437,9 +439,9 @@ class QuakeTsunamiCog(commands.Cog):
                 ),
                 connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
             )
-            logger.info("✓ aiohttp セッションを作成しました")
+            logger.info("aiohttp セッションを作成しました")
         except Exception as e:
-            logger.error(f"❌ cog_load() エラー: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"cog_load() エラー: {type(e).__name__}: {e}", exc_info=True)
             raise
 
     async def cog_unload(self):
@@ -488,9 +490,9 @@ class QuakeTsunamiCog(commands.Cog):
         # 津波機能の確認ログ
         # ===============================
         if TSUNAMI_ENABLE:
-            logger.info(f"✓ 津波情報機能: 有効（チャンネルID: {TSUNAMI_CHANNEL_ID}）")
+            logger.info(f"津波情報機能: 有効（チャンネルID: {TSUNAMI_CHANNEL_ID}）")
         else:
-            logger.warning(f"⚠️  津波情報機能: 無効（TSUNAMI_ENABLE=false）")
+            logger.warning(f"津波情報機能: 無効（TSUNAMI_ENABLE=false）")
         self.other_channel   = self.bot.get_channel(OTHER_CHANNEL_ID)   or self.channel
         
         # 新規追加: ソース別チャンネル
@@ -507,9 +509,9 @@ class QuakeTsunamiCog(commands.Cog):
 
         if not self.fetch_tsunami.is_running():
             self.fetch_tsunami.start()
-            logger.info("✓ P2P津波情報ポーリングタスクを開始しました")
+            logger.info("P2P津波情報ポーリングタスクを開始しました")
         else:
-            logger.info("⚠️  P2P津波情報ポーリングタスクは既に実行中です")
+            logger.info("P2P津波情報ポーリングタスクは既に実行中です")
 
         if not self.fetch_long_period.is_running():
             self.fetch_long_period.start()
@@ -556,23 +558,23 @@ class QuakeTsunamiCog(commands.Cog):
         if USGS_ENABLED:
             if not self.fetch_usgs_quake.is_running():
                 self.fetch_usgs_quake.start()
-                logger.info(f"✓ USGS地震情報ポーリングタスクを開始しました（間隔: {USGS_FETCH_INTERVAL}秒）")
+                logger.info(f"USGSポーリングタスクを開始しました（間隔: {USGS_FETCH_INTERVAL}秒）")
                 
                 # 起動時最新情報を取得・通知
                 self.bot.loop.create_task(self._fetch_and_notify_latest_usgs())
             else:
-                logger.info("⚠️ USGS地震情報ポーリングタスクは既に実行中です")
+                logger.info("USGSポーリングタスクは既に実行中です")
         else:
-            logger.info("⚠️ USGS地震情報機能: 無効（USGS_ENABLED=false）")
+            logger.info("USGS地震情報機能: 無効（USGS_ENABLED=false）")
 
         # スラッシュコマンドを同期
         try:
             synced = await self.bot.tree.sync()
-            logger.info(f"✓ スラッシュコマンドを同期しました（{len(synced)}件）")
+            logger.info(f"スラッシュコマンドを同期しました（{len(synced)}件）")
         except Exception as e:
-            logger.warning(f"⚠️ スラッシュコマンド同期失敗: {e}")
+            logger.warning(f"スラッシュコマンド同期失敗: {e}")
 
-        logger.info(f"✅ ログイン完了: {self.bot.user}")
+        logger.info(f"ログイン完了: {self.bot.user}")
 
     # ===============================
     # 自動取得
@@ -586,14 +588,14 @@ class QuakeTsunamiCog(commands.Cog):
         if ADMIN_CHANNEL_ID != 0:
             self.admin_channel = self.bot.get_channel(ADMIN_CHANNEL_ID)
             if self.admin_channel:
-                logger.info(f"✓ 管理者チャンネルを設定しました（ID: {ADMIN_CHANNEL_ID}）")
+                logger.info(f"管理者チャンネルを設定しました（ID: {ADMIN_CHANNEL_ID}）")
             else:
-                logger.warning(f"⚠️ 管理者チャンネルが見つかりません（ID: {ADMIN_CHANNEL_ID}）")
+                logger.warning(f"管理者チャンネルが見つかりません（ID: {ADMIN_CHANNEL_ID}）")
         
         # 日次エラーサマリータスクを開始
         if not self.error_summary_task:
             self.error_summary_task = self.bot.loop.create_task(self.error_summary_worker())
-            logger.info("✓ 日次エラーサマリータスクを開始しました")
+            logger.info("日次エラーサマリータスクを開始しました")
 
         # ===============================
         # A-5: リソース監視設定
@@ -604,7 +606,7 @@ class QuakeTsunamiCog(commands.Cog):
         
         if not self.resource_monitor_task:
             self.resource_monitor_task = self.bot.loop.create_task(self.resource_monitor())
-            logger.info("✓ リソース監視タスクを開始しました")
+            logger.info("リソース監視タスクを開始しました")
 
     @tasks.loop(seconds=60)
     async def fetch_long_period(self):
@@ -688,6 +690,22 @@ class QuakeTsunamiCog(commands.Cog):
                             continue
                         detail = await detail_resp.json()
 
+                    # ValidDateTime チェック: 有効期限切れの情報は通知しない
+                    head_for_valid = detail.get("Head", {})
+                    valid_dt_raw = head_for_valid.get("ValidDateTime", "")
+                    if valid_dt_raw:
+                        try:
+                            valid_dt = datetime.fromisoformat(valid_dt_raw)
+                            if datetime.now(valid_dt.tzinfo) > valid_dt:
+                                logger.info(
+                                    f"津波観測情報: 有効期限切れのためスキップ "
+                                    f"(ValidDateTime={valid_dt_raw})"
+                                )
+                                self.last_tsunami_observation_id = current_key
+                                break
+                        except Exception as e:
+                            logger.debug(f"ValidDateTime パース失敗: {e}")
+
                     # 通知成功後に lastID を更新
                     await self.notify_tsunami_observation(detail, list_item=item)
                     self.last_tsunami_observation_id = current_key
@@ -717,10 +735,15 @@ class QuakeTsunamiCog(commands.Cog):
 
                 ADVISORY_TTL = 7 * 24 * 3600
                 now_ts = datetime.now().timestamp()
+                # TTL 超過エントリを削除 + 上限 1000 件でサイズ保護
                 self.last_advisory_ids = {
                     eid: ts for eid, ts in self.last_advisory_ids.items()
                     if now_ts - ts < ADVISORY_TTL
                 }
+                if len(self.last_advisory_ids) > 1000:
+                    # 古い順に削除して 1000 件以内に収める
+                    sorted_ids = sorted(self.last_advisory_ids.items(), key=lambda x: x[1])
+                    self.last_advisory_ids = dict(sorted_ids[-1000:])
 
                 for item in data:
                     ttl = item.get("ttl", "")
@@ -976,7 +999,7 @@ class QuakeTsunamiCog(commands.Cog):
                     ping_timeout=15,
                     close_timeout=10,
                 ) as ws:
-                    logger.info(f"🌐 {label} WebSocket 接続完了")
+                    logger.info(f"{label} WebSocket 接続完了")
                     delay = init_delay  # 接続成功でリセット
                     consecutive_failures = 0
                     await handler(ws)
@@ -1256,9 +1279,7 @@ class QuakeTsunamiCog(commands.Cog):
                             if resp.status == 200:
                                 # 成功時: 通常処理へ
                                 data_list = await resp.json()
-                                logger.debug(f"fetch_tsunami: API 呼び出し成功 (ステータス: 200, データ件数: {len(data_list)})")
                                 if not data_list:
-                                    logger.debug("fetch_tsunami: 津波情報なし")
                                     return
 
                                 data = data_list[0]
@@ -1323,14 +1344,9 @@ class QuakeTsunamiCog(commands.Cog):
 
     @tasks.loop(seconds=10)
     async def fetch_tsunami(self):
-        # デバッグログ
         if self._fetch_backoff_is_active("tsunami"):
-            logger.debug("fetch_tsunami: バックオフ中でスキップ")
             return
-
-        # Lock を使った排他制御
         if self._fetch_tsunami_lock.locked():
-            logger.debug("fetch_tsunami: ロック中でスキップ")
             return
         
         async with self._fetch_tsunami_lock:
@@ -1341,16 +1357,13 @@ class QuakeTsunamiCog(commands.Cog):
                 
                 for attempt in range(len(retry_delays) + 1):
                     try:
-                        logger.debug(f"fetch_tsunami: API 呼び出し開始 (試行 {attempt+1}/{len(retry_delays)+1})")
                         async with self.session.get(
                             "https://api.p2pquake.net/v2/history?codes=552&limit=1",
                             ) as resp:
                             if resp.status == 200:
                                 # 成功時: 通常処理へ
                                 data_list = await resp.json()
-                                logger.debug(f"fetch_tsunami: API 呼び出し成功 (ステータス: 200, データ件数: {len(data_list)})")
                                 if not data_list:
-                                    logger.debug("fetch_tsunami: 津波情報なし")
                                     return
 
                                 data = data_list[0]
@@ -1406,9 +1419,9 @@ class QuakeTsunamiCog(commands.Cog):
     @fetch_tsunami.before_loop
     async def before_fetch_tsunami(self):
         """セッション初期化完了まで待機"""
-        logger.info("fetch_tsunami: wait_until_ready() を実行中...")
+        logger.debug("fetch_tsunami: wait_until_ready() を実行中...")
         await self.bot.wait_until_ready()
-        logger.info("✓ fetch_tsunami: Bot の準備完了")
+        logger.debug("fetch_tsunami: Bot の準備完了")
 
     # ===============================
     # ヘルパー
@@ -1508,7 +1521,7 @@ class QuakeTsunamiCog(commands.Cog):
             return
         try:
             self.speech_queue.put_nowait((priority, text))
-            logger.info(f"音声キュー追加 [優先度{priority}] (深さ: {self.speech_queue.qsize()}/{SPEECH_QUEUE_MAXSIZE}): {text[:60]}")
+            logger.debug(f"音声キュー追加 [優先度{priority}] (深さ: {self.speech_queue.qsize()}/{SPEECH_QUEUE_MAXSIZE}): {text[:60]}")
         except asyncio.QueueFull:
             logger.warning(f"音声キューが満杯です (深さ: {self.speech_queue.qsize()}): {text[:60]} はスキップされました")
 
@@ -1529,7 +1542,7 @@ class QuakeTsunamiCog(commands.Cog):
                 if queue_size >= queue_warn_threshold:
                     logger.warning(f"音声キュー圧力高 (深さ: {queue_size}/{SPEECH_QUEUE_MAXSIZE})")
                 
-                logger.info(f"音声再生開始 [優先度{priority}] (キュー深さ: {queue_size}): {text[:60]}")
+                logger.debug(f"音声再生開始 [優先度{priority}] (キュー深さ: {queue_size}): {text[:60]}")
                 escaped = text.replace('"', '\\"')
 
                 tts_proc = await asyncio.create_subprocess_exec(
@@ -1538,7 +1551,7 @@ class QuakeTsunamiCog(commands.Cog):
                     stderr=asyncio.subprocess.PIPE,
                 )
                 tts_out, tts_err = await tts_proc.communicate()
-                logger.info(f"AquesTalkPi 終了コード={tts_proc.returncode} 出力バイト数={len(tts_out)}")
+                logger.debug(f"AquesTalkPi 終了コード={tts_proc.returncode} 出力バイト数={len(tts_out)}")
                 if tts_err:
                     logger.warning(f"AquesTalkPi stderr: {tts_err.decode(errors='replace')[:200]}")
 
@@ -1550,7 +1563,7 @@ class QuakeTsunamiCog(commands.Cog):
                         stderr=asyncio.subprocess.PIPE,
                     )
                     _, play_err = await play_proc.communicate(input=tts_out)
-                    logger.info(f"{AUDIO_PLAYER} 終了コード={play_proc.returncode}")
+                    logger.debug(f"{AUDIO_PLAYER} 終了コード={play_proc.returncode}")
                     # aplay は正常時も再生情報を stderr に出力するため、
                     # 終了コードが 0 以外のときのみ警告を出す
                     if play_err and play_proc.returncode != 0:
@@ -1580,10 +1593,10 @@ class QuakeTsunamiCog(commands.Cog):
                 if queue_size >= queue_warn_threshold:
                     logger.warning(f"MP3キュー圧力高 (深さ: {queue_size}/{MP3_QUEUE_MAXSIZE})")
                 
-                logger.info(f"play_mp3: 再生開始 key={key} (キュー深さ: {queue_size})")
+                logger.debug(f"play_mp3: 再生開始 key={key} (キュー深さ: {queue_size})")
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._play_mp3_blocking, path, key)
-                logger.info(f"play_mp3: 再生完了 key={key}")
+                logger.debug(f"play_mp3: 再生完了 key={key}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1623,7 +1636,7 @@ class QuakeTsunamiCog(commands.Cog):
 
         try:
             self.mp3_queue.put_nowait((key, path))
-            logger.info(f"play_mp3: キューに追加 key={key} (深さ: {self.mp3_queue.qsize()}/{MP3_QUEUE_MAXSIZE})")
+            logger.debug(f"play_mp3: キューに追加 key={key} (深さ: {self.mp3_queue.qsize()}/{MP3_QUEUE_MAXSIZE})")
         except asyncio.QueueFull:
             logger.warning(f"play_mp3: MP3キューが満杯です (深さ: {self.mp3_queue.qsize()}) → キー '{key}' はスキップされました")
 
@@ -1766,16 +1779,16 @@ class QuakeTsunamiCog(commands.Cog):
 
             notes = []
             if data.get("isWarn"):
-                notes.append("**⚠強い揺れに警戒してください。**")
+                notes.append("**⚠ 強い揺れに警戒してください。**")
 
             # PLUM法の場合は震源情報が推定不可のため、深さ・マグニチュード依存の判定をスキップ
             if not is_plum:
                 is_sea = self.safe_bool(data.get("isSea", False))
                 if is_sea and self.safe_float(mag) >= 6.8 and self.safe_int(depth) <= 151:
-                    notes.append("**⚠念の為海岸から離れてください。**")
+                    notes.append("**⚠ 念の為海岸から離れてください。**")
 
                 if self.safe_int(depth) >= 151:
-                    notes.append("**⚠震源が深いため、遠方でも揺れる可能性があります。**")
+                    notes.append("**⚠ 震源が深いため、遠方でも揺れる可能性があります。**")
 
             if notes:
                 description += "\n\n" + "\n".join(notes)
@@ -1849,7 +1862,9 @@ class QuakeTsunamiCog(commands.Cog):
                 self.monitored_event_id = None
                 if self.vibration_monitor_task:
                     self.vibration_monitor_task.cancel()
-            asyncio.create_task(self.generate_and_speak_eew(data))
+            # generate_and_speak_eew を先に await することで
+            # last_eew_data の競合を防ぐ（play_eew_sound より前に実行）
+            await self.generate_and_speak_eew(data)
             await self.play_eew_sound(data)
 
         except Exception as e:
@@ -1882,7 +1897,14 @@ class QuakeTsunamiCog(commands.Cog):
                         prev_warn_areas.add(REGION_MAP.get(chiiki, chiiki))
 
         area_changed = current_warn_areas != prev_warn_areas
-        warn_area_text = "、".join(sorted(current_warn_areas)) + "では" if current_warn_areas else ""
+        # 地域名が多すぎると読み上げが長くなるため、最大5地域に絞る
+        _area_list = sorted(current_warn_areas)
+        if len(_area_list) > 5:
+            warn_area_text = "、".join(_area_list[:5]) + "など各地では"
+        elif _area_list:
+            warn_area_text = "、".join(_area_list) + "では"
+        else:
+            warn_area_text = ""
 
         text = ""
         priority = 3
@@ -1890,7 +1912,11 @@ class QuakeTsunamiCog(commands.Cog):
         if serial == 1 or self.last_eew_data is None:
             if is_warn:
                 priority = 1
-                text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。{hypo}で地震。推定最大震度{max_int_str}。"
+                # 地域名がない場合でも警告は必ず読み上げる
+                if warn_area_text:
+                    text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。{hypo}で地震。推定最大震度{max_int_str}。"
+                else:
+                    text = f"緊急地震速報。強い揺れに警戒してください。{hypo}で地震。推定最大震度{max_int_str}。"
             else:
                 priority = 3
                 text = f"{hypo}で地震。推定最大震度{max_int_str}。"
@@ -1989,8 +2015,17 @@ class QuakeTsunamiCog(commands.Cog):
             logger.debug("音声: saisyu (最終報)")
 
         elif serial > 1:
-            await self.play_mp3("koushin")
-            logger.debug("音声: koushin (更新)")
+            # koushin が既にキューに溜まっている場合はスキップ
+            # (EEW更新が速い場合に無駄な再生が積み重なるのを防ぐ)
+            _koushin_in_queue = sum(
+                1 for k, _ in list(self.mp3_queue._queue)
+                if k == "koushin"
+            ) if hasattr(self.mp3_queue, "_queue") else 0
+            if _koushin_in_queue < 2:  # 最大2個まで許容
+                await self.play_mp3("koushin")
+                logger.debug("音声: koushin (更新)")
+            else:
+                logger.debug(f"音声: koushin スキップ (キュー内{_koushin_in_queue}個)")
 
         elif serial == 1 and not self.audio_flags.get("first"):
             await self.play_mp3("low_alert")
@@ -2004,9 +2039,38 @@ class QuakeTsunamiCog(commands.Cog):
     # ===============================
     @staticmethod
     def p2p_image_url(image_id: str) -> str | None:
+        """画像 URL を返す（存在確認なし）"""
         if not image_id:
             return None
         return f"https://cdn.p2pquake.net/app/images/{image_id}_trim_big.png"
+
+    async def _p2p_image_url_checked(self, image_id: str, max_retries: int = 3, wait: float = 2.0) -> str | None:
+        """HEAD リクエストで存在確認してから URL を返す。
+
+        高負荷時に P2P 画像がまだ生成されていない場合があるため、
+        wait 秒ずつ待機しながら max_retries 回試みる。
+        """
+        url = self.p2p_image_url(image_id)
+        if not url:
+            return None
+        for attempt in range(max_retries):
+            try:
+                async with self.session.head(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        return url
+                    logger.debug(
+                        f"P2P画像未生成 (attempt {attempt+1}/{max_retries}): "
+                        f"HTTP {resp.status} {url}"
+                    )
+            except Exception as e:
+                logger.debug(f"P2P画像HEAD失敗 (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(wait)
+        logger.debug(f"P2P画像: {max_retries}回試行後も取得できませんでした ({image_id})")
+        return None
 
     # ===============================
     # ===============================
@@ -2144,7 +2208,7 @@ class QuakeTsunamiCog(commands.Cog):
                 logger.error(f"LMoni→Wolfx変換エラー:\n{traceback.format_exc()}")
                 return None
 
-        logger.info("🌐 長周期地震動モニタ EEW ポーリング開始")
+        logger.info("長周期地震動モニタ EEW ポーリング開始")
 
         while not self.bot.is_closed():
             try:
@@ -2224,7 +2288,7 @@ class QuakeTsunamiCog(commands.Cog):
                     # Heartbeat alive
                     if self._wolfx_ws_alive == False and self._wolfx_heartbeat_timeout_warned:
                         logger.info(
-                            f"✅ Wolfx heartbeat 復旧 (elapsed={hb_elapsed:.1f}s)"
+                            f"Wolfx heartbeat 復旧 (elapsed={hb_elapsed:.1f}s)"
                         )
                         self._wolfx_heartbeat_timeout_warned = False
                     self._wolfx_ws_alive = True
@@ -2255,7 +2319,7 @@ class QuakeTsunamiCog(commands.Cog):
                 else:
                     eew_str = f"{int(eew_elapsed)}秒間 無受信"
                 logger.warning(
-                    f"⚠️ Wolfx EEW が応答しません "
+                    f"Wolfx EEW が応答しません "
                     f"(heartbeat timeout {hb_elapsed:.1f}秒、EEW {eew_str})"
                 )
                 logger.info(
@@ -2286,7 +2350,7 @@ class QuakeTsunamiCog(commands.Cog):
                 if not eew_timeout_exceeded:
                     reason += (" & " if reason else "") + "EEW 復活"
                 logger.warning(
-                    f"✅ Wolfx EEW 復旧 ({reason})"
+                    f"Wolfx EEW 復旧 ({reason})"
                 )
                 self._fallback_active = False
                 if self._fallback_task and not self._fallback_task.done():
@@ -2495,7 +2559,7 @@ class QuakeTsunamiCog(commands.Cog):
             }
             correction_text = correction_messages.get(correct)
             if correction_text:
-                description += f"\n\n**⚠ {correction_text}**"
+                description += f"\n\n【訂正】{correction_text}"
 
         if comments:
             description += f"\n\n{comments}"
@@ -2510,8 +2574,9 @@ class QuakeTsunamiCog(commands.Cog):
             embed.set_footer(text=" | ".join(footer_parts))
 
         # 全ての地震情報種別で画像を表示
+        # 高負荷時は画像生成が遅れるため HEAD で存在確認してからセット
         if quake_id:
-            map_url = self.p2p_image_url(quake_id)
+            map_url = await self._p2p_image_url_checked(quake_id)
             if map_url:
                 embed.set_image(url=map_url)
 
@@ -2652,11 +2717,11 @@ class QuakeTsunamiCog(commands.Cog):
                 # 警報レベル別の注意喚起文
                 alert_msg = ""
                 if max_grade == "MajorWarning":
-                    alert_msg = "\n🚨 **東日本大震災を思い出して！** 🚨\n"
+                    alert_msg = "\n【大津波警報】東日本大震災を思い出して！\n"
                 elif max_grade == "Warning":
-                    alert_msg = "\n⚠️ **すぐ逃げて！** ⚠️\n"
+                    alert_msg = "\n【津波警報】すぐ逃げて！\n"
                 elif "Watch" in str(area_groups.keys()):
-                    alert_msg = "\n⚠️ **海岸から離れて！** ⚠️\n"
+                    alert_msg = "\n【津波注意報】海岸から離れてください。\n"
                 
                 for grade in sorted(area_groups.keys(), key=lambda g: ["MajorWarning","Warning","Watch","Unknown"].index(g)):
                     items = area_groups[grade]
@@ -2669,7 +2734,7 @@ class QuakeTsunamiCog(commands.Cog):
                 # ===== 追加: コメント情報（Warning Comment）=====
                 warning_comment = data.get("comments", {}).get("warningComment", {}).get("text", "")
                 if warning_comment:
-                    description += f"\n⚠️ **注意**: {warning_comment}\n"
+                    description += f"\n【注意】{warning_comment}\n"
 
             # ===== 追加: 原因地震情報の強化 =====
             eq = data.get("earthquake", {})
@@ -2738,171 +2803,155 @@ class QuakeTsunamiCog(commands.Cog):
         channel = self.tsunami_channel or self.channel
         if not channel:
             return
+        # prev_obs_heights は津波イベントごとに観測点が追加される。
+        # 長期運用でキーが増えすぎないよう、一定数を超えたらクリア
+        if len(self.prev_obs_heights) > 200:
+            self.prev_obs_heights.clear()
+            logger.debug("prev_obs_heights をクリアしました（上限超過）")
         try:
-            ttl = list_item.get("ttl", "津波情報") if list_item else "津波情報"
-            title = f"{ttl}"
+            head = detail.get("Head", {})
+            body = detail.get("Body", {})
+
+            # タイトル: {Head.Title}（{Head.InfoType}）
+            head_title    = head.get("Title", list_item.get("ttl", "津波情報") if list_item else "津波情報")
+            head_info_type = head.get("InfoType", "")
+            title = f"{head_title}（{head_info_type}）" if head_info_type else head_title
             if is_test:
                 title = "【テスト】 " + title
 
-            report_time = "不明"
-            head = detail.get("Head", {})
-            body = detail.get("Body", {})
-            
-            # 発表機関と発表時刻
-            source = detail.get("Control", {}).get("PublishingOffice", "気象庁")
+            # 発表日時
             report_time = self.format_jma_time(head.get("ReportDateTime", "不明"))
-            
-            # 原因地震情報
+
+            # 有効期間（ValidDateTime が存在する場合のみ）
+            valid_dt_raw = head.get("ValidDateTime", "")
+            valid_dt_str = ""
+            valid_dt_obj = None
+            if valid_dt_raw:
+                try:
+                    valid_dt_obj = datetime.fromisoformat(valid_dt_raw)
+                    valid_dt_str = (
+                        f"{valid_dt_obj.year}年{valid_dt_obj.month}月{valid_dt_obj.day}日"
+                        f"{valid_dt_obj.hour}時{valid_dt_obj.minute:02d}分"
+                    )
+                except Exception:
+                    valid_dt_str = valid_dt_raw
+
+            # Headline.Text
+            headline_text = head.get("Headline", {}).get("Text", "") if isinstance(head.get("Headline"), dict) else ""
+
+            # Body.Text
+            body_text = body.get("Text", "")
+
+            # Body.Comments.WarningComment.Text
+            body_comments = body.get("Comments", {})
+            if isinstance(body_comments, dict):
+                warning_comment_text = (body_comments.get("WarningComment") or {}).get("Text", "")
+            else:
+                warning_comment_text = ""
+
+            # 原因地震
             cause_text = ""
             eq_list = body.get("Earthquake", [])
-            if eq_list and len(eq_list) > 0:
+            if eq_list:
                 eq = eq_list[0] if isinstance(eq_list, list) else eq_list
                 origin_time = self.format_jma_time(eq.get("OriginTime", "不明"))
-                hypo = eq.get("Hypocenter", {})
-                hypo_name = hypo.get("Area", {}).get("Name", "不明")
-                magnitude = eq.get("Magnitude", "不明")
-                depth = hypo.get("Depth", "")
-                depth_str = f"　深さ{depth}" if depth else ""
-                
-                # ===== 追加: Earthquake.Source を含める =====
-                eq_source = eq.get("Source", "")
-                source_note = ""
-                if eq_source:
-                    source_note = f" ※原因地震情報は {eq_source} からの情報です"
-                
-                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}\n\n"
-            
-            # 説明文の開始
-            description = (
-                f"**{title}**\n\n"
-                f"**発表機関:** {source}\n"
-                f"**発表時刻:** {report_time}\n"
-            )
-            
-            if cause_text:
-                description += f"**{cause_text}**"
-            
-            # 津波観測情報
-            tsunami = body.get("Tsunami", {})
-            obs = tsunami.get("Observation", {})
-            items = obs.get("Item", [])
-            
-            if items:
-                # 注意喚起文
-                description += "\n**避難を続けて！**\n"
-                
-                # 各地域の観測点情報
-                for item in items:
-                    area = item.get("Area", {})
-                    area_name = area.get("Name", "不明")
-                    
-                    description += f"**■ {area_name}**\n"
-                    
-                    stations = item.get("Station", [])
-                    if not stations:
-                        description += "　観測点なし\n"
-                        continue
-                    
-                    for st in stations:
-                        st_name = st.get("Name", "不明")
-                        
-                        # 高さ情報を取得
-                        max_h = st.get("MaxHeight", {})
-                        height_str = ""
-                        
-                        if isinstance(max_h, dict):
-                            condition = max_h.get("Condition", "")
-                            value = max_h.get("value")
-                            tsunami_height = max_h.get("TsunamiHeight", "")
-                            
-                            if condition:
-                                height_str = condition
-                            elif value is not None:
-                                height_str = f"{value}"
-                            elif tsunami_height:
-                                height_str = tsunami_height
-                        
-                        if not height_str:
-                            height_str = "欠測"
+                hypo        = eq.get("Hypocenter", {})
+                hypo_name   = hypo.get("Area", {}).get("Name", "不明")
+                magnitude   = eq.get("Magnitude", "不明")
+                depth       = hypo.get("Depth", "")
+                depth_str   = f" 深さ{depth}" if depth else ""
+                eq_source   = eq.get("Source", "")
+                source_note = f" ※震源情報出典: {eq_source}" if eq_source else ""
+                cause_text  = f"{hypo_name} M{magnitude}{depth_str}（{origin_time}発生）{source_note}"
 
-                        if height_str in ["微弱", "弱", "低い", "欠測", "観測中"]:
-                            height_display = height_str
-                        elif height_str.startswith("<0.2"):
-                            height_display = "0.2m未満"
-                        elif height_str and height_str[0].isdigit():
-                            height_display = f"{height_str}m"
-                        else:
-                            height_display = height_str
-                        
-                        # 到達情報を取得
-                        first_h = st.get("FirstHeight", {})
-                        arrival_text = ""
-                        
-                        if isinstance(first_h, dict):
-                            arrival_cond = first_h.get("Condition", "")
-                            if arrival_cond and height_str != "欠測":
-                                arrival_text = f"　{arrival_cond}"
-                        
-                        # 観測地点の表示
-                        description += f"　　{st_name}　　{height_display}{arrival_text}\n"
-                
-                description += "\n"
-            
-            # コメント情報
-            comment = tsunami.get("Comment", {})
-            free_form = comment.get("FreeFormComment", "")
-            if free_form:
-                description += f"{free_form}\n"
-            
-            # ===== 追加: Warning Comment =====
-            warning_comment = comment.get("WarningComment", {}).get("Text", "")
-            if warning_comment:
-                description += f"\n⚠️ **注意**: {warning_comment}\n"
-            
-            # 予報情報（参考）
-            forecast = tsunami.get("Forecast", {})
+            # 津波観測値セクション
+            tsunami     = body.get("Tsunami", {})
+            obs         = tsunami.get("Observation", {})
+            obs_items   = obs.get("Item", [])
+            obs_lines   = []
+            for item in obs_items:
+                area_name = item.get("Area", {}).get("Name", "不明")
+                obs_lines.append(f"■ {area_name}")
+                for st in item.get("Station", []):
+                    st_name = st.get("Name", "不明")
+                    max_h   = st.get("MaxHeight", {})
+                    height_str = ""
+                    if isinstance(max_h, dict):
+                        condition = max_h.get("Condition", "")
+                        value     = max_h.get("value")
+                        th        = max_h.get("TsunamiHeight", "")
+                        if condition:
+                            height_str = condition
+                        elif value is not None:
+                            height_str = str(value)
+                        elif th:
+                            height_str = th
+                    if not height_str:
+                        height_str = "欠測"
+                    if height_str in ("微弱", "弱", "低い", "欠測", "観測中"):
+                        height_display = height_str
+                    elif height_str.startswith("<0.2"):
+                        height_display = "0.2m未満"
+                    elif height_str and height_str[0].isdigit():
+                        height_display = f"{height_str}m"
+                    else:
+                        height_display = height_str
+                    first_h      = st.get("FirstHeight", {})
+                    arrival_text = ""
+                    if isinstance(first_h, dict):
+                        ac = first_h.get("Condition", "")
+                        if ac and height_str != "欠測":
+                            arrival_text = f" {ac}"
+                    obs_lines.append(f"  {st_name}　{height_display}{arrival_text}")
+
+            # --- description 組み立て ---
+            parts = [f"**{title}**", f"発表日時: {report_time}"]
+            if valid_dt_str:
+                parts.append(f"有効期間: {valid_dt_str}")
+            if cause_text:
+                parts.append(f"原因地震: {cause_text}")
+            if obs_lines:
+                parts.append("避難を続けてください。")
+                parts.append("\n".join(obs_lines))
+            if headline_text:
+                parts.append(headline_text)
+            if body_text:
+                parts.append(body_text)
+            if warning_comment_text:
+                parts.append(warning_comment_text)
+
+            description = "\n".join(parts)
+            description = self._truncate_embed_description(description, max_chars=4096)
+
+            # 警報レベル判定（Embed 色用）
+            forecast       = tsunami.get("Forecast", {})
             forecast_items = forecast.get("Item", [])
-            if forecast_items:
-                # 最大の警報レベルを取得
-                max_grade = "Unknown"
-                for fcast in forecast_items:
-                    cat = fcast.get("Category", {})
-                    kind = cat.get("Kind", {}).get("Name", "")
-                    if "大津波警報" in kind:
-                        max_grade = "MajorWarning"
-                        break
-                    elif "津波警報" in kind:
-                        max_grade = "Warning"
-                    elif "津波注意報" in kind and max_grade == "Unknown":
-                        max_grade = "Watch"
-                
-                # 警報ステータスを追加
-                if max_grade == "MajorWarning":
-                    description += "\n現在、大津波警報が発表されています"
-                elif max_grade == "Warning":
-                    description += "\n現在、津波警報が発表されています"
-                elif max_grade == "Watch":
-                    description += "\n現在、津波注意報が発表されています"
-            
-            # Embed 作成
-            color = 0x00BFFF
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=color
-            )
-            
-            # メンション
-            mention = ""
-            if any("大津波警報" in str(x) for x in forecast_items):
-                mention = f"{self.bot.user.mention} "
-            
-            await channel.send(mention, embed=embed)
+            max_grade      = "Unknown"
+            for fcast in forecast_items:
+                kind = fcast.get("Category", {}).get("Kind", {}).get("Name", "")
+                if "大津波警報" in kind:
+                    max_grade = "MajorWarning"
+                    break
+                elif "津波警報" in kind:
+                    max_grade = "Warning"
+                elif "津波注意報" in kind and max_grade == "Unknown":
+                    max_grade = "Watch"
+
+            color_map = {
+                "MajorWarning": 0xD344FC,
+                "Warning":      0xF93022,
+                "Watch":        0xEEDB2D,
+                "Unknown":      0x00BFFF,
+            }
+            color = color_map.get(max_grade, 0x00BFFF)
+
+            embed = discord.Embed(title=title, description=description, color=color)
+
+            await channel.send(embed=embed)
             logger.info(f"津波観測情報を通知しました: {title}")
-            
+
         except Exception as e:
-            logger.error(f"notify_tsunami_observation エラー: {e}")
-            logger.error(f"詳細:\n{traceback.format_exc()}")
+            logger.error(f"notify_tsunami_observation エラー: {e}\n{traceback.format_exc()}")
 
 
     async def notify_long_period(self, list_item, is_test=False, extra_note=None):
@@ -3097,7 +3146,7 @@ class QuakeTsunamiCog(commands.Cog):
                     image_file = discord.File(image_path, filename=image_filename)
                     embed.set_image(url=f"attachment://{image_filename}")
                 else:
-                    footer_parts.append("⚠ 地図画像が見つかりません（同じフォルダに置いてください）")
+                    footer_parts.append("地図画像が見つかりません（同じフォルダに置いてください）")
 
             if extra_note:
                 footer_parts.append(extra_note)
@@ -3184,7 +3233,7 @@ class QuakeTsunamiCog(commands.Cog):
                 color = 0x00FF00  # 緑
             
             # Embed を作成
-            title = f"🌍 USGS 地震情報 (M{mag:.1f})"
+            title = f"USGS 地震情報 (M{mag:.1f})"
             description = (
                 f"**発生時刻**: {occur_time_str}\n"
                 f"**震源地**: {place}\n"
@@ -3334,12 +3383,13 @@ class QuakeTsunamiCog(commands.Cog):
         """
         火山情報 detail JSON から Discord Embed を作成して送信する。
 
-        使用フィールド:
-          headTitle       : Embed タイトル
-          reportDatetime  : 発表日時（JST ISO 形式）
-          volcanoHeadline : 概要
-          volcanoActivity : 詳細
-          volcanoPrevention: 防災上の注意
+        通知フォーマット:
+          {controlTitle}（{infoType}）
+          発表機関: {publishingOffice}
+          発表日時: {reportDatetime}
+          概要: {volcanoHeadline}        ※キーが存在しない場合は省略
+          詳細: {volcanoActivity}        ※キーが存在しない場合は省略
+          防災上の注意: {volcanoPrevention} ※キーが存在しない場合は省略
         """
         channel = self.volcano_channel or self.channel
         if not channel:
@@ -3347,17 +3397,21 @@ class QuakeTsunamiCog(commands.Cog):
             return
 
         try:
-            head_title        = detail.get("headTitle", "火山情報")
-            report_datetime   = detail.get("reportDatetime", "")
-            volcano_headline  = (detail.get("volcanoHeadline") or "").strip()
-            volcano_activity  = (detail.get("volcanoActivity") or "").strip()
+            control_title      = (detail.get("controlTitle") or "火山情報").strip()
+            info_type          = (detail.get("infoType") or "").strip()
+            publishing_office  = (detail.get("publishingOffice") or "気象庁").strip()
+            report_datetime    = (detail.get("reportDatetime") or "").strip()
+            volcano_headline   = (detail.get("volcanoHeadline") or "").strip()
+            volcano_activity   = (detail.get("volcanoActivity") or "").strip()
             volcano_prevention = (detail.get("volcanoPrevention") or "").strip()
 
-            # 発表日時フォーマット
-            formatted_time = report_datetime  # フォールバック: そのまま
+            # タイトル: {controlTitle}（{infoType}）
+            title = f"{control_title}（{info_type}）" if info_type else control_title
+
+            # 発表日時フォーマット: ISO → 日本語
+            formatted_time = report_datetime
             if report_datetime:
                 try:
-                    # ISO 形式 "2026-06-15T12:00:00+09:00" → "2026年6月15日12時00分"
                     dt = datetime.fromisoformat(report_datetime)
                     formatted_time = (
                         f"{dt.year}年{dt.month}月{dt.day}日"
@@ -3366,58 +3420,57 @@ class QuakeTsunamiCog(commands.Cog):
                 except Exception:
                     pass
 
-            # 警戒レベルを抽出して色を決定
+            # 警戒レベルを抽出して Embed 色を決定
             alert_code = "00"
-            volcano_infos = detail.get("volcanoInfos") or []
-            if volcano_infos:
-                items = volcano_infos[0].get("items") or []
-                if items:
-                    alert_code = items[0].get("code", "00")
+            for vi in (detail.get("volcanoInfos") or []):
+                for it in (vi.get("items") or []):
+                    c = it.get("code", "")
+                    if c:
+                        alert_code = c
+                        break
+                if alert_code != "00":
+                    break
 
             COLOR_MAP = {
-                "01": 0x9932CC,  # 紫  L1
-                "02": 0xFF0000,  # 赤  L2
-                "03": 0xFF6600,  # 橙  L3
-                "04": 0xFFD700,  # 黄  L4
-                "05": 0x0000FF,  # 青  L5
+                "01": 0x9932CC,
+                "02": 0xFF0000,
+                "03": 0xFF6600,
+                "04": 0xFFD700,
+                "05": 0x0000FF,
             }
             embed_color = COLOR_MAP.get(alert_code, 0x808080)
 
-            # Embed 組み立て
+            # description 組み立て
+            lines = [
+                f"発表機関: {publishing_office}",
+                f"発表日時: {formatted_time}",
+            ]
+            if volcano_headline:
+                lines.append(f"概要: {volcano_headline}")
+            if volcano_activity:
+                act = volcano_activity if len(volcano_activity) <= 1020 else volcano_activity[:1020] + "…"
+                lines.append(f"詳細: {act}")
+            if volcano_prevention:
+                prev = volcano_prevention if len(volcano_prevention) <= 1020 else volcano_prevention[:1020] + "…"
+                lines.append(f"防災上の注意: {prev}")
+
+            description = "\n".join(lines)
+
             embed = discord.Embed(
-                title=head_title or "火山情報",
-                description=volcano_headline or "火山情報が発表されました。",
+                title=title,
+                description=description,
                 color=embed_color,
                 timestamp=datetime.now(),
             )
-
-            # 発表日時
-            if formatted_time:
-                embed.add_field(name="発表日時", value=formatted_time, inline=True)
-
-            # 詳細（volcanoActivity）
-            if volcano_activity:
-                # Discord フィールド上限 1024文字
-                if len(volcano_activity) > 1020:
-                    volcano_activity = volcano_activity[:1020] + "…"
-                embed.add_field(name="詳細", value=volcano_activity, inline=False)
-
-            # 防災上の注意（volcanoPrevention）
-            if volcano_prevention:
-                if len(volcano_prevention) > 1020:
-                    volcano_prevention = volcano_prevention[:1020] + "…"
-                embed.add_field(name="防災上の注意", value=volcano_prevention, inline=False)
-
             embed.set_footer(text=f"気象庁 | eventId: {event_id}")
 
             await channel.send(embed=embed)
-            logger.info(f"Volcano 通知完了: {head_title} eventId={event_id}")
+            logger.info(f"Volcano 通知完了: {title} eventId={event_id}")
 
-            # 読み上げ（警戒レベル L1〜L3 のみ）
+            # 読み上げ（L1〜L3 のみ）
             if alert_code in ("01", "02", "03"):
                 level = {"01": "1", "02": "2", "03": "3"}[alert_code]
-                speak_text = f"火山情報。{head_title}。警戒レベル{level}。"
-                await self.speak_local(speak_text, priority=1)
+                await self.speak_local(f"火山情報。{control_title}。警戒レベル{level}。", priority=1)
 
         except Exception as e:
             logger.error(f"_notify_volcano エラー: {e}", exc_info=True)
@@ -3451,16 +3504,16 @@ class QuakeTsunamiCog(commands.Cog):
             t = self._last_recv.get(key)
             count = self._recv_count.get(key, 0)
             if t is None:
-                return "⚪", "未受信"
+                return "--", "未受信"
             diff = int((now - t).total_seconds())
             time_str = t.strftime("%H:%M:%S")
             count_str = f"(計{count}件)"
             if diff < warn_sec:
-                icon = "🟢"
+                icon = "[OK]"
             elif diff < err_sec:
-                icon = "🟡"
+                icon = "[--]"
             else:
-                icon = "🔴"
+                icon = "[NG]"
             if diff < 60:
                 ago = f"{diff}秒前"
             elif diff < 3600:
@@ -3471,70 +3524,70 @@ class QuakeTsunamiCog(commands.Cog):
 
         def eew_source_status(is_active: bool, last_t: datetime | None) -> str:
             if not is_active:
-                return "⚪ STANDBY"
+                return "-- STANDBY"
             if last_t is None:
-                return "🟢 ONLINE (未受信)"
+                return "[OK] ONLINE (未受信)"
             diff = int((now - last_t).total_seconds())
             if diff < EEW_FALLBACK_TIMEOUT:
-                return f"🟢 ONLINE ({diff}秒前)"
-            return f"🔴 OFFLINE ({diff}秒前)"
+                return f"[OK] ONLINE ({diff}秒前)"
+            return f"[NG] OFFLINE ({diff}秒前)"
 
         def task_status(task_loop) -> str:
             if task_loop is None:
-                return "⚪ 未起動"
+                return "-- 未起動"
             if task_loop.is_running():
-                return "🟢 稼働中"
+                return "[OK] 稼働中"
             if task_loop.failed():
-                return "🔴 エラー停止"
-            return "🟡 停止"
+                return "[NG] エラー停止"
+            return "[--] 停止"
 
         def asyncio_task_status(task) -> str:
             if task is None:
-                return "⚪ 未起動"
+                return "-- 未起動"
             if not task.done():
-                return "🟢 稼働中"
+                return "[OK] 稼働中"
             if task.cancelled():
-                return "🟡 キャンセル"
+                return "[--] キャンセル"
             if task.exception() is not None:
-                return "🔴 エラー停止"
-            return "⚪ 完了"
+                return "[NG] エラー停止"
+            return "-- 完了"
 
         # Wolfx 状態
         now_mono = time.monotonic()
         if self._wolfx_last_heartbeat is None:
-            wolfx_icon, wolfx_detail = "⚪", "heartbeat 未受信（起動中）"
+            wolfx_icon, wolfx_detail = "--", "heartbeat 未受信（起動中）"
         else:
             hb_elapsed = now_mono - self._wolfx_last_heartbeat
             if hb_elapsed < WOLFX_HEARTBEAT_TIMEOUT:
-                wolfx_icon = "🟢"
+                wolfx_icon = "[OK]"
                 eew_detail = ""
                 if self._wolfx_last_eew_recv is not None:
                     eew_diff = int((now - self._wolfx_last_eew_recv).total_seconds())
                     eew_detail = f", EEW {eew_diff}秒前"
                 wolfx_detail = f"ONLINE ({hb_elapsed:.1f}s{eew_detail})"
             else:
-                wolfx_icon = "🔴"
+                wolfx_icon = "[NG]"
                 wolfx_detail = f"heartbeat TIMEOUT ({hb_elapsed:.1f}s > {WOLFX_HEARTBEAT_TIMEOUT}s)"
                 if self._fallback_active:
                     wolfx_detail += " → フォールバック中"
 
         color = 0x00FF00 if ping_ms < 100 else (0xFFFF00 if ping_ms < 300 else 0xFF0000)
         embed = discord.Embed(
-            title="📊 QTL_Bot ステータス",
+            title="QTL_Bot ステータス",
             color=color,
             timestamp=now,
         )
 
         # ── システム ──
-        sys_lines = [f"⏱ **稼働時間**: {uptime_str}", f"📡 **Ping**: {ping_ms}ms"]
+        sys_lines = [f"稼働時間: {uptime_str}", f"Ping: {ping_ms}ms"]
         if _psutil_ok:
             if STATUS_SHOW_CPU:
-                sys_lines.append(f"🖥 **CPU**: {cpu:.1f}%")
+                sys_lines.append(f"CPU: {cpu:.1f}%")
             if STATUS_SHOW_MEM:
-                sys_lines.append(f"🧠 **RAM**: {mem:.0f} / {mem_total:.0f} MB ({mem / mem_total * 100:.1f}%)")
+                sys_lines.append(f"RAM: {mem:.0f} / {mem_total:.0f} MB ({mem / mem_total * 100:.1f}%)")
             if STATUS_SHOW_DISK:
-                sys_lines.append(f"💾 **Disk**: {disk.percent:.1f}% ({disk.used // 1024**3:.1f}/{disk.total // 1024**3:.1f} GB)")
-        embed.add_field(name="🖥 システム", value="\n".join(sys_lines), inline=False)
+                sys_lines.append(f"Disk: {disk.percent:.1f}% ({disk.used // 1024**3:.1f}/{disk.total // 1024**3:.1f} GB)")
+        embed.add_field(name="システム", value="\n".join(sys_lines), inline=False)
 
         # ── EEW ──
         eew_lines = [
@@ -3544,8 +3597,8 @@ class QuakeTsunamiCog(commands.Cog):
             f"{eew_source_status(self._fallback_active, self._last_recv.get('lmoni'))} **LMoni EEW (fallback)**",
         ]
         if self._fallback_active:
-            eew_lines.append("⚠️ **フォールバック動作中** (Wolfx 停止検出)")
-        embed.add_field(name="🚨 EEW", value="\n".join(eew_lines), inline=False)
+            eew_lines.append("【警告】フォールバック動作中 (Wolfx 停止検出)")
+        embed.add_field(name="EEW", value="\n".join(eew_lines), inline=False)
 
         # ── API 受信状況 ──
         api_rows = [
@@ -3561,7 +3614,7 @@ class QuakeTsunamiCog(commands.Cog):
         for label, key, warn, err in api_rows:
             icon, detail = api_status(key, warn, err)
             api_lines.append(f"{icon} **{label}**: {detail}")
-        embed.add_field(name="📡 API 受信状況", value="\n".join(api_lines), inline=False)
+        embed.add_field(name="API 受信状況", value="\n".join(api_lines), inline=False)
 
         # ── タスク稼働状態 ──
         task_lines = [
@@ -3570,12 +3623,12 @@ class QuakeTsunamiCog(commands.Cog):
             f"{task_status(self.fetch_long_period)} **fetch_long_period**",
             f"{task_status(self.fetch_tsunami_observation)} **fetch_tsunami_observation**",
             f"{task_status(self.fetch_quake_advisory)} **fetch_quake_advisory**",
-            f"{task_status(self.fetch_usgs_quake) if USGS_ENABLED else '⚪ 無効'} **fetch_usgs_quake**",
+            f"{task_status(self.fetch_usgs_quake) if USGS_ENABLED else '-- 無効'} **fetch_usgs_quake**",
             f"{asyncio_task_status(self.speech_task)} **speech_worker**",
             f"{asyncio_task_status(self.mp3_task)} **mp3_worker**",
             f"{asyncio_task_status(self.volcano_task)} **volcano_poller**",
         ]
-        embed.add_field(name="⚙️ タスク稼働状態", value="\n".join(task_lines), inline=False)
+        embed.add_field(name="タスク稼働状態", value="\n".join(task_lines), inline=False)
 
         # ── USGS 設定 ──
         if USGS_ENABLED:
@@ -3583,7 +3636,7 @@ class QuakeTsunamiCog(commands.Cog):
                 f"対象地域: 緯度 {USGS_REGION_LAT_MIN}〜{USGS_REGION_LAT_MAX} / 経度 {USGS_REGION_LON_MIN}〜{USGS_REGION_LON_MAX}",
                 f"M下限: {USGS_MAGNITUDE_MIN} / ポーリング間隔: {USGS_FETCH_INTERVAL}秒 / 重複防止: {USGS_NOTIFICATION_COOLDOWN}秒",
             ]
-            embed.add_field(name="🌍 USGS 設定", value="\n".join(usgs_lines), inline=False)
+            embed.add_field(name="USGS 設定", value="\n".join(usgs_lines), inline=False)
 
         # ── フィルター設定 ──
         if STATUS_SHOW_UPTIME:
@@ -3591,7 +3644,7 @@ class QuakeTsunamiCog(commands.Cog):
                 f"震度下限: {INT_MAP.get(QUAKE_MIN_SCALE, str(QUAKE_MIN_SCALE))} / M下限: {QUAKE_MIN_MAG} / 深さ: {QUAKE_MIN_DEPTH}〜{QUAKE_MAX_DEPTH}km",
                 f"EEWフォールバック閾値: {EEW_FALLBACK_TIMEOUT}秒",
             ]
-            embed.add_field(name="⚙️ フィルター", value="\n".join(filter_lines), inline=False)
+            embed.add_field(name="フィルター", value="\n".join(filter_lines), inline=False)
 
         return embed
 
@@ -3605,7 +3658,7 @@ class QuakeTsunamiCog(commands.Cog):
     @cmd_status.error
     async def cmd_status_error(self, ctx, error):
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ このコマンドはサーバー管理者のみ実行可能です。", delete_after=5)
+            await ctx.send("このコマンドはサーバー管理者のみ実行可能です。", delete_after=5)
 
     @discord.app_commands.command(name="qtl_status", description="QTL_Bot の稼働状態・各API受信状況を表示します（管理者専用）")
     @discord.app_commands.default_permissions(administrator=True)
@@ -3818,7 +3871,7 @@ class QuakeTsunamiCog(commands.Cog):
             site = web.TCPSite(self._web_runner, "0.0.0.0", port)
             await site.start()
             
-            logger.info(f"✅ Web ダッシュボード起動: http://localhost:{port}/status")
+            logger.info(f"Web ダッシュボード起動: http://localhost:{port}/status")
         except Exception as e:
             logger.error(f"Web ダッシュボード起動失敗: {e}")
     
@@ -3869,11 +3922,11 @@ class QuakeTsunamiCog(commands.Cog):
                     )
                     
                     if disk_percent >= DISK_ERROR_THRESHOLD:
-                        logger.error(f"❌ {log_msg} - ディスク使用率が {DISK_ERROR_THRESHOLD}% を超えています")
+                        logger.error(f"{log_msg} - ディスク使用率が {DISK_ERROR_THRESHOLD}% を超えています")
                     elif disk_percent >= DISK_WARNING_THRESHOLD:
-                        logger.warning(f"⚠️  {log_msg} - ディスク使用率が {DISK_WARNING_THRESHOLD}% を超えています")
+                        logger.warning(f"{log_msg} - ディスク使用率が {DISK_WARNING_THRESHOLD}% を超えています")
                     else:
-                        logger.info(f"📊 {log_msg}")
+                        logger.info(f"リソース監視 {log_msg}")
                 
                 except Exception as e:
                     logger.error(f"リソース情報取得エラー: {e}")
@@ -4012,6 +4065,14 @@ class QuakeTsunamiCog(commands.Cog):
             
             # キャッシュを更新
             self.error_notification_cache[error_hash] = current_time
+
+            # 古いエントリを削除（メモリリーク防止: TTL の 2倍以上前のエントリを清掃）
+            if len(self.error_notification_cache) > 500:
+                cutoff = current_time - timedelta(seconds=ERROR_NOTIFICATION_TTL * 2)
+                self.error_notification_cache = {
+                    h: t for h, t in self.error_notification_cache.items()
+                    if t > cutoff
+                }
             
             # 日次エラー集計を更新
             self.error_count_today += 1
@@ -4021,7 +4082,7 @@ class QuakeTsunamiCog(commands.Cog):
             
             # Discord embed を生成
             embed = discord.Embed(
-                title="⚠️ エラー発生",
+                title="エラー発生",
                 description=f"**タイプ**: {error_type}\n**メッセージ**: {error_msg[:500]}",
                 color=discord.Color.red(),
                 timestamp=current_time
@@ -4065,7 +4126,7 @@ class QuakeTsunamiCog(commands.Cog):
                 ])
                 
                 embed = discord.Embed(
-                    title="📊 日次エラーサマリー",
+                    title="日次エラーサマリー",
                     description=f"**集計日**: {datetime.now().strftime('%Y-%m-%d')}\n**総エラー数**: {self.error_count_today} 件",
                     color=discord.Color.orange(),
                     timestamp=datetime.now()
@@ -4098,18 +4159,18 @@ async def main():
     
     async with bot:
         try:
-            logger.info("■ Cog 初期化開始...")
+            logger.info("Cog 初期化開始...")
             cog = QuakeTsunamiCog(bot)
             logger.info("  → QuakeTsunamiCog インスタンス化完了")
             
-            logger.info("■ bot.add_cog() 実行中...")
+            logger.info("bot.add_cog() 実行中...")
             await bot.add_cog(cog)
             logger.info("  → Cog の追加完了")
             
-            logger.info("■ bot.start() 実行中...")
+            logger.info("bot.start() 実行中...")
             await bot.start(BOT_TOKEN)
         except Exception as e:
-            logger.error(f"❌ Bot 起動エラー（詳細）: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"Bot 起動エラー: {type(e).__name__}: {e}", exc_info=True)
             raise
 
 
@@ -4223,7 +4284,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🛑 キーボード割り込みで終了します")
+        logger.info("キーボード割り込みで終了します")
     except Exception as e:
         logger.error(f"予期しないエラーで終了: {e}\n{traceback.format_exc()}")
     finally:
