@@ -391,7 +391,8 @@ class QuakeTsunamiCog(commands.Cog):
         # 火山情報ポーリング管理
         self._last_volcano_event_id = None        # 最後に通知した eventId（status 表示用）
         self._last_volcano_info_map: dict = {}    # 前回の info.json を {eventId: item} で保持（差分検知用）
-        self.volcano_task = None
+        self.volcano_event_queue: asyncio.Queue = asyncio.Queue()  # 通知待ち eventId キュー
+        self.process_volcano_task: asyncio.Task | None = None      # 通知処理タスク
         self._last_volcano_recv_time: datetime | None = None  # 最後の火山情報受信時刻
         self._volcano_recv_count: int = 0  # 火山情報受信回数
         
@@ -452,6 +453,7 @@ class QuakeTsunamiCog(commands.Cog):
             self.fetch_tsunami_observation,
             self.fetch_quake_advisory,
             self.fetch_usgs_quake,
+            self.poll_volcano,
         ):
             if loop_task.is_running():
                 loop_task.cancel()
@@ -461,6 +463,7 @@ class QuakeTsunamiCog(commands.Cog):
             self.lmoni_eew_task,
             self.speech_task,
             self.mp3_task,
+            self.process_volcano_task,
         ):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
@@ -540,19 +543,17 @@ class QuakeTsunamiCog(commands.Cog):
         if _env_bool("WEB_DASHBOARD_ENABLED", False):
             self.bot.loop.create_task(self.start_web_dashboard())
 
-        # 火山情報ポーリング開始（1分ごと）
-        if self.volcano_task is None or self.volcano_task.done():
-            async def volcano_poller():
-                await asyncio.sleep(5)  # 起動後5秒待機
-                while not self.bot.is_closed():
-                    try:
-                        await self.fetch_volcano_info()
-                    except Exception as e:
-                        logger.error(f"Volcano poller error: {e}")
-                    await asyncio.sleep(60)  # 1分ごと
+        # 火山情報監視ループ開始（@tasks.loop で1分ごとに info.json を確認）
+        if not self.poll_volcano.is_running():
+            self.poll_volcano.start()
+            logger.info("Volcano poll_volcano タスク開始 (every 1 minute)")
 
-            self.volcano_task = self.bot.loop.create_task(volcano_poller())
-            logger.info("Volcano polling started (every 1 minute)")
+        # 火山情報通知処理タスク開始（キューから eventId を取り出して通知）
+        if self.process_volcano_task is None or self.process_volcano_task.done():
+            self.process_volcano_task = self.bot.loop.create_task(
+                self.process_volcano_queue()
+            )
+            logger.info("Volcano process_volcano_queue タスク開始")
 
         # USGS 地震情報ポーリング開始
         if USGS_ENABLED:
@@ -2044,34 +2045,6 @@ class QuakeTsunamiCog(commands.Cog):
             return None
         return f"https://cdn.p2pquake.net/app/images/{image_id}_trim_big.png"
 
-    async def _p2p_image_url_checked(self, image_id: str, max_retries: int = 3, wait: float = 2.0) -> str | None:
-        """HEAD リクエストで存在確認してから URL を返す。
-
-        高負荷時に P2P 画像がまだ生成されていない場合があるため、
-        wait 秒ずつ待機しながら max_retries 回試みる。
-        """
-        url = self.p2p_image_url(image_id)
-        if not url:
-            return None
-        for attempt in range(max_retries):
-            try:
-                async with self.session.head(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        return url
-                    logger.debug(
-                        f"P2P画像未生成 (attempt {attempt+1}/{max_retries}): "
-                        f"HTTP {resp.status} {url}"
-                    )
-            except Exception as e:
-                logger.debug(f"P2P画像HEAD失敗 (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(wait)
-        logger.debug(f"P2P画像: {max_retries}回試行後も取得できませんでした ({image_id})")
-        return None
-
     # ===============================
     # ===============================
     # 長周期地震動モニタ EEW ポーリング
@@ -2574,9 +2547,8 @@ class QuakeTsunamiCog(commands.Cog):
             embed.set_footer(text=" | ".join(footer_parts))
 
         # 全ての地震情報種別で画像を表示
-        # 高負荷時は画像生成が遅れるため HEAD で存在確認してからセット
         if quake_id:
-            map_url = await self._p2p_image_url_checked(quake_id)
+            map_url = self.p2p_image_url(quake_id)
             if map_url:
                 embed.set_image(url=map_url)
 
@@ -3278,22 +3250,22 @@ class QuakeTsunamiCog(commands.Cog):
 # 火山情報通知
 # ===============================
 
-    async def fetch_volcano_info(self):
+    # ===============================
+    # 火山情報 — 更新検知ループ（@tasks.loop）
+    # ===============================
+
+    @tasks.loop(seconds=60)
+    async def poll_volcano(self):
         """
-        JMA 火山情報を取得・通知する。
+        JMA info.json を1分ごとにフェッチし、前回から変更・追加された
+        eventId を volcano_event_queue に積む（更新検知のみ担当）。
 
-        【処理手順】
-        ① info.json をフェッチし、全オブジェクトの eventId を取得
-        ② 前回取得と比較して変更・追加されたオブジェクトの eventId を抽出
-        ③ 各 eventId で info/{eventId}.json をフェッチして Discord に通知
-        ④ 次回ループのために現在の info.json を保存
-
-        差分検知キー: _last_volcano_info_list（前回の info.json 全体を dict で保持）
+        - 初回: 先頭1件のみキューに積む（起動時の大量通知を防止）
+        - 2回目以降: 前回 dict にない eventId をすべてキューに積む
         """
         HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
 
         try:
-            # Step①: info.json をフェッチ
             async with self.session.get(
                 "https://www.jma.go.jp/bosai/volcano/data/info.json",
                 timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
@@ -3315,36 +3287,61 @@ class QuakeTsunamiCog(commands.Cog):
             logger.error(f"Volcano info.json fetch unexpected error: {e}")
             return
 
-        # Step②: 前回リストと比較して変更・追加された eventId を抽出
-        # 初回は先頭1件のみ通知し、2回目以降は差分をすべて通知
-        prev: dict[str, dict] = getattr(self, "_last_volcano_info_map", {})
-        curr: dict[str, dict] = {item["eventId"]: item for item in info_list if item.get("eventId")}
+        prev: dict[str, dict] = self._last_volcano_info_map
+        curr: dict[str, dict] = {
+            item["eventId"]: item for item in info_list if item.get("eventId")
+        }
 
         if not prev:
-            # 初回: 先頭1件だけ通知（大量通知を防ぐ）
+            # 初回: 先頭1件のみ
             first_item = info_list[0]
             event_id = first_item.get("eventId")
             if event_id:
-                target_ids = [event_id]
-                logger.info(f"Volcano: 初回起動 先頭1件を通知 eventId={event_id}")
+                await self.volcano_event_queue.put(event_id)
+                logger.info(f"Volcano: 初回起動 先頭1件をキューに追加 eventId={event_id}")
             else:
                 logger.debug("Volcano: 初回起動 eventId なし")
-                self._last_volcano_info_map = curr
-                return
         else:
-            # 2回目以降: 前回にない eventId = 新規 or 更新として通知
-            target_ids = [
-                eid for eid in curr
-                if eid not in prev
-            ]
-            if not target_ids:
+            # 2回目以降: 前回にない eventId をすべてキューに追加
+            new_ids = [eid for eid in curr if eid not in prev]
+            if not new_ids:
                 logger.debug("Volcano: no change")
-                self._last_volcano_info_map = curr
-                return
-            logger.info(f"Volcano: {len(target_ids)}件の新規/更新を検知 {target_ids}")
+            else:
+                logger.info(f"Volcano: {len(new_ids)}件の新規/更新を検知 {new_ids}")
+                for eid in new_ids:
+                    await self.volcano_event_queue.put(eid)
 
-        # Step③: 各 eventId で詳細を取得して通知
-        for event_id in target_ids:
+        # 次回ループのために現在のリストを保存
+        self._last_volcano_info_map = curr
+
+    @poll_volcano.before_loop
+    async def before_poll_volcano(self):
+        """セッション初期化・Bot 準備完了まで待機（起動後5秒の余裕を持たせる）"""
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(5)
+
+    # ===============================
+    # 火山情報 — 通知処理タスク（asyncio.Task 常駐ループ）
+    # ===============================
+
+    async def process_volcano_queue(self):
+        """
+        volcano_event_queue に積まれた eventId を順番に処理する常駐タスク。
+
+        - info/{eventId}.json をフェッチして Discord に通知
+        - 複数件が連続して積まれている場合は JMA 負荷軽減のため2秒間隔を空ける
+        """
+        HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
+
+        logger.debug("process_volcano_queue 開始")
+        while not self.bot.is_closed():
+            try:
+                # キューから次の eventId を取得（空なら待機）
+                event_id: str = await self.volcano_event_queue.get()
+            except asyncio.CancelledError:
+                logger.info("process_volcano_queue がキャンセルされました")
+                break
+
             try:
                 detail_url = f"https://www.jma.go.jp/bosai/volcano/data/info/{event_id}.json"
                 async with self.session.get(
@@ -3353,7 +3350,11 @@ class QuakeTsunamiCog(commands.Cog):
                     headers=HEADERS,
                 ) as detail_resp:
                     if detail_resp.status != 200:
-                        logger.warning(f"Volcano detail fetch failed: HTTP {detail_resp.status} eventId={event_id}")
+                        logger.warning(
+                            f"Volcano detail fetch failed: HTTP {detail_resp.status} "
+                            f"eventId={event_id}"
+                        )
+                        self.volcano_event_queue.task_done()
                         continue
 
                     detail: dict = await detail_resp.json(content_type=None)
@@ -3361,23 +3362,31 @@ class QuakeTsunamiCog(commands.Cog):
                 await self._notify_volcano(detail, event_id)
 
                 # 受信統計を更新
-                self._last_recv["volcano"] = datetime.now()
+                now = datetime.now()
+                self._last_recv["volcano"] = now
                 self._recv_count["volcano"] = self._recv_count.get("volcano", 0) + 1
-                self._last_volcano_recv_time = datetime.now()
+                self._last_volcano_recv_time = now
                 self._volcano_recv_count += 1
-                self._last_volcano_event_id = event_id  # status 表示用（最後に処理した ID）
+                self._last_volcano_event_id = event_id
 
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 logger.warning(f"Volcano detail fetch error: {type(e).__name__} eventId={event_id}")
+            except asyncio.CancelledError:
+                self.volcano_event_queue.task_done()
+                logger.info("process_volcano_queue がキャンセルされました")
+                break
             except Exception as e:
                 logger.error(f"Volcano detail error: {e} eventId={event_id}", exc_info=True)
+            finally:
+                try:
+                    self.volcano_event_queue.task_done()
+                except Exception:
+                    pass
 
-            # JMAサーバーへの負荷軽減: 複数件ある場合は間隔を空ける
-            if len(target_ids) > 1:
+            # キューにさらに件数が残っている場合は JMA への負荷軽減で待機
+            if not self.volcano_event_queue.empty():
                 await asyncio.sleep(2)
 
-        # Step④: 次回ループのために現在のリストを保存
-        self._last_volcano_info_map = curr
 
     async def _notify_volcano(self, detail: dict, event_id: str) -> None:
         """
@@ -3626,7 +3635,8 @@ class QuakeTsunamiCog(commands.Cog):
             f"{task_status(self.fetch_usgs_quake) if USGS_ENABLED else '-- 無効'} **fetch_usgs_quake**",
             f"{asyncio_task_status(self.speech_task)} **speech_worker**",
             f"{asyncio_task_status(self.mp3_task)} **mp3_worker**",
-            f"{asyncio_task_status(self.volcano_task)} **volcano_poller**",
+            f"{task_status(self.poll_volcano)} **poll_volcano**",
+            f"{asyncio_task_status(self.process_volcano_task)} **process_volcano_queue**",
         ]
         embed.add_field(name="タスク稼働状態", value="\n".join(task_lines), inline=False)
 
@@ -3767,7 +3777,8 @@ class QuakeTsunamiCog(commands.Cog):
                     "fetch_usgs_quake": _loop_status(self.fetch_usgs_quake) if USGS_ENABLED else "disabled",
                     "speech_worker": _task_status(self.speech_task),
                     "mp3_worker": _task_status(self.mp3_task),
-                    "volcano_poller": _task_status(self.volcano_task),
+                    "poll_volcano": _loop_status(self.poll_volcano),
+                    "process_volcano_queue": _task_status(self.process_volcano_task),
                 }
 
                 # USGS
@@ -3819,7 +3830,8 @@ class QuakeTsunamiCog(commands.Cog):
                         "quake_advisory": _api_info("quake_advisory"),
                         "volcano": {
                             "last_event_id": self._last_volcano_event_id,
-                            "polling_status": _task_status(self.volcano_task),
+                            "polling_status": _loop_status(self.poll_volcano),
+                        "notify_status": _task_status(self.process_volcano_task),
                             **_api_info("volcano"),
                             "total_recv_count": self._volcano_recv_count,
                         },
@@ -3834,7 +3846,7 @@ class QuakeTsunamiCog(commands.Cog):
                     "volcano_monitoring": {
                         "last_event_id": self._last_volcano_event_id,
                         "last_recv_time": self._last_volcano_recv_time.isoformat() if self._last_volcano_recv_time else None,
-                        "polling_status": "active" if self.volcano_task and not self.volcano_task.done() else "inactive",
+                        "polling_status": "active" if self.poll_volcano.is_running() else "inactive",
                         "total_recv_count": self._volcano_recv_count,
                     },
                     "memory_usage_mb": system_info.get("memory_mb", 0),
