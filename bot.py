@@ -1898,11 +1898,8 @@ class QuakeTsunamiCog(commands.Cog):
                         prev_warn_areas.add(REGION_MAP.get(chiiki, chiiki))
 
         area_changed = current_warn_areas != prev_warn_areas
-        # 地域名が多すぎると読み上げが長くなるため、最大5地域に絞る
         _area_list = sorted(current_warn_areas)
-        if len(_area_list) > 5:
-            warn_area_text = "、".join(_area_list[:5]) + "など各地では"
-        elif _area_list:
+        if _area_list:
             warn_area_text = "、".join(_area_list) + "では"
         else:
             warn_area_text = ""

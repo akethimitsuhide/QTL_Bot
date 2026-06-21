@@ -9,13 +9,13 @@
 ### 地震情報通知
 - **EEW（緊急地震速報）**: Wolfx WebSocket でリアルタイム受信
   - 予測震度・推奨行動を通知
-  - 警報地域を最大5件読み上げ（AquesTalkPi）
+  - 警報地域をすべて読み上げ（AquesTalkPi）
   - 警報地域追加時に高優先で再読み上げ
 - **P2P 地震情報**: P2P 地震情報 API からの確報情報（震度速報・震源情報・各地の震度情報）
 - **EEW フォールバック**: Wolfx WebSocket が無応答になると P2P EEW / LMoni EEW に自動切り替え
 
-### 津波情報
-- JMA 津波情報 API から自動取得
+### 津波警報
+- JMA 津波警報 API から自動取得
 - 警報種別別の色分け（大津波警報 / 津波警報 / 津波注意報）
 - 通知フォーマット: `{Head.Title}（{Head.InfoType}）` / 発表日時 / 有効期間 / 原因地震 / `{Head.Headline.Text}` / 津波観測値 / `{Body.Text}` / `{Body.Comments.WarningComment.Text}`
 - `Head.ValidDateTime` が存在する場合のみ「有効期間」を表示（ISO 8601 → 日本語形式に変換）
@@ -77,14 +77,14 @@
 
 ### インストール
 ```bash
-git clone https://github.com/yourusername/qtl-bot.git
-cd qtl-bot
+git clone https://github.com/akethimitsuhide/QTL_Bot.git
+cd QTL_Bot
 pip install -r requirements.txt
 ```
 
 ### 設定
 ```bash
-cp example.md .env   # example.md の bash コードブロック内容を .env としてコピー
+cp .env.example .env   # example.md の bash コードブロック内容を .env としてコピー
 ```
 
 必須設定:
@@ -397,7 +397,6 @@ grep -i volcano qtlbot.log | tail -20
 
 ### EEW 読み上げで地域名が出ない
 - `AQUESTALK_PATH` が正しく設定されているか確認
-- 警報地域が5件を超える場合は先頭5件＋「など各地」に省略されます
 
 ### USGS 地震情報が重複通知される
 - `USGS_NOTIFICATION_COOLDOWN` のデフォルトは 86400 秒（24時間）です
