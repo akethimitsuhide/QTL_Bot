@@ -393,7 +393,10 @@ class QuakeTsunamiCog(commands.Cog):
             "vxse52": "vxse52.mp3",
             "vxse53": "vxse53.mp3",
             "vxse5c": "vxse5c.mp3",
-            "zencyu": "zencyu.mp3",
+            "zencyu":  "zencyu.mp3",
+            "lv100":   "lv100.mp3",
+            "lv1000":  "lv1000.mp3",
+            "lv2000":  "lv2000.mp3",
         }
         self.audio_flags = {"warning": False, "int3": False, "first": False, "final": False, "cancel": False}
 
@@ -2137,7 +2140,7 @@ class QuakeTsunamiCog(commands.Cog):
         JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
         LMONI_BASE = "https://www.lmoni.bosai.go.jp/monitor/data/data/map_img/RealTimeImg/abrspmx_s"
         DELAY_SEC  = 4
-        STEP_SEC   = 5
+        STEP_SEC   = 3
         MAX_RETRY  = 4
 
         # 直前に取得できた画像URLをキャッシュして同一秒への重複HEADリクエストを防ぐ
@@ -2145,6 +2148,9 @@ class QuakeTsunamiCog(commands.Cog):
         _last_lmoni_url:  str | None = None
         _last_jma_s_ts:   str        = ""
         _last_lmoni_ts:   str        = ""
+        # 振動レベル MP3 のtier管理（tier変化時のみ再生）
+        # 0=100未満, 1=100-999, 2=1000-1999, 3=2000以上
+        _prev_vib_tier: int = 0
 
         async def find_monitor_image(base_url: str, suffix: str,
                                      last_url: str | None, last_ts: str
@@ -2195,6 +2201,23 @@ class QuakeTsunamiCog(commands.Cog):
                     LMONI_BASE, "abrspmx_s", _last_lmoni_url, _last_lmoni_ts
                 )
 
+                # ── 振動レベル MP3（tier 変化時のみ再生）──
+                if level is not None:
+                    if level >= 2000:
+                        cur_tier = 3
+                    elif level >= 1000:
+                        cur_tier = 2
+                    elif level >= 100:
+                        cur_tier = 1
+                    else:
+                        cur_tier = 0
+                    if cur_tier != _prev_vib_tier:
+                        _prev_vib_tier = cur_tier
+                        mp3_key = {3: "lv2000", 2: "lv1000", 1: "lv100"}.get(cur_tier)
+                        if mp3_key:
+                            await self.play_mp3(mp3_key)
+                            logger.info(f"振動レベル MP3 再生: {mp3_key} (level={level})")
+
                 if level is not None or _last_jma_s_url or _last_lmoni_url:
                     if level is not None:
                         if level >= 1000:
@@ -2226,7 +2249,7 @@ class QuakeTsunamiCog(commands.Cog):
 
                     await channel.send(embed=embed)
 
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
 
         except asyncio.CancelledError:
             logger.info(f"強震モニタ監視終了 (EventID={target_event_id})")
