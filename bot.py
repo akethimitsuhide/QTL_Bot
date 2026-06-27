@@ -325,6 +325,7 @@ class QuakeTsunamiCog(commands.Cog):
         self.last_quake_advisory_id = None
         self.last_tsunami_observation_id = None
         self.last_advisory_ids = {}
+        self._last_zencyu_time: datetime | None = None  # 全周波数 MP3 最終再生時刻（15分クールダウン）
         self.prev_obs_heights = defaultdict(dict)
         self.vibration_monitor_task = None
         self.monitored_event_id = None
@@ -392,6 +393,7 @@ class QuakeTsunamiCog(commands.Cog):
             "vxse52": "vxse52.mp3",
             "vxse53": "vxse53.mp3",
             "vxse5c": "vxse5c.mp3",
+            "zencyu": "zencyu.mp3",
         }
         self.audio_flags = {"warning": False, "int3": False, "first": False, "final": False, "cancel": False}
 
@@ -2348,6 +2350,24 @@ class QuakeTsunamiCog(commands.Cog):
         if quake_id:
             self.bot.loop.create_task(self._attach_p2p_image(sent_msg, quake_id))
 
+        # 震度速報で最大震度6弱以上 → 2.5秒後に zencyu.mp3 再生（15分クールダウン）
+        if issue_type == "ScalePrompt" and max_scale_val >= 55:
+            now_dt = datetime.now()
+            cooldown_ok = (
+                self._last_zencyu_time is None
+                or (now_dt - self._last_zencyu_time).total_seconds() >= 900
+            )
+            if cooldown_ok:
+                self._last_zencyu_time = now_dt
+                async def _play_zencyu_delayed():
+                    await asyncio.sleep(2.5)
+                    await self.play_mp3("zencyu")
+                    logger.info(f"zencyu.mp3 再生: maxScale={max_scale_val} ({max_scale_str})")
+                self.bot.loop.create_task(_play_zencyu_delayed())
+            else:
+                remain = 900 - int((now_dt - self._last_zencyu_time).total_seconds())
+                logger.debug(f"zencyu.mp3 クールダウン中 (あと{remain}秒)")
+
         # occur_time は既に「YYYY年M月D日H時MM分頃」形式なので
         # 読み上げ用に「H時MM分頃、」部分だけ抽出する
         time_str = ""
@@ -3456,11 +3476,11 @@ class QuakeTsunamiCog(commands.Cog):
 
     async def fetch_eruption_info(self) -> None:
         """
-        JMA 気象庁 eqvol API から噴火速報（VFVO50）を取得・通知する。
-        URL: https://www.jma.go.jp/bosai/eqvol/data/VFVO50/list.json
+        JMA 気象庁 volcano API から噴火速報を取得・通知する。
+        URL: https://www.jma.go.jp/bosai/volcano/data/eruption.json
         """
         HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
-        LIST_URL = "https://www.jma.go.jp/bosai/eqvol/data/VFVO50/list.json"
+        LIST_URL = "https://www.jma.go.jp/bosai/volcano/data/eruption.json"
 
         try:
             async with self.session.get(
@@ -3493,7 +3513,7 @@ class QuakeTsunamiCog(commands.Cog):
             json_path = latest.get("json")
             if not json_path:
                 return
-            detail_url = f"https://www.jma.go.jp/bosai/eqvol/data/{json_path}"
+            detail_url = f"https://www.jma.go.jp/bosai/volcano/data/{json_path}"
             async with self.session.get(
                 detail_url,
                 timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
@@ -3570,11 +3590,11 @@ class QuakeTsunamiCog(commands.Cog):
 
     async def fetch_warning_info(self) -> None:
         """
-        JMA 気象庁 eqvol API から噴火警報（VFVO53）を取得・通知する。
-        URL: https://www.jma.go.jp/bosai/eqvol/data/VFVO53/list.json
+        JMA 気象庁 volcano API から噴火警報を取得・通知する。
+        URL: https://www.jma.go.jp/bosai/volcano/data/warning.json
         """
         HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
-        LIST_URL = "https://www.jma.go.jp/bosai/eqvol/data/VFVO53/list.json"
+        LIST_URL = "https://www.jma.go.jp/bosai/volcano/data/warning.json"
 
         try:
             async with self.session.get(
@@ -3606,7 +3626,7 @@ class QuakeTsunamiCog(commands.Cog):
             json_path = latest.get("json")
             if not json_path:
                 return
-            detail_url = f"https://www.jma.go.jp/bosai/eqvol/data/{json_path}"
+            detail_url = f"https://www.jma.go.jp/bosai/volcano/data/{json_path}"
             async with self.session.get(
                 detail_url,
                 timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),

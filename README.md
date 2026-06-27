@@ -334,8 +334,8 @@ curl http://localhost:8080/health
 |:---|:---|
 | 火山情報リスト | `https://www.jma.go.jp/bosai/volcano/data/info.json` |
 | 火山情報詳細 | `https://www.jma.go.jp/bosai/volcano/data/{json_filename}` |
-| 噴火速報リスト | `https://www.jma.go.jp/bosai/eqvol/data/VFVO50/list.json` |
-| 噴火警報リスト | `https://www.jma.go.jp/bosai/eqvol/data/VFVO53/list.json` |
+| 噴火速報リスト | `https://www.jma.go.jp/bosai/volcano/data/eruption.json` |
+| 噴火警報リスト | `https://www.jma.go.jp/bosai/volcano/data/warning.json` |
 
 ### 差分検知
 `info.json` の先頭エントリの `json` フィールドを前回値と比較し、変化があれば詳細を取得して通知します。
