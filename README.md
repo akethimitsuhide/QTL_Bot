@@ -8,62 +8,55 @@
 
 ### 地震情報通知
 - **EEW（緊急地震速報）**: Wolfx WebSocket でリアルタイム受信
-  - 予測震度・推奨行動を通知
-  - 警報地域をすべて読み上げ（AquesTalkPi）
-  - 警報地域追加時に高優先で再読み上げ
-- **P2P 地震情報**: P2P 地震情報 API からの確報情報（震度速報・震源情報・各地の震度情報）
-- **EEW フォールバック**: Wolfx WebSocket が無応答になると P2P EEW / LMoni EEW に自動切り替え
+  - 予測震度、到達時間、推奨行動を通知
+  - 音声読み上げ対応（AquesTalkPi）
+- **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報 WebSocket から警報のみを常時受信
+  - Wolfx と同時並行稼働（EventID による重複排除あり）
+- **地震速報**: P2P 地震情報 API からの確報情報
 
-### 津波警報
-- JMA 津波警報 API から自動取得
-- 警報種別別の色分け（大津波警報 / 津波警報 / 津波注意報）
-- 通知フォーマット: `{Head.Title}（{Head.InfoType}）` / 発表日時 / 有効期間 / 原因地震 / `{Head.Headline.Text}` / 津波観測値 / `{Body.Text}` / `{Body.Comments.WarningComment.Text}`
-- `Head.ValidDateTime` が存在する場合のみ「有効期間」を表示（ISO 8601 → 日本語形式に変換）
-- 有効期限切れの情報は通知しない
-- 原因地震に `Earthquake.Source` が存在する場合は出典を付記
+### 津波情報
+- JMA 津波警報 API から自動取得（予報・警報・注意報）
+- 警報種別・予想高さ別のエリア一覧表示（大津波警報 / 津波警報 / 津波注意報 / 津波予報）
+- 本文（`Body.Text`）・解説（`Body.Comments.FreeFormComment`）を通知下部に追記
+- 津波観測情報（`VTSE41/51`）を別関数で処理
 
 ### 火山情報
-- JMA 火山情報 API からのリアルタイム監視
-- **更新検知と通知処理を分離した2タスク構成**:
-  - `poll_volcano` (@tasks.loop, 1分ごと): info.json を取得し差分を検知してキューに投入
-  - `process_volcano_queue` (asyncio.Task): キューから eventId を取り出し詳細取得・通知
-- 通知フォーマット: `{controlTitle}（{infoType}）` / 発表機関 / 発表日時 / 概要 / 詳細 / 防災上の注意
-- 噴火警戒レベル L1–L5 の色分け表示
-- 警戒レベル L1–L3 は音声読み上げ
+- JMA 火山情報 API からのリアルタイム監視（1分ごと）
+- 差分検知ベース（`json` フィールドの変化で新規判定）
+- 火山活動の状況・予防措置・次回発表予定を通知
+- 噴火速報（VFVO50）・噴火警報（VFVO53）の独立ポーリング
 
-### USGS 地震情報
-- 米国地質調査所（USGS）の `all_day.geojson`（過去24時間）から海外の地震情報を取得
+### USGS 地震情報通知
+- 米国地質調査所（USGS）から海外の地震情報を取得
 - 対象地域・マグニチュード閾値をカスタマイズ可能
-- 重複通知防止（通知済み ID を `USGS_NOTIFICATION_COOLDOWN` 秒保持）
-- Bot 起動時に最新の対象地震を1件通知
+- 重複排除機能（クールダウン付き）
 
 ### エラー自動通知
-- 重大エラー発生時に管理者チャンネルに自動通知（1時間以内の重複を抑制）
-- 毎日 00:00 に前日のエラー集計を通知
+- 重大エラー発生時に管理者チャンネルに自動通知（1時間に1回）
+- 日次サマリー（毎日 00:00 に前日のエラー集計を通知）
+- 管理者チャンネルは `ADMIN_CHANNEL_ID` で設定
 
 ### ヘルスチェック
-- Wolfx WebSocket / JMA API / P2P 地震情報の疎通確認
+- Wolfx WebSocket、JMA API、P2P 地震情報の疎通確認
 - `/health/full` エンドポイントで詳細情報を取得（30秒キャッシュ）
 
 ### ログ管理
-- `RotatingFileHandler` による自動ログローテーション（デフォルト: 10MB × 7世代）
-- ファイル / コンソールで独立したログレベル設定
-- 同一メッセージを指定秒数以内は出力抑制（ERROR 以上は常に出力）
-- aiohttp.access の 2xx 成功ログを自動除外
+- `RotatingFileHandler` による自動ログローテーション（デフォルト: 10MB x 7世代）
+- ファイル / コンソール独立ログレベル設定（`LOG_LEVEL_FILE` / `LOG_LEVEL_CONSOLE`）
+- 重複ログ抑制: 同一メッセージを指定秒数以内は出力抑制（ERROR 以上は常に出力）
 
 ### リソース監視
-- 1時間ごとに CPU・メモリ・ディスク使用率を記録
-- ディスク使用率が閾値を超えると WARNING / ERROR を記録
+- 1 時間ごとに CPU・メモリ・ディスク使用率を記録
+- ディスク使用率が 80% 以上で WARNING、90% 以上で ERROR を記録
 
 ### 長周期地震動
-- 長周期地震動の観測情報（1分ごとのポーリング）
+- 長周期地震動の観測情報
 - リアルタイム強震モニタ画像
 
 ### Web Dashboard / コマンド
-- `GET /status`: 詳細な稼働状況 JSON（タスク稼働状態・USGS 設定・システムリソース等）
-- `GET /health/full`: API 疎通確認
-- `!status`: プレフィックスコマンド（管理者専用）
-- `/qtl_status`: スラッシュコマンド（管理者専用、`!status` と同内容）
+- `GET /status` で詳細な稼働状況を JSON で取得
+- `!status` コマンド（管理者専用）
+- `/qtl_status` スラッシュコマンド（管理者専用）
 
 ---
 
@@ -72,39 +65,51 @@
 ### 必須環境
 - Python 3.11+
 - discord.py 2.0+
-- aiohttp / websockets / pygame / python-dotenv
-- psutil（推奨：リソース監視・Web Dashboard 用）
+- aiohttp（非同期 HTTP 通信）
+- psutil（オプション：システムリソース監視）
 
 ### インストール
 ```bash
 git clone https://github.com/akethimitsuhide/QTL_Bot.git
 cd QTL_Bot
 pip install -r requirements.txt
+
+# AquesTalkPi インストール（オプション：音声読み上げ）
+# Raspberry Pi 向け: https://www.a-quest.com/products/aquestalkpi.html
 ```
 
 ### 設定
-```bash
-cp .env.example .env   # example.md の bash コードブロック内容を .env としてコピー
-```
 
-必須設定:
+#### 1. Discord Bot トークン取得
+1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセス
+2. 新規アプリケーション作成
+3. "Bot" タブから Bot トークンをコピー
+4. 必要な Intent を有効化：
+   - Message Content Intent
+   - Server Members Intent
+5. サーバーに Bot を招待（OAuth2 URL で Administrator 権限付与）
+
+#### 2. 環境変数設定
+`.env` ファイルを作成：
 ```bash
 BOT_TOKEN=your_bot_token_here
-CHANNEL_ID=your_channel_id
+CHANNEL_ID=default_notification_channel_id
 ```
 
-### 起動
+#### 3. チャンネル設定
+Bot が通知を送信するテキストチャンネルを作成し、ID を `.env` に設定：
+- `EEW_CHANNEL_ID` : EEW（緊急地震速報）
+- `P2P_EEW_CHANNEL_ID` : P2P EEW（緊急地震速報（警報））
+- `QUAKE_CHANNEL_ID` : 地震情報
+- `TSUNAMI_CHANNEL_ID` : 津波警報
+- `VOLCANO_CHANNEL_ID` : 火山情報
+- `USGS_CHANNEL_ID` : USGS 海外地震情報（未設定時は `QUAKE_CHANNEL_ID`）
+
+未設定のチャンネルはすべて `CHANNEL_ID` にフォールバックします。
+
+#### 4. Bot の起動
 ```bash
 python bot.py
-```
-
-正常起動時のログ:
-```
-[INFO] ロギングをセットアップしました (FILE=INFO/CONSOLE=INFO, ...)
-[INFO] スラッシュコマンドを同期しました（N件）
-[INFO] ログイン完了: BotName#1234
-[INFO] Volcano poll_volcano タスク開始 (every 1 minute)
-[INFO] Web ダッシュボード起動: http://localhost:8080/status
 ```
 
 ---
@@ -114,11 +119,10 @@ python bot.py
 ### Discord 設定
 | 変数名 | 必須 | 既定値 | 説明 |
 |:---|:---:|:---|:---|
-| `BOT_TOKEN` | ✅ | — | Discord Bot トークン |
-| `CHANNEL_ID` | ✅ | — | デフォルト通知チャンネル ID（全通知のフォールバック先） |
+| `BOT_TOKEN` | 必須 | — | Discord Bot のトークン |
+| `CHANNEL_ID` | 必須 | — | デフォルト通知チャンネル ID |
 | `EEW_CHANNEL_ID` | | CHANNEL_ID | EEW 専用チャンネル |
-| `P2P_EEW_CHANNEL_ID` | | EEW_CHANNEL_ID | P2P EEW 専用チャンネル |
-| `LMONI_EEW_CHANNEL_ID` | | EEW_CHANNEL_ID | LMoni EEW 専用チャンネル |
+| `P2P_EEW_CHANNEL_ID` | | EEW_CHANNEL_ID | P2P EEW（警報）専用チャンネル |
 | `QUAKE_CHANNEL_ID` | | CHANNEL_ID | 地震情報専用チャンネル |
 | `TSUNAMI_CHANNEL_ID` | | CHANNEL_ID | 津波警報専用チャンネル |
 | `VOLCANO_CHANNEL_ID` | | CHANNEL_ID | 火山情報専用チャンネル |
@@ -130,20 +134,20 @@ python bot.py
 ### 通知フィルター設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `QUAKE_MIN_SCALE` | 0 | 地震通知の震度下限（0=全て / 10=震度1以上 / 30=震度3以上 / 50=震度5弱以上） |
+| `QUAKE_MIN_SCALE` | 0 | 地震通知の震度下限（0=全て / 10=震度1以上 / 30=震度3以上 / 45=震度4以上 / 50=震度5弱以上） |
 | `QUAKE_MIN_MAG` | 0.0 | 地震通知のマグニチュード下限 |
-| `QUAKE_MIN_DEPTH` | 0 | 震源の深さ下限（km） |
-| `QUAKE_MAX_DEPTH` | 9999 | 震源の深さ上限（km） |
-| `EEW_MIN_INTENSITY` | 0 | EEW 通知の最低震度 |
+| `QUAKE_MIN_DEPTH` | 0 | 地震通知の深さ下限（km） |
+| `QUAKE_MAX_DEPTH` | 9999 | 地震通知の深さ上限（km） |
+| `EEW_MIN_INTENSITY` | 0 | EEW 通知の最低震度（0=全て） |
+| `QUAKE_ENABLE_DESTINATION` | true | 震度情報付き地震の通知 |
+| `QUAKE_ENABLE_SCALE_AND_DEST` | true | 震度・震源情報付き地震の通知 |
 | `QUAKE_ENABLE_SCALE_PROMPT` | true | 震度速報の通知 |
-| `QUAKE_ENABLE_DESTINATION` | true | 震源に関する情報の通知 |
-| `QUAKE_ENABLE_SCALE_AND_DEST` | true | 震度・震源情報の通知 |
-| `QUAKE_ENABLE_DETAIL_SCALE` | true | 各地の震度情報の通知 |
+| `QUAKE_ENABLE_DETAIL_SCALE` | true | 詳細震度情報の通知 |
 | `QUAKE_ENABLE_FOREIGN` | true | 海外地震の通知 |
 | `QUAKE_ENABLE_OTHER` | true | その他地震情報の通知 |
 | `TSUNAMI_ENABLE` | true | 津波情報通知の有効化 |
-| `ENABLE_LONG_PERIOD` | true | 長周期地震動通知の有効化 |
 | `ENABLE_ADVISORY` | true | 気象庁その他情報の有効化 |
+| `ENABLE_LONG_PERIOD` | true | 長周期地震動通知の有効化 |
 | `ENABLE_TSUNAMI_OBS` | true | 津波観測情報通知の有効化 |
 | `ENABLE_KYOSHIN` | true | 強震モニタ通知の有効化 |
 
@@ -157,49 +161,48 @@ python bot.py
 | `USGS_REGION_LAT_MAX` | 50 | 対象地域の緯度上限 |
 | `USGS_REGION_LON_MIN` | 120 | 対象地域の経度下限 |
 | `USGS_REGION_LON_MAX` | 180 | 対象地域の経度上限 |
-| `USGS_NOTIFICATION_COOLDOWN` | 86400 | 通知済み ID の保持時間（秒）。all_day の収録期間に合わせ24時間 |
+| `USGS_NOTIFICATION_COOLDOWN` | 300 | 重複通知防止クールダウン（秒） |
 
-### EEW・フォールバック設定
+### EEW 設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `WOLFX_HEARTBEAT_TIMEOUT` | 90 | Wolfx heartbeat タイムアウト（秒） |
-| `EEW_FALLBACK_TIMEOUT` | 30 | フォールバック切り替え閾値（秒） |
-| `FETCH_FAILURE_THRESHOLD` | 3 | API 連続失敗でバックオフする回数 |
+| `FETCH_FAILURE_THRESHOLD` | 3 | API 連続失敗でエラー通知する回数 |
 | `FETCH_BACKOFF_SECONDS` | 60 | API 失敗時のバックオフ待機時間（秒） |
 
 ### 音声設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `AQUESTALK_PATH` | （空） | AquesTalkPi の実行ファイルパス（未設定で音声無効） |
-| `AQUESTALK_SPEED` | 150 | 読み上げ速度 |
-| `AUDIO_PLAYER` | aplay | 音声再生コマンド |
+| `AQUESTALK_SPEED` | 150 | AquesTalkPi の読み上げ速度 |
+| `AUDIO_PLAYER` | aplay | 音声再生コマンド（`aplay` / `mpg123` 等） |
 | `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ |
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
 
 ### ログ設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `LOG_LEVEL` | INFO | ログレベル（後方互換。FILE/CONSOLE 未設定時の既定値） |
+| `LOG_LEVEL` | INFO | ログレベル（後方互換。FILE/CONSOLE 未設定時の既定値として使用） |
 | `LOG_LEVEL_FILE` | LOG_LEVEL | ファイルへの出力ログレベル |
 | `LOG_LEVEL_CONSOLE` | LOG_LEVEL | コンソールへの出力ログレベル |
-| `LOG_MAX_BYTES` | 10485760 | ログファイルの最大サイズ（バイト） |
+| `LOG_MAX_BYTES` | 10485760 | ログファイルの最大サイズ（バイト、デフォルト 10MB） |
 | `LOG_BACKUP_COUNT` | 7 | ローテーション保持ファイル数 |
 | `LOG_DUPLICATE_THRESHOLD` | 60 | 同一メッセージの重複抑制時間（秒）。ERROR 以上は常に出力 |
-| `LOG_SUPPRESS_HTTP_SUCCESS` | true | aiohttp.access の 2xx ログを抑制 |
+| `LOG_SUPPRESS_HTTP_SUCCESS` | true | aiohttp.access の 2xx 成功ログを抑制 |
 
 ### Web Dashboard 設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `WEB_DASHBOARD_ENABLED` | false | Web Dashboard の有効化 |
-| `WEB_DASHBOARD_PORT` | 8080 | ポート番号 |
+| `WEB_DASHBOARD_ENABLED` | true | Web Dashboard の有効化 |
+| `WEB_DASHBOARD_PORT` | 8080 | Web Dashboard のポート番号 |
 
 ### ステータス表示設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `STATUS_SHOW_CPU` | true | CPU 使用率を表示 |
-| `STATUS_SHOW_MEM` | true | メモリ使用量を表示 |
-| `STATUS_SHOW_DISK` | true | ディスク使用率を表示 |
-| `STATUS_SHOW_UPTIME` | true | フィルター設定を表示 |
+| `STATUS_SHOW_CPU` | true | !status / /qtl_status で CPU 使用率を表示 |
+| `STATUS_SHOW_MEM` | true | !status / /qtl_status でメモリ使用量を表示 |
+| `STATUS_SHOW_DISK` | true | !status / /qtl_status でディスク使用率を表示 |
+| `STATUS_SHOW_UPTIME` | true | !status / /qtl_status で稼働時間を表示 |
 
 ### リソース監視設定
 | 変数名 | 既定値 | 説明 |
@@ -213,39 +216,61 @@ python bot.py
 
 ## Web Dashboard
 
-### GET /status
+### GET /status（詳細ステータス JSON）
 
 ```bash
 curl http://localhost:8080/status | jq
 ```
 
-主要フィールド:
+**レスポンス例（主要フィールド）**:
 ```json
 {
   "status": "online",
-  "timestamp": "2026-06-20T12:00:00.000000",
+  "timestamp": "2026-06-26T12:00:00.000000",
   "bot_user": "QTL_Bot#1234",
-  "uptime": "1d 5h 30m",
+  "uptime": "1日 05時間 30分 00秒",
+  "uptime_seconds": 106200,
   "ping_ms": 45,
   "system": {
     "cpu_percent": 3.1,
     "memory_mb": 95.2,
-    "disk_percent": 42.5
+    "memory_total_mb": 8192.0,
+    "memory_percent": 1.2,
+    "disk_percent": 42.5,
+    "disk_free_gb": 27.3
   },
   "eew": {
-    "wolfx": { "ws_status": "online", "heartbeat_elapsed_sec": 12.4 },
-    "fallback_active": false
+    "wolfx": {
+      "ws_status": "online",
+      "heartbeat_elapsed_sec": 12.4,
+      "heartbeat_timeout_sec": 90,
+      "last_eew_id": "20260626120000",
+      "last_recv_time": "2026-06-26T11:59:00.000000",
+      "recv_count": 3
+    },
+    "p2p_eew": { "last_recv_time": null, "recv_count": 0 }
   },
   "monitoring": {
+    "quake":          { "last_recv_time": "...", "recv_count": 12 },
+    "tsunami":        { "last_recv_time": null,  "recv_count": 0  },
+    "long_period":    { "last_recv_time": "...", "recv_count": 2  },
+    "tsunami_obs":    { "last_recv_time": null,  "recv_count": 0  },
+    "quake_advisory": { "last_recv_time": "...", "recv_count": 5  },
     "volcano": {
-      "last_event_id": "20260620120000",
+      "last_event_id": "20260626_volcano_XX.json",
       "polling_status": "running",
-      "notify_status": "running"
+      "last_recv_time": "...",
+      "recv_count": 1,
+      "total_recv_count": 1
     },
     "usgs": {
       "enabled": true,
       "magnitude_min": 5.0,
-      "last_event_ids": ["us7000std7"]
+      "fetch_interval_sec": 600,
+      "region": { "lat": [20, 50], "lon": [120, 180] },
+      "last_event_ids": ["us1000abcd"],
+      "last_recv_time": "...",
+      "recv_count": 2
     }
   },
   "tasks": {
@@ -257,21 +282,32 @@ curl http://localhost:8080/status | jq
     "fetch_usgs_quake": "running",
     "speech_worker": "running",
     "mp3_worker": "running",
-    "poll_volcano": "running",
-    "process_volcano_queue": "running"
+    "volcano_poller": "running",
+    "eruption_poller": "running",
+    "warning_poller": "running"
   }
 }
 ```
 
-後方互換フィールド（`api_status` / `recv_count` / `volcano_monitoring` / `memory_usage_mb`）も引き続き含まれます。
-
-### GET /health/full
+### GET /health/full（API 疎通確認）
 
 ```bash
 curl http://localhost:8080/health/full | jq
 ```
 
-### GET /health
+```json
+{
+  "overall_status": "healthy",
+  "last_check_time": "2026-06-26T12:00:00+09:00",
+  "api_status": {
+    "wolfx":  { "ok": true, "latency_ms": 125, "error": null },
+    "jma":    { "ok": true, "latency_ms": 340, "error": null },
+    "p2p":    { "ok": true, "latency_ms": 280, "error": null }
+  }
+}
+```
+
+### GET /health（軽量ヘルスチェック）
 
 ```bash
 curl http://localhost:8080/health
@@ -285,133 +321,134 @@ curl http://localhost:8080/health
 | コマンド | 種別 | 権限 | 説明 |
 |:---|:---|:---|:---|
 | `!status` | プレフィックス | 管理者 | Bot 稼働状態を Embed で表示 |
-| `/qtl_status` | スラッシュ | 管理者 | `!status` と同内容 |
+| `/qtl_status` | スラッシュ | 管理者 | `!status` と同じ内容（スラッシュコマンド版） |
 
----
-
-## コード構成
-
-```
-bot.py
-└── QuakeTsunamiCog
-    ├── @tasks.loop
-    │   ├── fetch_quake()                  P2P地震情報（3秒ごと）
-    │   ├── fetch_tsunami()                P2P津波情報（10秒ごと）
-    │   ├── fetch_long_period()            長周期地震動（60秒ごと）
-    │   ├── fetch_tsunami_observation()    津波観測情報（60秒ごと）
-    │   ├── fetch_quake_advisory()         気象庁その他情報（60秒ごと）
-    │   ├── fetch_usgs_quake()             USGS地震情報（USGS_FETCH_INTERVAL秒ごと）
-    │   └── poll_volcano()                 火山情報更新検知（60秒ごと）
-    │
-    ├── asyncio.Task
-    │   ├── connect_eew_ws()               Wolfx EEW WebSocket
-    │   ├── _eew_fallback_monitor()        EEWフォールバック監視
-    │   ├── process_volcano_queue()        火山情報通知処理
-    │   ├── speech_worker()                AquesTalkPi 読み上げ
-    │   └── mp3_worker()                   MP3 再生
-    │
-    ├── notify_eew()                       EEW 通知
-    ├── notify_quake()                     地震情報通知
-    ├── notify_tsunami()                   津波情報通知
-    ├── notify_tsunami_observation()       津波観測情報通知
-    ├── notify_long_period()               長周期地震動通知
-    ├── notify_quake_advisory()            気象庁その他情報通知
-    ├── notify_usgs_quake()                USGS地震情報通知
-    ├── _notify_volcano()                  火山情報通知
-    └── notify_error()                     エラー自動通知
-```
+表示内容：システムリソース / EEW 状態 / API 受信状況 / タスク稼働状態 / USGS 設定 / フィルター設定
 
 ---
 
 ## 火山情報の仕様
 
-### 差分検知の仕組み
-- `poll_volcano()` が毎分 `info.json` をフェッチし、全エントリを `{eventId: item}` の dict として保持
-- 前回 dict に存在しない `eventId` を新規・更新として `volcano_event_queue` に投入
-- 初回起動時は先頭1件のみ（大量通知防止）
-- `process_volcano_queue()` がキューから順番に取り出し、`info/{eventId}.json` を取得して通知
+### 監視対象 API
+| 種別 | URL |
+|:---|:---|
+| 火山情報リスト | `https://www.jma.go.jp/bosai/volcano/data/info.json` |
+| 火山情報詳細 | `https://www.jma.go.jp/bosai/volcano/data/{json_filename}` |
+| 噴火速報リスト | `https://www.jma.go.jp/bosai/eqvol/data/VFVO50/list.json` |
+| 噴火警報リスト | `https://www.jma.go.jp/bosai/eqvol/data/VFVO53/list.json` |
 
-### 通知フォーマット
-Embed に以下を表示（キーが存在しない場合は省略）:
-- `{controlTitle}（{infoType}）`
-- 発表機関: `{publishingOffice}`
-- 発表日時: `{reportDatetime}`（ISO 8601 → 日本語形式に変換）
-- 概要: `{volcanoHeadline}`
-- 詳細: `{volcanoActivity}`
-- 防災上の注意: `{volcanoPrevention}`
+### 差分検知
+`info.json` の先頭エントリの `json` フィールドを前回値と比較し、変化があれば詳細を取得して通知します。
 
-### 警戒レベルの色
-| コード | レベル | 色 |
-|:---|:---|:---|
-| 01 | 活火山であることに留意 | 紫 |
-| 02 | 火口周辺規制 | 赤 |
-| 03 | 入山規制 | 橙 |
-| 04 | 居住地域避難準備 | 黄 |
-| 05 | 居住地域への避難 | 青 |
+### 警戒レベル別の色
+- L1（活火山であることに留意）: 紫
+- L2（火口周辺規制）: 赤
+- L3（入山規制）: 橙
+- L4（居住地域避難準備）: 黄
+- L5（居住地域への避難）: 青
 
 ---
 
 ## 津波情報の仕様
 
-### 通知条件
-- `Head.ValidDateTime` が存在し現在時刻がその時刻を過ぎている場合は通知しない
-- `Head.ValidDateTime` が存在しない場合は通知する
+### データソース
+- `https://www.jma.go.jp/bosai/tsunami/data/list.json` から最新 JSON を取得
+- 種別（タイトル）でルーティング：
+  - 観測情報（`津波観測に関する情報` 等）: `notify_tsunami_observation`
+  - 予報・警報（`津波予報` / `津波警報` / `大津波警報` 等）: `notify_tsunami_forecast`
 
-### 通知フォーマット
-- `{Head.Title}（{Head.InfoType}）`
-- 発表日時
-- 有効期間（存在する場合のみ・日本語形式に変換）
-- 原因地震（`Earthquake.Source` が存在する場合は出典を付記）
-- `{Head.Headline.Text}`
-- 津波観測値
-- `{Body.Text}`
-- `{Body.Comments.WarningComment.Text}`
+### 予想高さの表示フォーマット
+```
+■ 大津波警報
+予想高さ 10m以上
+　北海道太平洋沿岸東部
+予想高さ 5m
+　北海道太平洋沿岸西部
+■ 津波警報
+予想高さ 3m
+　宮城県
+```
+
+### 警報コードと色
+| コード | 種別 | 色 |
+|:---|:---|:---|
+| 52/53 | 大津波警報 | 紫 (#C800FF) |
+| 51 | 津波警報 | 赤 (#FF2800) |
+| 62 | 津波注意報 | 黄 (#FAF500) |
+| 71/72/73 | 津波予報 | 水色 (#80FFFF) |
+| 50/00/60 | 解除・なし | 緑 |
 
 ---
 
-## ログ管理の推奨設定
+## ログ管理
 
-通常運用（Raspberry Pi）での推奨 `.env` 設定:
 ```bash
-LOG_LEVEL_FILE=INFO
-LOG_LEVEL_CONSOLE=INFO
-LOG_DUPLICATE_THRESHOLD=60
-LOG_SUPPRESS_HTTP_SUCCESS=true
+# .env に追加
+LOG_LEVEL_FILE=DEBUG     # ファイルには詳細を残す
+LOG_LEVEL_CONSOLE=INFO   # コンソールは INFO 以上のみ
 ```
 
-Mackerel 等で `/status` を定期ポーリングしている場合、`LOG_SUPPRESS_HTTP_SUCCESS=true` により 200 ログが記録されず、ディスク書き込みが抑制されます。
+同一内容のログは `LOG_DUPLICATE_THRESHOLD`（デフォルト 60秒）以内なら出力しません。ERROR・CRITICAL は常に出力されます。
 
 ---
 
 ## トラブルシューティング
 
 ### 火山情報が通知されない
-```bash
-curl http://localhost:8080/status | jq '.tasks.poll_volcano, .tasks.process_volcano_queue'
+1. `VOLCANO_CHANNEL_ID` が正しく設定されているか確認
+2. ログで差分検知の状態を確認
+   ```bash
+   tail -f qtlbot.log | grep -i volcano
+   # "Volcano: no change" → 変化なし（正常）
+   ```
+3. Dashboard で確認
+   ```bash
+   curl http://localhost:8080/status | jq '.monitoring.volcano'
+   ```
 
-grep -i volcano qtlbot.log | tail -20
-# "Volcano: no change"       → 変化なし（正常）
-# "Volcano: N件の新規/更新"   → 検知して通知処理へ
-# "Volcano: 初回起動"        → 起動後の初回フェッチ
-```
-
-### EEW 読み上げで地域名が出ない
-- `AQUESTALK_PATH` が正しく設定されているか確認
-
-### USGS 地震情報が重複通知される
-- `USGS_NOTIFICATION_COOLDOWN` のデフォルトは 86400 秒（24時間）です
-- 古いバージョンから移行した場合は `.env` の設定値を確認してください
-
-### EEW フォールバックが頻発する
+### EEW が届かない
 ```bash
 curl http://localhost:8080/status | jq '.eew'
-# wolfx.ws_status が "timeout" → Wolfx WebSocket の再接続待ち
-# fallback_active が true → P2P EEW / LMoni で受信中
+# wolfx の ws_status が timeout → Wolfx WebSocket の再接続待ち
+# p2p_eew の recv_count が増えていれば P2P EEW は正常動作中
 ```
 
-### ディスク書き込みが増加している
-- 大地震発生時は EEW 更新・地震通知・音声ログが集中して増加します
-- `LOG_LEVEL_FILE=INFO`（DEBUG にしない）と `LOG_SUPPRESS_HTTP_SUCCESS=true` を確認してください
+### タスクが停止している
+```bash
+curl http://localhost:8080/status | jq '.tasks'
+# "[NG] エラー停止" → Bot を再起動してください
+```
+
+### USGS 地震情報が届かない
+```bash
+curl http://localhost:8080/status | jq '.monitoring.usgs'
+# enabled が false → USGS_ENABLED=true を設定
+```
+
+---
+
+## コード構成
+```
+bot.py
+└── QuakeTsunamiCog
+    ├── connect_eew_ws()             - Wolfx EEW WebSocket 接続
+    ├── connect_p2p_eew_ws()         - P2P EEW WebSocket（緊急地震速報（警報）専用・常時稼働）
+    ├── fetch_quake()                - 地震情報ポーリング（P2P）
+    ├── fetch_tsunami()              - 津波情報ポーリング
+    ├── fetch_tsunami_observation()  - 津波観測/予報情報ポーリング（JMA）
+    ├── fetch_long_period()          - 長周期地震動ポーリング
+    ├── fetch_quake_advisory()       - 気象庁その他情報ポーリング
+    ├── fetch_usgs_quake()           - USGS ポーリング
+    ├── fetch_volcano_info()         - 火山情報ポーリング
+    ├── fetch_eruption_info()        - 噴火速報ポーリング（VFVO50）
+    ├── fetch_warning_info()         - 噴火警報ポーリング（VFVO53）
+    ├── vibration_monitor_loop()     - EEW 発生時の強震モニタ監視
+    ├── speech_worker()              - AquesTalkPi 音声再生ワーカー
+    ├── mp3_worker()                 - MP3 再生ワーカー
+    ├── start_web_dashboard()        - Web Dashboard（aiohttp）
+    ├── _build_status_embed()        - !status / /qtl_status 共通 Embed 生成
+    └── notify_*()                   - 各通知関数
+```
 
 ---
 
@@ -426,6 +463,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-06-20
+**最終更新**: 2026-06-27
 **対応 Python**: 3.11+
-**対応 discord.py**: 2.0+
