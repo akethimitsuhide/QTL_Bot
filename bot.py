@@ -3885,7 +3885,6 @@ class QuakeTsunamiCog(commands.Cog):
         if STATUS_SHOW_UPTIME:
             filter_lines = [
                 f"震度下限: {INT_MAP.get(QUAKE_MIN_SCALE, str(QUAKE_MIN_SCALE))} / M下限: {QUAKE_MIN_MAG} / 深さ: {QUAKE_MIN_DEPTH}〜{QUAKE_MAX_DEPTH}km",
-                f"EEWフォールバック閾値: {EEW_FALLBACK_TIMEOUT}秒",
             ]
             embed.add_field(name="フィルター", value="\n".join(filter_lines), inline=False)
 
@@ -3977,11 +3976,8 @@ class QuakeTsunamiCog(commands.Cog):
                         **_api_info("wolfx"),
                     },
                     "p2p_eew": {
-                        "fallback_active": self._fallback_active,
                         **_api_info("p2p_eew"),
                     },
-                    "lmoni_eew": _api_info("lmoni"),
-                    "fallback_active": self._fallback_active,
                 }
 
                 # タスク稼働状態

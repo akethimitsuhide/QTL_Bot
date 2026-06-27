@@ -90,11 +90,13 @@ pip install -r requirements.txt
 5. サーバーに Bot を招待（OAuth2 URL で Administrator 権限付与）
 
 #### 2. 環境変数設定
-`.env` ファイルを作成：
+`.env.example` をコピーして `.env` を作成し、値を設定してください：
 ```bash
-BOT_TOKEN=your_bot_token_here
-CHANNEL_ID=default_notification_channel_id
+cp .env.example .env
+# .env をエディタで開いて BOT_TOKEN と CHANNEL_ID を設定
 ```
+
+全環境変数の詳細は `env.md` または README 下部の「環境変数リファレンス」を参照してください。
 
 #### 3. チャンネル設定
 Bot が通知を送信するテキストチャンネルを作成し、ID を `.env` に設定：
