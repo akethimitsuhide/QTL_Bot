@@ -1334,9 +1334,7 @@ class QuakeTsunamiCog(commands.Cog):
                             if resp.status == 200:
                                 # 成功時: 通常処理へ
                                 data_list = await resp.json()
-                                logger.debug(f"fetch_tsunami: API 呼び出し成功 (ステータス: 200, データ件数: {len(data_list)})")
                                 if not data_list:
-                                    logger.debug("fetch_tsunami: 津波情報なし")
                                     return
 
                                 data = data_list[0]
@@ -1419,16 +1417,14 @@ class QuakeTsunamiCog(commands.Cog):
                 
                 for attempt in range(len(retry_delays) + 1):
                     try:
-                        logger.debug(f"fetch_tsunami: API 呼び出し開始 (試行 {attempt+1}/{len(retry_delays)+1})")
+                        if attempt > 0:
+                            logger.debug(f"fetch_tsunami: API 呼び出し (試行 {attempt+1}/{len(retry_delays)+1})")
                         async with self.session.get(
                             "https://api.p2pquake.net/v2/history?codes=552&limit=1",
                             ) as resp:
                             if resp.status == 200:
-                                # 成功時: 通常処理へ
                                 data_list = await resp.json()
-                                logger.debug(f"fetch_tsunami: API 呼び出し成功 (ステータス: 200, データ件数: {len(data_list)})")
                                 if not data_list:
-                                    logger.debug("fetch_tsunami: 津波情報なし")
                                     return
 
                                 data = data_list[0]
@@ -3499,8 +3495,10 @@ class QuakeTsunamiCog(commands.Cog):
 
     async def fetch_eruption_info(self) -> None:
         """
-        JMA 気象庁 volcano API から噴火速報を取得・通知する。
+        JMA volcano API から噴火速報を取得・通知する。
         URL: https://www.jma.go.jp/bosai/volcano/data/eruption.json
+        リストは昇順（末尾が最新）。アイテム自体にデータが含まれ詳細URLは不要。
+        構造: [{controlTitle, headTitle, reportDatetime, eventId, infoType, eruptionAreas}]
         """
         HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
         LIST_URL = "https://www.jma.go.jp/bosai/volcano/data/eruption.json"
@@ -3512,14 +3510,16 @@ class QuakeTsunamiCog(commands.Cog):
                 headers=HEADERS,
             ) as resp:
                 if resp.status != 200:
-                    logger.debug(f"Eruption list fetch failed: HTTP {resp.status}")
+                    logger.debug(f"Eruption fetch failed: HTTP {resp.status}")
                     return
                 items: list[dict] = await resp.json(content_type=None)
-                if not items:
-                    return
 
-            latest = items[0]
-            event_id = latest.get("eventId") or latest.get("json")
+            if not items:
+                return
+
+            # リストは昇順 → 末尾が最新
+            latest = items[-1]
+            event_id = str(latest.get("eventId", ""))
             if not event_id:
                 return
 
@@ -3531,23 +3531,7 @@ class QuakeTsunamiCog(commands.Cog):
                 return
 
             self._last_eruption_id = event_id
-
-            # 個別 JSON を取得
-            json_path = latest.get("json")
-            if not json_path:
-                return
-            detail_url = f"https://www.jma.go.jp/bosai/volcano/data/{json_path}"
-            async with self.session.get(
-                detail_url,
-                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
-                headers=HEADERS,
-            ) as detail_resp:
-                if detail_resp.status != 200:
-                    logger.warning(f"Eruption detail fetch failed: HTTP {detail_resp.status}")
-                    return
-                detail: dict = await detail_resp.json(content_type=None)
-
-            await self._notify_eruption(detail, event_id)
+            await self._notify_eruption(latest, event_id)
             self._last_recv["eruption"] = datetime.now()
             self._recv_count["eruption"] = self._recv_count.get("eruption", 0) + 1
             self._last_eruption_recv_time = datetime.now()
@@ -3558,49 +3542,49 @@ class QuakeTsunamiCog(commands.Cog):
         except Exception as e:
             logger.error(f"fetch_eruption_info エラー: {e}", exc_info=True)
 
-    async def _notify_eruption(self, detail: dict, event_id: str) -> None:
-        """噴火速報を Discord に通知する。"""
+    async def _notify_eruption(self, item: dict, event_id: str) -> None:
+        """噴火速報を Discord に通知する。
+        item: eruption.json の1エントリ
+        """
         channel = self.volcano_channel or self.channel
         if not channel:
             logger.warning("Eruption: 通知チャンネルが見つかりません")
             return
         try:
-            head = detail.get("Head", {})
-            body = detail.get("Body", {})
-            control = detail.get("Control", {})
+            head_title   = item.get("headTitle", "噴火速報")
+            report_dt    = self.format_jma_time(item.get("reportDatetime", ""))
+            info_type    = item.get("infoType", "")
 
-            title = head.get("Title") or control.get("Title") or "噴火速報"
-            headline = head.get("Headline", {}).get("Text", "")
-            report_dt = self.format_jma_time(head.get("ReportDateTime", ""))
-            publisher = control.get("PublishingOffice", "気象庁")
+            # headTitle 例: "火山名　諏訪之瀬島　噴火速報"
+            # 中央の部分を火山名として取得
+            parts = [p.strip() for p in head_title.split("\u3000") if p.strip()]
+            # ["火山名", "諏訪之瀬島", "噴火速報"] のような構造
+            if len(parts) >= 3:
+                volcano_name = parts[1]
+                title = parts[-1]  # "噴火速報"
+            elif len(parts) == 2:
+                volcano_name = parts[0]
+                title = parts[1]
+            else:
+                volcano_name = ""
+                title = head_title
 
-            # 火山名・警報レベル
-            volcano_info = body.get("VolcanoInfo", {}) or {}
-            items = volcano_info.get("Item") or []
-            if isinstance(items, dict):
-                items = [items]
-            volcano_name = ""
-            if items:
-                area = items[0].get("VolcanoName") or items[0].get("Area", {}).get("Name", "")
-                volcano_name = area
-
-            description = f"**発表機関:** {publisher}\n**発表日時:** {report_dt}\n\n"
+            description = f"**発表日時:** {report_dt}\n"
             if volcano_name:
                 description += f"**火山名:** {volcano_name}\n"
-            if headline:
-                description += f"\n{headline}"
+            if info_type:
+                description += f"**情報種別:** {info_type}\n"
 
             embed = discord.Embed(
-                title=title,
+                title=head_title,
                 description=description,
-                color=0xFF4500,  # 噴火速報: 橙赤
+                color=0xFF4500,
                 timestamp=datetime.now(),
             )
             embed.set_footer(text=f"気象庁 噴火速報 | eventId: {event_id}")
             await channel.send(embed=embed)
-            logger.info(f"噴火速報通知完了: {title} eventId={event_id}")
+            logger.info(f"噴火速報通知完了: {head_title} eventId={event_id}")
 
-            # 読み上げ
             speak_text = f"噴火速報。{volcano_name or title}で噴火が発生しました。"
             await self.speak_local(speak_text, priority=0)
 
@@ -3608,13 +3592,15 @@ class QuakeTsunamiCog(commands.Cog):
             logger.error(f"_notify_eruption エラー: {e}", exc_info=True)
 
     # ===============================
-    # 噴火警報ポーリング (VFVO53)
+    # 噴火警報ポーリング
     # ===============================
 
     async def fetch_warning_info(self) -> None:
         """
-        JMA 気象庁 volcano API から噴火警報を取得・通知する。
+        JMA volcano API から噴火警報を取得・通知する。
         URL: https://www.jma.go.jp/bosai/volcano/data/warning.json
+        リストは昇順（末尾が最新）。アイテム自体にデータが含まれ詳細URLは不要。
+        構造: [{reportDatetime, eventId, areas, volcanoInfos:[{type, items:[{name,code,lastCode,condition,areas}]}]}]
         """
         HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
         LIST_URL = "https://www.jma.go.jp/bosai/volcano/data/warning.json"
@@ -3626,14 +3612,16 @@ class QuakeTsunamiCog(commands.Cog):
                 headers=HEADERS,
             ) as resp:
                 if resp.status != 200:
-                    logger.debug(f"Warning list fetch failed: HTTP {resp.status}")
+                    logger.debug(f"Warning fetch failed: HTTP {resp.status}")
                     return
                 items: list[dict] = await resp.json(content_type=None)
-                if not items:
-                    return
 
-            latest = items[0]
-            event_id = latest.get("eventId") or latest.get("json")
+            if not items:
+                return
+
+            # リストは昇順 → 末尾が最新
+            latest = items[-1]
+            event_id = str(latest.get("eventId", ""))
             if not event_id:
                 return
 
@@ -3645,22 +3633,7 @@ class QuakeTsunamiCog(commands.Cog):
                 return
 
             self._last_warning_id = event_id
-
-            json_path = latest.get("json")
-            if not json_path:
-                return
-            detail_url = f"https://www.jma.go.jp/bosai/volcano/data/{json_path}"
-            async with self.session.get(
-                detail_url,
-                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
-                headers=HEADERS,
-            ) as detail_resp:
-                if detail_resp.status != 200:
-                    logger.warning(f"Warning detail fetch failed: HTTP {detail_resp.status}")
-                    return
-                detail: dict = await detail_resp.json(content_type=None)
-
-            await self._notify_warning(detail, event_id)
+            await self._notify_warning(latest, event_id)
             self._last_recv["warning"] = datetime.now()
             self._recv_count["warning"] = self._recv_count.get("warning", 0) + 1
             self._last_warning_recv_time = datetime.now()
@@ -3671,66 +3644,75 @@ class QuakeTsunamiCog(commands.Cog):
         except Exception as e:
             logger.error(f"fetch_warning_info エラー: {e}", exc_info=True)
 
-    async def _notify_warning(self, detail: dict, event_id: str) -> None:
-        """噴火警報を Discord に通知する。"""
+    async def _notify_warning(self, item: dict, event_id: str) -> None:
+        """噴火警報を Discord に通知する。item は warning.json の1エントリ。"""
         channel = self.volcano_channel or self.channel
         if not channel:
             logger.warning("Warning: 通知チャンネルが見つかりません")
             return
         try:
-            head = detail.get("Head", {})
-            body = detail.get("Body", {})
-            control = detail.get("Control", {})
+            report_dt     = self.format_jma_time(item.get("reportDatetime", ""))
+            volcano_infos = item.get("volcanoInfos", [])
 
-            title = head.get("Title") or control.get("Title") or "噴火警報"
-            headline = head.get("Headline", {}).get("Text", "")
-            report_dt = self.format_jma_time(head.get("ReportDateTime", ""))
-            publisher = control.get("PublishingOffice", "気象庁")
-
-            # 警戒レベル・火山名
-            volcano_info = body.get("VolcanoInfo", {}) or {}
-            items = volcano_info.get("Item") or []
-            if isinstance(items, dict):
-                items = [items]
+            # 対象火山の警報種別・火山名を取得
             volcano_name = ""
-            alert_level = ""
-            area_lines = []
-            if items:
-                for it in items:
-                    v_name = it.get("VolcanoName") or it.get("Area", {}).get("Name", "")
-                    if v_name and not volcano_name:
-                        volcano_name = v_name
-                    kinds = it.get("Kind") or {}
-                    if isinstance(kinds, dict):
-                        kinds = [kinds]
-                    for k in kinds:
-                        name_k = k.get("Name", "")
-                        condition = k.get("Condition", "")
-                        lvl = k.get("Code", "")
-                        if name_k:
-                            line = f"  {name_k}"
-                            if condition:
-                                line += f" ({condition})"
-                            area_lines.append(line)
-                        if lvl and not alert_level:
-                            alert_level = lvl
+            warn_name    = ""
+            condition    = ""
 
-            # 色: 警戒レベルに応じて変える
-            LEVEL_COLOR = {
-                "1": 0x9932CC, "2": 0xFF0000, "3": 0xFF6600,
-                "4": 0xFFD700, "5": 0x0000FF,
+            for vi in volcano_infos:
+                vi_type  = vi.get("type", "")
+                vi_items = vi.get("items", [])
+                if not vi_items:
+                    continue
+                it0 = vi_items[0]
+                if "対象火山" in vi_type:
+                    warn_name = it0.get("name", "")
+                    condition = it0.get("condition", "")
+                    areas0    = it0.get("areas", [])
+                    if areas0:
+                        volcano_name = areas0[0].get("name", "")
+                    break
+
+            # 色: condition で決定
+            CONDITION_COLOR = {
+                "引上げ": 0xFF0000,
+                "発表":   0xFF4500,
+                "継続":   0xFFA500,
+                "引下げ": 0x00AA00,
             }
-            embed_color = LEVEL_COLOR.get(alert_level, 0xFF0000)  # デフォルト赤
+            embed_color = CONDITION_COLOR.get(condition, 0xFF6600)
 
-            description = f"**発表機関:** {publisher}\n**発表日時:** {report_dt}\n\n"
+            title = f"{volcano_name} 噴火警報・予報" if volcano_name else "噴火警報・予報"
+
+            description = f"**発表日時:** {report_dt}\n"
             if volcano_name:
                 description += f"**火山名:** {volcano_name}\n"
-            if alert_level:
-                description += f"**噴火警戒レベル:** {alert_level}\n"
-            if headline:
-                description += f"\n{headline}\n"
-            if area_lines:
-                description += "\n**対象区域:**\n" + "\n".join(area_lines)
+            if warn_name:
+                cond_str = f"（{condition}）" if condition else ""
+                description += f"**警報種別:** {warn_name}{cond_str}\n"
+
+            # 対象市町村
+            muni_lines = []
+            for vi in volcano_infos:
+                if "対象市町村" in vi.get("type", "") and "防災対応" not in vi.get("type", ""):
+                    for it in vi.get("items", []):
+                        for a in it.get("areas", []):
+                            muni_lines.append(f"　{a.get('name', '')}")
+            if muni_lines:
+                description += "**対象市町村:**\n" + "\n".join(muni_lines) + "\n"
+
+            # 防災対応
+            bousai_lines = []
+            for vi in volcano_infos:
+                if "防災対応" in vi.get("type", ""):
+                    for it in vi.get("items", []):
+                        it_name = it.get("name", "")
+                        it_cond = it.get("condition", "")
+                        if it_name:
+                            cond_str = f"（{it_cond}）" if it_cond else ""
+                            bousai_lines.append(f"　{it_name}{cond_str}")
+            if bousai_lines:
+                description += "**防災対応:**\n" + "\n".join(bousai_lines) + "\n"
 
             embed = discord.Embed(
                 title=title,
@@ -3742,8 +3724,7 @@ class QuakeTsunamiCog(commands.Cog):
             await channel.send(embed=embed)
             logger.info(f"噴火警報通知完了: {title} eventId={event_id}")
 
-            # 読み上げ
-            speak_text = f"噴火警報。{volcano_name or title}。噴火警戒レベル{alert_level or '発表'}。"
+            speak_text = f"噴火警報。{volcano_name or '火山'}で{warn_name}が{condition or '発表'}されました。"
             await self.speak_local(speak_text, priority=0)
 
         except Exception as e:
