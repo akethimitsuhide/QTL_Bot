@@ -26,22 +26,15 @@ except Exception as e:
 # ===============================
 # ロガー設定
 # ===============================
-import logging.handlers as _log_handlers
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),
-        _log_handlers.RotatingFileHandler(
-            "qtlbot.log",
-            encoding="utf-8",
-            maxBytes=5 * 1024 * 1024,  # 1ファイル最大 5MB
-            backupCount=3,              # 最大 3世代（qtlbot.log, .1, .2, .3）保持
-        ),
-    ],
-)
+# 注意: ここでは logging.basicConfig() を呼ばない。
+# 以前は basicConfig() がルートロガーに独自の RotatingFileHandler
+# （5MB/3世代、setup_logging() とは異なる設定）を追加しており、
+# QTLBot ロガーの propagate=True によって、その独自ハンドラーが
+# レベルフィルタなしで全ての DEBUG ログまで書き込んでしまっていた
+# （.env の LOG_LEVEL_FILE / LOG_LEVEL_CONSOLE 設定が無視される不具合）。
+# さらに qtlbot.log を2つの RotatingFileHandler が競合して扱うことで
+# ローテーションも不安定になっていた。
+# ハンドラーの設定は setup_logging() に一本化する。
 logger = logging.getLogger("QTLBot")
 
 # ===============================
@@ -349,6 +342,18 @@ class QuakeTsunamiCog(commands.Cog):
         self._recv_count: dict[str, int] = {k: 0 for k in self._last_recv}
         self._bot_start_time: datetime = datetime.now()
         self._start_time: float = time.time()  # ← 追加: Web Dashboard uptime用
+        # /status 用 psutil.Process を起動時に1つだけ生成して保持する。
+        # 毎リクエストで新規生成すると cpu_percent() が常に 0.0 を返してしまうため
+        # （psutilの仕様：初回呼び出しは基準値がなく必ず 0.0 になる）。
+        # /status へのリクエストが来たときだけ cpu_percent(interval=None) を呼ぶことで
+        # 「前回リクエストからの経過時間」を基準にしたCPU使用率を取得できる。
+        self._status_psutil_proc = None
+        try:
+            import psutil as _psutil_init
+            self._status_psutil_proc = _psutil_init.Process(os.getpid())
+            self._status_psutil_proc.cpu_percent(interval=None)  # 基準値をプライミング
+        except Exception:
+            pass
 
         # USGS 地震情報管理
         self.last_usgs_ids: dict[str, float] = {}  # USGS Event ID → 通知時刻（cooldown 用）
@@ -3935,15 +3940,23 @@ class QuakeTsunamiCog(commands.Cog):
                 uptime_str = self._format_uptime(uptime_seconds)
 
                 # システムリソース
+                # /status リクエストが来たときのみ計測する（バックグラウンドでは計測しない）。
+                # cpu_percent は __init__ で生成した永続 Process を使い、
+                # 「前回 /status リクエストからの経過時間」基準の値を返す。
                 system_info: dict = {}
                 if psutil:
                     try:
-                        proc = psutil.Process(os.getpid())
+                        if self._status_psutil_proc is not None:
+                            proc = self._status_psutil_proc
+                            cpu_val = proc.cpu_percent(interval=None)
+                        else:
+                            proc = psutil.Process(os.getpid())
+                            cpu_val = proc.cpu_percent(interval=None)
                         mem = proc.memory_info().rss / 1024 / 1024
                         mem_total = psutil.virtual_memory().total / 1024 / 1024
                         disk = psutil.disk_usage("/")
                         system_info = {
-                            "cpu_percent": proc.cpu_percent(interval=None),
+                            "cpu_percent": cpu_val,
                             "memory_mb": round(mem, 1),
                             "memory_total_mb": round(mem_total, 1),
                             "memory_percent": round(mem / mem_total * 100, 1),
@@ -4453,10 +4466,55 @@ class _SuppressHttpSuccessFilter(logging.Filter):
         return True
 
 
+def _align_logfiles_on_startup(base: str, backup_count: int) -> None:
+    """
+    起動・再起動時に base 〜 base.{backup_count} の中で
+    最も mtime が新しいファイルを base の位置（書き込み先）に持ってくる。
+
+    RotatingFileHandler は常に base に書き込むため、このまま起動すると
+    ローテーション直後に作られた空の base に書き込みが始まってしまう。
+    この関数を setup_logging() の先頭で呼ぶことで
+    「最新ファイルに追記」の挙動を実現する。
+    """
+    import os
+    # 存在するファイルと mtime を収集
+    candidates: dict[str, float] = {}
+    for path in [base] + [f"{base}.{i}" for i in range(1, backup_count + 1)]:
+        if os.path.exists(path):
+            candidates[path] = os.path.getmtime(path)
+
+    if not candidates:
+        return  # ファイルなし → 新規作成なので何もしない
+
+    newest = max(candidates, key=candidates.__getitem__)
+    if newest == base:
+        return  # base が既に最新 → 何もしない
+
+    # mtime 降順で並べ直し、base / base.1 / base.2 ... に割り当て直す
+    sorted_files = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
+    positions    = [base] + [f"{base}.{i}" for i in range(1, backup_count + 1)]
+
+    # いったん全ファイルを tmp に退避してから新位置に配置
+    tmp_map: dict[str, str] = {}
+    for src, _ in sorted_files:
+        tmp = src + ".__qtlbot_align_tmp__"
+        os.rename(src, tmp)
+        tmp_map[src] = tmp
+
+    for (src, _), dst in zip(sorted_files, positions):
+        os.rename(tmp_map[src], dst)
+
+    print(f"[LogAlign] 最新ログファイル {newest} → {base} に再配置しました",
+          flush=True)
+
+
 def setup_logging():
     """ロギングハンドラーをセットアップ（ローテーション対応 + ログ肥大化対策）"""
     from logging.handlers import RotatingFileHandler
     global logger
+
+    # 起動時: mtime が最新のログファイルを qtlbot.log に持ってきてから handler を生成
+    _align_logfiles_on_startup("qtlbot.log", LOG_BACKUP_COUNT)
 
     file_level   = getattr(logging, LOG_LEVEL_FILE.upper(),    logging.DEBUG)
     console_level = getattr(logging, LOG_LEVEL_CONSOLE.upper(), logging.INFO)
@@ -4489,6 +4547,8 @@ def setup_logging():
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     logger.setLevel(logging.DEBUG)  # ハンドラー側でフィルタリング
+    # ルートロガーへの伝播を止める（重複出力・レベルフィルタ無視を防ぐ安全策）
+    logger.propagate = False
 
     # aiohttp.access ロガーの成功ログを抑制
     if LOG_SUPPRESS_HTTP_SUCCESS:
