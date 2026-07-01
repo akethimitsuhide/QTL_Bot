@@ -733,19 +733,30 @@ class QuakeTsunamiCog(commands.Cog):
                     "沖合の津波観測に関する情報",
                     "各地の満潮時刻・津波到達予想時刻に関する情報",
                 ]
-                # 予報・警報情報（forecast）：新処理
+                # 予報・警報情報（forecast）
                 FORECAST_TITLES = [
                     "津波予報",
                     "津波注意報",
                     "津波警報",
                     "大津波警報",
                 ]
+                # 震源要素更新のお知らせ（VXSE61）
+                HYPO_UPDATE_TITLES = [
+                    "顕著な地震の震源要素更新のお知らせ",
+                ]
+                # 南海トラフ地震関連情報（VYSE50）
+                NANKAI_TITLES = [
+                    "南海トラフ地震臨時情報",
+                    "南海トラフ地震関連解説情報",
+                ]
 
                 for item in data:
                     ttl = item.get("ttl", "")
-                    is_obs      = any(x in ttl for x in OBS_TITLES)
-                    is_forecast = any(x in ttl for x in FORECAST_TITLES)
-                    if not (is_obs or is_forecast):
+                    is_obs          = any(x in ttl for x in OBS_TITLES)
+                    is_forecast     = any(x in ttl for x in FORECAST_TITLES)
+                    is_hypo_update  = any(x in ttl for x in HYPO_UPDATE_TITLES)
+                    is_nankai       = any(x in ttl for x in NANKAI_TITLES)
+                    if not (is_obs or is_forecast or is_hypo_update or is_nankai):
                         continue
 
                     event_id    = item.get("eid") or item.get("ctt")
@@ -771,6 +782,12 @@ class QuakeTsunamiCog(commands.Cog):
                     if is_forecast:
                         logger.info(f"津波予報/警報取得: ID={event_id}, 時刻={report_time}, 種別={ttl}")
                         await self.notify_tsunami_forecast(detail, list_item=item)
+                    elif is_hypo_update:
+                        logger.info(f"震源要素更新取得: ID={event_id}, 時刻={report_time}")
+                        await self.notify_hypocenter_update(detail, list_item=item)
+                    elif is_nankai:
+                        logger.info(f"南海トラフ地震関連情報取得: ID={event_id}, 時刻={report_time}, 種別={ttl}")
+                        await self.notify_nankai_trough(detail, list_item=item)
                     else:
                         logger.info(f"津波観測情報取得: ID={event_id}, 時刻={report_time}")
                         await self.notify_tsunami_observation(detail, list_item=item)
@@ -2079,6 +2096,41 @@ class QuakeTsunamiCog(commands.Cog):
         self.last_eew_data = data.copy()
 
     # ===============================
+    # 津波予想高さ文字列フォーマット
+    # ===============================
+    @staticmethod
+    def _format_tsunami_height_value(raw: str) -> str:
+        """
+        JMA tsunami JSON の MaxHeight.TsunamiHeight（文字列）を表示用に整形する。
+        値の例:
+          "<0.2"  → "0.2m未満"
+          ">10" / "≧10" → "10m以上"
+          "5"     → "5m"
+          "巨大" / "高い" / "若干" 等の定性語 → そのまま返す（m を付けない）
+        """
+        if not raw:
+            return ""
+        s = raw.strip()
+
+        # 定性的な表現はそのまま（末尾に m を付けると "巨大m" のような誤表記になるため）
+        QUALITATIVE = {"巨大", "高い", "若干", "微弱", "不明"}
+        if s in QUALITATIVE:
+            return s
+
+        if s.startswith("<"):
+            return f"{s[1:]}m未満"
+        if s.startswith(">") or s.startswith("\u2267") or s.startswith("\u2265"):
+            return f"{s[1:]}m以上"
+
+        # 数値のみ（"5", "10" 等）
+        import re as _re
+        if _re.fullmatch(r"\d+(?:\.\d+)?", s):
+            return f"{s}m"
+
+        # それ以外の未知のフォーマットはそのまま返す（mを付けて誤解させない）
+        return s
+
+    # ===============================
     # P2P地震情報 画像URL生成
     # ===============================
     @staticmethod
@@ -2202,7 +2254,7 @@ class QuakeTsunamiCog(commands.Cog):
                     LMONI_BASE, "abrspmx_s", _last_lmoni_url, _last_lmoni_ts
                 )
 
-                # ── 振動レベル MP3（tier 変化時のみ再生）──
+                # ── 振動レベル MP3（tier 該当中はループごとに継続再生）──
                 if level is not None:
                     if level >= 2000:
                         cur_tier = 3
@@ -2213,11 +2265,13 @@ class QuakeTsunamiCog(commands.Cog):
                     else:
                         cur_tier = 0
                     if cur_tier != _prev_vib_tier:
+                        logger.info(f"振動レベル tier 変化: {_prev_vib_tier} → {cur_tier} (level={level})")
                         _prev_vib_tier = cur_tier
-                        mp3_key = {3: "lv2000", 2: "lv1000", 1: "lv100"}.get(cur_tier)
-                        if mp3_key:
-                            await self.play_mp3(mp3_key)
-                            logger.info(f"振動レベル MP3 再生: {mp3_key} (level={level})")
+                    # tier 0（100未満）以外は該当tierの間、ループ（3秒）ごとに再生し続ける
+                    mp3_key = {3: "lv2000", 2: "lv1000", 1: "lv100"}.get(cur_tier)
+                    if mp3_key:
+                        await self.play_mp3(mp3_key)
+                        logger.debug(f"振動レベル MP3 再生: {mp3_key} (level={level})")
 
                 if level is not None or _last_jma_s_url or _last_lmoni_url:
                     if level is not None:
@@ -2875,13 +2929,7 @@ class QuakeTsunamiCog(commands.Cog):
                             or ""
                         )
                     elif isinstance(th, str) and th:
-                        s = th.strip()
-                        if s.startswith("<"):
-                            height_desc = f"{s[1:]}m未満"
-                        elif s.startswith(">"):
-                            height_desc = f"{s[1:]}m超"
-                        else:
-                            height_desc = f"{s}m"
+                        height_desc = self._format_tsunami_height_value(th)
                     else:
                         height_desc = max_h_obj.get("Description", "")
 
@@ -2974,6 +3022,138 @@ class QuakeTsunamiCog(commands.Cog):
 
         except Exception as e:
             logger.error(f"notify_tsunami_forecast エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+
+    async def notify_hypocenter_update(self, detail: dict, list_item: dict | None = None, is_test: bool = False) -> None:
+        """
+        顕著な地震の震源要素更新のお知らせ（VXSE61）を通知する。
+        津波情報等で使われる精密な震源要素（度単位）が更新されたことを伝える情報。
+        """
+        channel = self.tsunami_channel or self.channel
+        if not channel:
+            return
+        try:
+            ttl   = list_item.get("ttl", "震源要素更新のお知らせ") if list_item else "震源要素更新のお知らせ"
+            title = ("【テスト】 " if is_test else "") + ttl
+            head  = detail.get("Head", {})
+            body  = detail.get("Body", {})
+            control = detail.get("Control", {})
+
+            publisher    = control.get("PublishingOffice", "気象庁")
+            report_time  = self.format_jma_time(head.get("ReportDateTime", "不明"))
+            target_time  = self.format_jma_time(head.get("TargetDateTime", ""))
+            headline     = head.get("Headline", {}).get("Text", "")
+
+            eq = body.get("Earthquake", {})
+            origin_time = self.format_jma_time(eq.get("OriginTime", "不明"))
+            hypo = eq.get("Hypocenter", {})
+            hypo_name = hypo.get("Area", {}).get("Name", "不明")
+            magnitude = eq.get("Magnitude", "不明")
+
+            free_form = body.get("Comments", {}).get("FreeFormComment", "")
+
+            description = (
+                f"**発表機関:** {publisher}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if target_time:
+                description += f"**更新時刻:** {target_time}\n"
+            description += (
+                f"\n**原因地震：** {hypo_name}　M{magnitude}（{origin_time}発生）\n"
+            )
+            if headline:
+                description += f"\n{headline}\n"
+            if free_form:
+                description += f"\n{free_form}"
+
+            description = self._truncate_embed_description(description)
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=0x808080,
+                timestamp=datetime.now(),
+            )
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            await channel.send(embed=embed)
+            logger.info(f"震源要素更新通知完了: {title}")
+
+        except Exception as e:
+            logger.error(f"notify_hypocenter_update エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+
+    async def notify_nankai_trough(self, detail: dict, list_item: dict | None = None, is_test: bool = False) -> None:
+        """
+        南海トラフ地震臨時情報・関連解説情報（VYSE50）を通知する。
+        """
+        channel = self.tsunami_channel or self.channel
+        if not channel:
+            return
+        try:
+            ttl   = list_item.get("ttl", "南海トラフ地震に関連する情報") if list_item else "南海トラフ地震に関連する情報"
+            head  = detail.get("Head", {})
+            body  = detail.get("Body", {})
+            control = detail.get("Control", {})
+
+            # Head.Title 例: "南海トラフ地震臨時情報（巨大地震警戒）" / "（調査中）" / "（巨大地震注意）" / "（調査終了）"
+            head_title = head.get("Title", ttl)
+            title = ("【テスト】 " if is_test else "") + head_title
+
+            publisher   = control.get("PublishingOffice", "気象庁")
+            report_time = self.format_jma_time(head.get("ReportDateTime", "不明"))
+            headline    = head.get("Headline", {}).get("Text", "")
+
+            eq_info = body.get("EarthquakeInfo", {})
+            info_serial = eq_info.get("InfoSerial", {}).get("Name", "")
+            body_text   = eq_info.get("Text", "")
+            next_advisory = body.get("NextAdvisory", "")
+
+            # キーワード別の色・緊急度
+            KEYWORD_COLOR = {
+                "巨大地震警戒": 0xFF0000,
+                "巨大地震注意": 0xFFA500,
+                "調査中":     0xFFD700,
+                "調査終了":   0x808080,
+            }
+            embed_color = KEYWORD_COLOR.get(info_serial, 0xFFA500)
+
+            description = (
+                f"**発表機関:** {publisher}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if info_serial:
+                description += f"**情報種別:** {info_serial}\n"
+            if headline.strip():
+                description += f"\n{headline.strip()}\n"
+            if body_text.strip():
+                description += f"\n{body_text.strip()}\n"
+            if next_advisory.strip():
+                description += f"\n**次回発表:** {next_advisory.strip()}"
+
+            description = self._truncate_embed_description(description)
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=embed_color,
+                timestamp=datetime.now(),
+            )
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            await channel.send(embed=embed)
+            logger.info(f"南海トラフ地震関連情報通知完了: {title}")
+
+            # 読み上げ（巨大地震警戒・注意のみ）
+            if info_serial in ("巨大地震警戒", "巨大地震注意"):
+                await self.speak_local(f"南海トラフ地震臨時情報。{info_serial}が発表されました。", priority=1)
+
+        except Exception as e:
+            logger.error(f"notify_nankai_trough エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
 
