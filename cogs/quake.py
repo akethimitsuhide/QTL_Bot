@@ -15,7 +15,8 @@ cogs/quake.py
 - core.constants   : INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP, REGION_MAP
 - core.helpers     : safe_int, safe_float, safe_bool,
                       truncate_embed_description, format_jma_time
-- core.audio.AudioMixin : speak_local, play_mp3 等（多重継承で利用）
+- core.audio.AudioMixin      : speak_local, play_mp3 等（多重継承で利用）
+- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用）
 
 【Step1 時点の設計メモ】
 - 本 Cog は独自の aiohttp.ClientSession を保持する（cog_load/cog_unloadで管理）。
@@ -63,11 +64,12 @@ from core.helpers import (
     truncate_embed_description, format_jma_time,
 )
 from core.audio import AudioMixin
+from core.p2p_image import P2PImageMixin
 
 logger = logging.getLogger("QTLBot")
 
 
-class QuakeEewCog(commands.Cog, AudioMixin):
+class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
     """地震情報・EEW（緊急地震速報）を扱う Cog。"""
 
     def __init__(self, bot: commands.Bot):
@@ -939,58 +941,6 @@ class QuakeEewCog(commands.Cog, AudioMixin):
             logger.debug("音声: low_alert (初報)")
 
         self.last_eew_data = data.copy()
-
-    # ===============================
-    # 津波予想高さ文字列フォーマット
-    # ===============================
-    @staticmethod
-    def p2p_image_url(image_id: str) -> str | None:
-        if not image_id:
-            return None
-        return f"https://cdn.p2pquake.net/app/images/{image_id}_trim_big.png"
-
-    async def _attach_p2p_image(self, message: discord.Message, image_id: str) -> None:
-        """
-        P2P CDN への画像アップロード遅延対策。
-        通知直後は画像が未生成のことがあるため、最大 MAX_RETRY 回リトライして
-        URL が有効になったタイミングでメッセージを編集して画像を追加する。
-        """
-        if not image_id:
-            return
-        url = self.p2p_image_url(image_id)
-        if not url:
-            return
-
-        MAX_RETRY = 15   # 最大 15 回 × 約 8 秒 = 約 2 分
-        INTERVAL  = 5    # 各試行前の待機秒数
-
-        for attempt in range(MAX_RETRY):
-            await asyncio.sleep(INTERVAL)
-            try:
-                # Range ヘッダーなしの通常 GET で URL の疎通確認をする。
-                # Range: bytes=0-0 を付けると CDN が接続を切断する場合があるため使わない。
-                async with self.session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
-                    ok = resp.status == 200
-                    # コンテンツを読み捨てて接続を解放
-                    await resp.read()
-                if ok:
-                    try:
-                        # message.embeds[0] はキャッシュ済みオブジェクトのため .copy() が必要
-                        embed = message.embeds[0].copy()
-                        embed.set_image(url=url)
-                        await message.edit(embed=embed)
-                        logger.info(f"P2P画像を追加しました: id={image_id} (attempt={attempt+1})")
-                    except Exception as e:
-                        logger.warning(f"P2P画像メッセージ編集失敗: {e}")
-                    return
-                logger.debug(f"P2P画像まだなし: HTTP {resp.status} attempt={attempt+1}/{MAX_RETRY}")
-            except Exception as e:
-                logger.debug(f"P2P画像確認エラー: {e} attempt={attempt+1}")
-
-        logger.info(f"P2P画像: {MAX_RETRY}回リトライ後も取得できませんでした id={image_id}")
 
     # ===============================
     # ===============================
