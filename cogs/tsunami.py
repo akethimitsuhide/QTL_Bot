@@ -66,7 +66,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         # -- チャンネル（on_ready で解決） --
         self.channel         = None
         self.tsunami_channel = None
-        self.other_channel   = None  # 長周期地震動・気象庁その他情報用
 
         # -- HTTPセッション（この Cog 専用） --
         self.session = None
@@ -75,7 +74,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         # -- 津波情報の重複排除状態 --
         self.last_tsunami_id = None
         self.last_tsunami_observation_id = None
-        self._tsunami_observation_initialized = False  # 初回ポーリングでは通知せずIDのみ記録
 
         # -- 受信統計（!status 用。将来的にSystemCogと統合予定） --
         self._last_recv = {"tsunami": None}
@@ -233,13 +231,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                     if not json_filename:
                         continue
 
-                    # 初回ポーリングは「起動前から存在した情報」の可能性が高いため通知しない。
-                    # IDだけ記録し、次回以降の本当の新規発生時のみ通知する。
-                    if not self._tsunami_observation_initialized:
-                        self.last_tsunami_observation_id = current_key
-                        logger.info(f"fetch_tsunami_observation: 起動時の既存情報を記録（通知はしない） ID={event_id}")
-                        break
-
                     detail_url = f"https://www.jma.go.jp/bosai/tsunami/data/{json_filename}"
                     async with self.session.get(detail_url, timeout=aiohttp.ClientTimeout(total=25)) as detail_resp:
                         if detail_resp.status != 200:
@@ -262,8 +253,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                         await self.notify_tsunami_observation(detail, list_item=item)
                     self.last_tsunami_observation_id = current_key
                     break
-
-                self._tsunami_observation_initialized = True
 
         except Exception:
             logger.error(f"Fetch Tsunami Observation エラー:\n{traceback.format_exc()}")

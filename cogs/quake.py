@@ -518,7 +518,7 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                                 if self.last_quake_id is None:
                                     self.last_quake_id = data_id
                                     self._reset_fetch_backoff("quake")
-                                    logger.info(f"fetch_quake: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                                    await self.notify_quake(data, extra_note="（ボット起動時の最新情報）")
                                     return
 
                                 if data_id == self.last_quake_id:
@@ -1077,7 +1077,7 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
     # ===============================
     # 地震情報通知
     # ===============================
-    async def notify_quake(self, data, is_test=False, extra_note=None, skip_speech=False):
+    async def notify_quake(self, data, is_test=False, extra_note=None):
         channel = self.quake_channel or self.channel
         if not channel:
             return
@@ -1268,11 +1268,9 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                 f" 震源地 {name}。 最大震度 {max_scale_str}。 {mag_str}。"
             )
 
-        if not skip_speech:
-            await self.speak_local(speak_text)
+        await self.speak_local(speak_text)
 
-        if not skip_speech:
-            await self.play_quake_sound(data)
+        await self.play_quake_sound(data)
 
     # ===============================
     # P2P地震情報のmp3音声

@@ -75,7 +75,6 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
         # -- 気象庁その他情報の重複排除状態（7日間TTL） --
         self.last_advisory_ids: dict = {}
-        self._quake_advisory_initialized = False  # 初回ポーリングでは通知せずIDのみ記録
 
         # -- 受信統計（!status 用。将来的にSystemCogと統合予定） --
         self._last_recv = {"long_period": None, "quake_advisory": None}
@@ -153,7 +152,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
                 if self.last_long_period_id is None:
                     self.last_long_period_id = event_id
-                    logger.info(f"fetch_long_period: 起動時の既存最新情報を記録（通知はしない） eid={event_id}")
+                    await self.notify_long_period(latest, extra_note="（ボット起動時の最新情報）")
                     return
 
                 if self.last_long_period_id != event_id:
@@ -204,12 +203,6 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
                     self.last_advisory_ids[event_id] = now_ts
 
-                    # 初回ポーリングは「起動前から存在した情報」の可能性が高いため通知しない。
-                    # IDだけ記録し、次回以降の本当の新規発生時のみ通知する。
-                    if not self._quake_advisory_initialized:
-                        logger.info(f"fetch_quake_advisory: 起動時の既存情報を記録（通知はしない） eid={event_id}")
-                        continue
-
                     json_filename = item.get("json")
                     if json_filename:
                         detail_url = f"https://www.jma.go.jp/bosai/quake/data/{json_filename}"
@@ -221,8 +214,6 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                                 await self.notify_quake_advisory(list_item=item)
                     else:
                         await self.notify_quake_advisory(list_item=item)
-
-                self._quake_advisory_initialized = True
 
         except Exception as e:
             logger.error(f"Fetch Quake Advisory エラー:\n{traceback.format_exc()}")
