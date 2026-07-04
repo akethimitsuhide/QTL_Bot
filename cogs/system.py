@@ -158,7 +158,37 @@ class SystemCog(commands.Cog):
         except Exception as e:
             logger.warning(f"スラッシュコマンド同期失敗: {e}")
 
+        # Bot起動通知（管理者チャンネル宛）
+        # 他Cogのon_readyが出揃うのを少し待ってから送る
+        self.bot.loop.create_task(self._notify_startup())
+
         logger.info("SystemCog: on_ready 完了")
+
+    async def _notify_startup(self) -> None:
+        """Bot起動完了を管理者チャンネルに通知する。"""
+        if not self.admin_channel:
+            logger.debug("管理者チャンネル未設定のため起動通知はスキップします")
+            return
+
+        await asyncio.sleep(5)  # 他Cogのon_readyが出揃うのを待つ
+
+        try:
+            cog_names = list(self.bot.cogs.keys())
+            embed = discord.Embed(
+                title="QTL_Bot 起動完了",
+                description=f"Bot が起動し、稼働を開始しました。",
+                color=discord.Color.green(),
+                timestamp=datetime.now(),
+            )
+            embed.add_field(name="ログインユーザー", value=str(self.bot.user), inline=False)
+            embed.add_field(name="登録Cog数", value=f"{len(cog_names)}件", inline=True)
+            embed.add_field(name="Cog一覧", value=", ".join(cog_names) if cog_names else "なし", inline=False)
+            embed.set_footer(text="QTL_Bot システム通知")
+
+            await self.admin_channel.send(embed=embed)
+            logger.info("Bot起動通知を管理者チャンネルに送信しました")
+        except Exception as e:
+            logger.error(f"Bot起動通知の送信に失敗: {e}", exc_info=True)
 
     # ===============================
     # 他Cogの状態を集約するヘルパー
