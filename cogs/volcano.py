@@ -178,12 +178,21 @@ class VolcanoCog(commands.Cog, AudioMixin):
         JMA 火山情報を取得・通知する。
 
         【処理手順】
-        ① info.json をフェッチし、全オブジェクトの eventId を取得
-        ② 前回取得と比較して変更・追加されたオブジェクトの eventId を抽出
-        ③ 各 eventId で info/{eventId}.json をフェッチして Discord に通知
+        ① info.json をフェッチし、全オブジェクトの eventId と reportDatetime を取得
+        ② 前回取得と比較し、eventId が新規、または reportDatetime が更新された
+           オブジェクトを抽出する
+        ③ 各対象で info/{eventId}.json をフェッチして Discord に通知
         ④ 次回ループのために現在の info.json を保存
 
-        差分検知キー: _last_volcano_info_list（前回の info.json 全体を dict で保持）
+        差分検知キー: _last_volcano_info_map（前回の info.json 全体を
+        {eventId: item} の dict で保持。item には reportDatetime を含む）
+
+        【設計変更の経緯】
+        当初は eventId の新規追加のみを検知トリガーにしていたが、
+        同一火山・同一警戒レベルのまま状況説明のみ更新される
+        （reportDatetime だけが進み eventId は変わらない）ケースで
+        通知が来ない問題があった。reportDatetime の変化も検知対象に加えることで、
+        「新規の火山情報」と「既存情報の更新」の両方を確実に捕捉する。
         """
         HEADERS = {"User-Agent": "QTLBot/1.0 (Discord earthquake bot; contact via GitHub)"}
 
@@ -210,28 +219,29 @@ class VolcanoCog(commands.Cog, AudioMixin):
             logger.error(f"Volcano info.json fetch unexpected error: {e}")
             return
 
-        # Step②: 前回リストと比較して変更・追加された eventId を抽出
+        # Step②: 前回リストと比較して「新規 eventId」または
+        #         「reportDatetime が変化した既存 eventId」を抽出
         # 初回は先頭1件のみ通知し、2回目以降は差分をすべて通知
         prev: dict[str, dict] = getattr(self, "_last_volcano_info_map", {})
         curr: dict[str, dict] = {item["eventId"]: item for item in info_list if item.get("eventId")}
 
         if not prev:
-            # 初回: 先頭1件だけ通知（大量通知を防ぐ）
-            first_item = info_list[0]
-            event_id = first_item.get("eventId")
-            if event_id:
-                target_ids = [event_id]
-                logger.info(f"Volcano: 初回起動 先頭1件を通知 eventId={event_id}")
-            else:
-                logger.debug("Volcano: 初回起動 eventId なし")
-                self._last_volcano_info_map = curr
-                return
+            # 初回起動: 通知はせず現在のリストを記録するだけ（起動時のうるさい通知を防ぐ）
+            logger.info(f"Volcano: 初回起動 現在の情報を記録（通知はしない） 件数={len(curr)}")
+            self._last_volcano_info_map = curr
+            return
         else:
-            # 2回目以降: 前回にない eventId = 新規 or 更新として通知
-            target_ids = [
-                eid for eid in curr
-                if eid not in prev
-            ]
+            # 2回目以降: 新規 eventId、または reportDatetime が更新された eventId を対象にする
+            target_ids = []
+            for eid, item in curr.items():
+                if eid not in prev:
+                    target_ids.append(eid)
+                    continue
+                prev_report_dt = prev[eid].get("reportDatetime")
+                curr_report_dt = item.get("reportDatetime")
+                if curr_report_dt and curr_report_dt != prev_report_dt:
+                    target_ids.append(eid)
+
             if not target_ids:
                 logger.debug("Volcano: no change")
                 self._last_volcano_info_map = curr
@@ -606,4 +616,3 @@ class VolcanoCog(commands.Cog, AudioMixin):
 
         except Exception as e:
             logger.error(f"_notify_warning エラー: {e}", exc_info=True)
-
