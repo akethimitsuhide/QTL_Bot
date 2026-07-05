@@ -196,3 +196,20 @@ STATUS_SHOW_UPTIME = _env_bool("STATUS_SHOW_UPTIME", True)
 WOLFX_WSS = "wss://ws-api.wolfx.jp/jma_eew"
 P2P_WSS   = "wss://api.p2pquake.net/v2/ws"
 P2P_API   = "https://api.p2pquake.net/v2/history"
+
+# ===============================
+# APM (Application Performance Monitoring) 設定
+# ===============================
+# Mackerel の APM（トレーシング）連携。OpenTelemetry (OTLP) 経由で送信する。
+# デフォルトは無効。有効にする場合は下記の環境変数と、
+# requirements.txt の "APM (Mackerel連携)" セクションのパッケージが必要。
+#
+# 値は Mackerel 公式ドキュメント
+# (https://mackerel.io/ja/docs/entry/tracing/installations/python) の
+# 記載に基づく。APM_OTLP_ENDPOINT は /v1/traces を含む完全な URL を指定すること
+# （core/apm.py 側でパスを追加結合しないため、末尾は必ず /v1/traces にする）。
+APM_ENABLED            = _env_bool("APM_ENABLED", False)
+APM_SERVICE_NAME       = os.getenv("APM_SERVICE_NAME", "QTL_Bot")
+APM_MACKEREL_API_KEY   = os.getenv("APM_MACKEREL_API_KEY", "")
+APM_OTLP_ENDPOINT      = os.getenv("APM_OTLP_ENDPOINT", "https://otlp-vaxila.mackerelio.com/v1/traces")
+APM_OTLP_API_KEY_HEADER = os.getenv("APM_OTLP_API_KEY_HEADER", "Mackerel-Api-Key")

@@ -4,7 +4,8 @@ bot.py
 QTL_Bot の起動専用エントリーポイント。
 
 【Step6 時点の状態: 全機能の切り出しが完了】
-分割済みの Cog は以下の6つ:
+分割済みの Cog は以下の7つ:
+  - ApmCog（Mackerel APM連携。デフォルト無効、全Cogより先に登録）
   - QuakeEewCog（地震・EEW）
   - TsunamiCog（津波・観測・予報・南海トラフ〈tsunami API経由〉）
   - VolcanoCog（火山情報・噴火速報・噴火警報）
@@ -55,6 +56,13 @@ async def main():
     async with bot:
         try:
             logger.info("Cog 初期化開始...")
+
+            # ── APM (Mackerel連携) Cog ──
+            # 他の全Cogより先に登録する（aiohttpの自動計装を確実に効かせるため）。
+            # APM_ENABLED=false（デフォルト）の場合は内部で何もしない。
+            from cogs.apm import ApmCog
+            await bot.add_cog(ApmCog(bot))
+            logger.info("ApmCog を登録しました")
 
             # ── Step1: 地震・EEW Cog ──
             from cogs.quake import QuakeEewCog

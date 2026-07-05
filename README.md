@@ -49,6 +49,14 @@
 - 1 時間ごとに CPU・メモリ・ディスク使用率を記録
 - ディスク使用率が 80% 以上で WARNING、90% 以上で ERROR を記録
 
+### APM (Mackerel連携)
+- OpenTelemetry (OTLP) 経由で Mackerel にトレース情報を送信するオプション機能
+- **デフォルトは無効**（`APM_ENABLED=false`）。Mackerel 等で Bot を監視したい運用者向け
+- 有効化すると aiohttp クライアント（JMA/USGS/P2P 等への全HTTPリクエスト）が自動計装され、レイテンシ・失敗状況を可視化できる
+- 必要パッケージは `requirements.txt` の "APM (Mackerel連携)" セクションを参照（デフォルト無効時は未インストールでも動作に影響しない）
+- `!status` / `/qtl_status` で現在の稼働状況を確認可能
+- ⚠️ 実際のOTLPエンドポイントURL・APIキーのヘッダー名は [Mackerel公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python) で必ず確認してください。`.env` の `APM_OTLP_ENDPOINT` / `APM_OTLP_API_KEY_HEADER` はデフォルト値のままだと正しく送信できない可能性があります
+
 ### 長周期地震動
 - 長周期地震動の観測情報
 - リアルタイム強震モニタ画像（3秒間隔で更新）
@@ -218,6 +226,21 @@ python bot.py
 | `RESOURCE_CHECK_INTERVAL` | 3600 | 監視間隔（秒） |
 | `DISK_WARNING_THRESHOLD` | 80 | ディスク WARNING 閾値（%） |
 | `DISK_ERROR_THRESHOLD` | 90 | ディスク ERROR 閾値（%） |
+
+### APM (Mackerel連携) 設定
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `APM_ENABLED` | false | APM (トレーシング) 連携の有効化。デフォルト無効 |
+| `APM_SERVICE_NAME` | QTL_Bot | Mackerel 上で表示されるサービス名 |
+| `APM_MACKEREL_API_KEY` | （空） | Mackerel の API キー。`APM_ENABLED=true` 時は必須 |
+| `APM_OTLP_ENDPOINT` | `https://otlp-vmagent.mackerelio.com` | OTLP 送信先エンドポイント。**公式ドキュメントで要確認**（下記注意参照） |
+| `APM_OTLP_API_KEY_HEADER` | `Mackerel-Api-Key` | APIキーを送るHTTPヘッダー名。**公式ドキュメントで要確認**（下記注意参照） |
+
+> ⚠️ **注意**: `APM_OTLP_ENDPOINT` と `APM_OTLP_API_KEY_HEADER` のデフォルト値は、実装時に
+> [Mackerel公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python)
+> へのアクセスができなかったため、一般的な OpenTelemetry OTLP の慣例に基づく暫定値です。
+> `APM_ENABLED=true` にする前に、必ず公式ドキュメントで実際の値を確認し、
+> 異なる場合は `.env` で上書きしてください。
 
 ---
 
@@ -470,5 +493,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-06-27
+**最終更新**: 2026-07-04
 **対応 Python**: 3.11+
