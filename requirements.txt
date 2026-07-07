@@ -20,6 +20,17 @@ python-dotenv>=0.19.0
 psutil>=5.8.0
 
 # ===============================================
+# APM (Mackerel連携) - オプション機能
+# ===============================================
+# .env で APM_ENABLED=true にする場合のみ必要。
+# デフォルト（APM_ENABLED=false）では未インストールでも Bot は正常に動作する。
+# 参考: https://mackerel.io/ja/docs/entry/tracing/installations/python
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-otlp-proto-http>=1.20.0
+opentelemetry-instrumentation-aiohttp-client>=0.41b0
+
+# ===============================================
 # 開発用（オプション）
 # ===============================================
 # テスト実行時に使用
@@ -48,6 +59,7 @@ isort>=5.0.0
 # 【オプション】
 # - pytest / pytest-asyncio: テスト実行時
 # - flake8 / black / isort: コード品質管理
+# - opentelemetry-*: APM (Mackerel連携)。.env で APM_ENABLED=true にする場合のみ必要
 #
 # ===============================================
 # インストール方法
@@ -65,11 +77,20 @@ isort>=5.0.0
 # 開発用パッケージも含めてインストール:
 #   pip install -r requirements.txt pytest pytest-asyncio flake8 black isort
 #
+# APM (Mackerel連携) を有効化する場合のみ追加インストール:
+#   pip install opentelemetry-api opentelemetry-sdk \
+#       opentelemetry-exporter-otlp-proto-http \
+#       opentelemetry-instrumentation-aiohttp-client
+#   その後 .env で APM_ENABLED=true と APM_MACKEREL_API_KEY を設定
+#
 # ===============================================
 # バージョン確認
 # ===============================================
 #
 # インストール後、以下でバージョンを確認:
 #   pip list | grep -E "discord|aiohttp|websockets|pygame|psutil"
+#
+# APM関連パッケージのバージョン確認:
+#   pip list | grep -E "opentelemetry"
 #
 # ===============================================
