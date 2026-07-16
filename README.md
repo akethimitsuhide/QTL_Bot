@@ -1,6 +1,6 @@
 # QTL_Bot - Discord 地震・津波・火山情報通知 Bot
 
-気象庁（JMA）の API と複数のデータソースを使用して、地震・津波・火山情報を Discord に自動通知する Bot です。Raspberry Pi での常時運用を想定した軽量実装。
+気象庁（JMA）の API と複数のデータソースを使用して、地震・津波・火山情報を Discord に自動通知する Bot です。主に Raspberry Pi 5 での使用を想定しています。
 
 ---
 
@@ -8,20 +8,20 @@
 
 ### 地震情報通知
 - **EEW（緊急地震速報）**: Wolfx WebSocket でリアルタイム受信
-  - 予測震度、到達時間、推奨行動を通知
+  - 予想される最大震度、各地の予想震度（震度4以上の場合）、推奨行動等を通知
   - 音声読み上げ対応（AquesTalkPi）
-- **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報 WebSocket から警報のみを常時受信
+- **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報の WebSocket から警報のみを常時受信
   - Wolfx と同時並行稼働（EventID による重複排除あり）
-- **地震速報**: P2P 地震情報 API からの確報情報
+- **地震情報**: P2P 地震情報の API からの確報情報
 
 ### 津波情報
-- JMA 津波警報 API から自動取得（予報・警報・注意報）
-- 警報種別・予想高さ別のエリア一覧表示（大津波警報 / 津波警報 / 津波注意報 / 津波予報）
+- 気象庁 HP の JSON から自動取得（大津波警報 / 津波警報 / 津波注意報 / 津波予報）
+- 警報種別・予想高さ別のエリア一覧表示
 - 本文（`Body.Text`）・解説（`Body.Comments.FreeFormComment`）を通知下部に追記
 - 津波観測情報（`VTSE41/51`）を別関数で処理
 
 ### 火山情報
-- JMA 火山情報 API からのリアルタイム監視（1分ごと）
+- 気象庁 HP の JSON から自動取得（1分ごとのポーリング）
 - 差分検知ベース（`json` フィールドの変化で新規判定）
 - 火山活動の状況・予防措置・次回発表予定を通知
 - 噴火速報（VFVO50）・噴火警報（VFVO53）の独立ポーリング
@@ -41,25 +41,27 @@
 - `/health/full` エンドポイントで詳細情報を取得（30秒キャッシュ）
 
 ### ログ管理
-- `RotatingFileHandler` による自動ログローテーション（デフォルト: 10MB x 7世代）
+- `RotatingFileHandler` による自動ログローテーション（デフォルト: 10MB × 7世代）
 - ファイル / コンソール独立ログレベル設定（`LOG_LEVEL_FILE` / `LOG_LEVEL_CONSOLE`）
 - 重複ログ抑制: 同一メッセージを指定秒数以内は出力抑制（ERROR 以上は常に出力）
 
 ### リソース監視
-- 1 時間ごとに CPU・メモリ・ディスク使用率を記録
+- 1時間ごとに CPU・メモリ・ディスク使用率を記録
 - ディスク使用率が 80% 以上で WARNING、90% 以上で ERROR を記録
 
-### APM (Mackerel連携)
+### APM (Mackerel 連携)
 - OpenTelemetry (OTLP) 経由で Mackerel にトレース情報を送信するオプション機能
 - **デフォルトは無効**（`APM_ENABLED=false`）。Mackerel 等で Bot を監視したい運用者向け
-- 有効化すると aiohttp クライアント（JMA/USGS/P2P 等への全HTTPリクエスト）が自動計装され、レイテンシ・失敗状況を可視化できる
-- 必要パッケージは `requirements.txt` の "APM (Mackerel連携)" セクションを参照（デフォルト無効時は未インストールでも動作に影響しない）
+- 有効化すると aiohttp クライアント（JMA/USGS/P2P 等への全 HTTP リクエスト）が自動計装され、レイテンシ・失敗状況を可視化できる
+- 必要パッケージは `requirements.txt` の "APM (Mackerel 連携)" セクションを参照（デフォルト無効時は未インストールでも動作に影響しない）
 - `!status` / `/qtl_status` で現在の稼働状況を確認可能
-- ⚠️ 実際のOTLPエンドポイントURL・APIキーのヘッダー名は [Mackerel公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python) で必ず確認してください。`.env` の `APM_OTLP_ENDPOINT` / `APM_OTLP_API_KEY_HEADER` はデフォルト値のままだと正しく送信できない可能性があります
+- ⚠️ 実際の OTLP エンドポイント URL・API キーのヘッダー名は [Mackerel 公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python) で必ず確認してください。`.env` の `APM_OTLP_ENDPOINT` / `APM_OTLP_API_KEY_HEADER` はデフォルト値のままだと正しく送信できない可能性があります
 
 ### 長周期地震動
-- 長周期地震動の観測情報
-- リアルタイム強震モニタ画像（3秒間隔で更新）
+- 長周期地震動の観測情報を通知
+
+### 長周期地震動モニタ
+- EEW 発表時に長周期地震動モニタの画像を通知（3秒間隔で更新）
 - 振動レベルに応じた音声アラート（該当レベルの間、3秒間隔で継続再生）
   - レベル 100〜999: `lv100.mp3`
   - レベル 1000〜1999: `lv1000.mp3`
@@ -109,7 +111,7 @@ cp .env.example .env
 # .env をエディタで開いて BOT_TOKEN と CHANNEL_ID を設定
 ```
 
-全環境変数の詳細は `env.md` または README 下部の「環境変数リファレンス」を参照してください。
+全環境変数の詳細は README 下部の「環境変数リファレンス」を参照してください。
 
 #### 3. チャンネル設定
 Bot が通知を送信するテキストチャンネルを作成し、ID を `.env` に設定：
@@ -208,7 +210,7 @@ python bot.py
 ### Web Dashboard 設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `WEB_DASHBOARD_ENABLED` | true | Web Dashboard の有効化 |
+| `WEB_DASHBOARD_ENABLED` | false | Web Dashboard の有効化 |
 | `WEB_DASHBOARD_PORT` | 8080 | Web Dashboard のポート番号 |
 
 ### ステータス表示設定
@@ -227,17 +229,17 @@ python bot.py
 | `DISK_WARNING_THRESHOLD` | 80 | ディスク WARNING 閾値（%） |
 | `DISK_ERROR_THRESHOLD` | 90 | ディスク ERROR 閾値（%） |
 
-### APM (Mackerel連携) 設定
+### APM (Mackerel 連携) 設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `APM_ENABLED` | false | APM (トレーシング) 連携の有効化。デフォルト無効 |
+| `APM_ENABLED` | false | APM（トレーシング）連携の有効化。デフォルト無効 |
 | `APM_SERVICE_NAME` | QTL_Bot | Mackerel 上で表示されるサービス名 |
 | `APM_MACKEREL_API_KEY` | （空） | Mackerel の API キー。`APM_ENABLED=true` 時は必須 |
-| `APM_OTLP_ENDPOINT` | `https://otlp-vmagent.mackerelio.com` | OTLP 送信先エンドポイント。**公式ドキュメントで要確認**（下記注意参照） |
-| `APM_OTLP_API_KEY_HEADER` | `Mackerel-Api-Key` | APIキーを送るHTTPヘッダー名。**公式ドキュメントで要確認**（下記注意参照） |
+| `APM_OTLP_ENDPOINT` | `https://otlp-vmagent.mackerelio.com` | OTLP 送信先エンドポイント。**公式ドキュメントで要確認** |
+| `APM_OTLP_API_KEY_HEADER` | `Mackerel-Api-Key` | API キーを送る HTTP ヘッダー名。**公式ドキュメントで要確認** |
 
 > ⚠️ **注意**: `APM_OTLP_ENDPOINT` と `APM_OTLP_API_KEY_HEADER` のデフォルト値は、実装時に
-> [Mackerel公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python)
+> [Mackerel 公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python)
 > へのアクセスができなかったため、一般的な OpenTelemetry OTLP の慣例に基づく暫定値です。
 > `APM_ENABLED=true` にする前に、必ず公式ドキュメントで実際の値を確認し、
 > 異なる場合は `.env` で上書きしてください。
@@ -382,7 +384,7 @@ curl http://localhost:8080/health
 ## 津波情報の仕様
 
 ### データソース
-- `https://www.jma.go.jp/bosai/tsunami/data/list.json` から最新 JSON を取得
+- `https://www.jma.go.jp/bosai/tsunami/data/list.json`（気象庁 HP の JSON）から取得
 - 種別（タイトル）でルーティング：
   - 観測情報（`津波観測に関する情報` 等）: `notify_tsunami_observation`
   - 予報・警報（`津波予報` / `津波警報` / `大津波警報` 等）: `notify_tsunami_forecast`
@@ -458,27 +460,55 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 ---
 
 ## コード構成
+
+### ディレクトリ構成
 ```
-bot.py
-└── QuakeTsunamiCog
-    ├── connect_eew_ws()             - Wolfx EEW WebSocket 接続
-    ├── connect_p2p_eew_ws()         - P2P EEW WebSocket（緊急地震速報（警報）専用・常時稼働）
-    ├── fetch_quake()                - 地震情報ポーリング（P2P）
-    ├── fetch_tsunami()              - 津波情報ポーリング
-    ├── fetch_tsunami_observation()  - 津波観測/予報情報ポーリング（JMA）
-    ├── fetch_long_period()          - 長周期地震動ポーリング
-    ├── fetch_quake_advisory()       - 気象庁その他情報ポーリング
-    ├── fetch_usgs_quake()           - USGS ポーリング
-    ├── fetch_volcano_info()         - 火山情報ポーリング
-    ├── fetch_eruption_info()        - 噴火速報ポーリング（VFVO50）
-    ├── fetch_warning_info()         - 噴火警報ポーリング（VFVO53）
-    ├── vibration_monitor_loop()     - EEW 発生時の強震モニタ監視
-    ├── speech_worker()              - AquesTalkPi 音声再生ワーカー
-    ├── mp3_worker()                 - MP3 再生ワーカー
-    ├── start_web_dashboard()        - Web Dashboard（aiohttp）
-    ├── _build_status_embed()        - !status / /qtl_status 共通 Embed 生成
-    └── notify_*()                   - 各通知関数
+QTL_Bot/
+├── bot.py                  - エントリーポイント（Cog 登録・起動のみ）
+├── cogs/
+│   ├── apm.py              - ApmCog: Mackerel APM 連携（OpenTelemetry OTLP）
+│   ├── quake.py            - QuakeEewCog: 地震・EEW・P2P EEW
+│   ├── tsunami.py          - TsunamiCog: 津波観測・予報
+│   ├── volcano.py          - VolcanoCog: 火山情報・噴火速報・噴火警報
+│   ├── usgs.py             - UsgsCog: USGS 海外地震情報
+│   ├── other.py            - OtherInfoCog: 長周期地震動・気象庁その他情報
+│   └── system.py           - SystemCog: !status・Web Dashboard・エラー監視・リソース監視
+└── core/
+    ├── config.py           - 環境変数読み込み・定数定義
+    └── logging_setup.py    - ログ設定（RotatingFileHandler・重複抑制）
 ```
+
+### Cog 責務一覧
+| Cog | ファイル | 主な責務 |
+|:---|:---|:---|
+| `ApmCog` | `cogs/apm.py` | OpenTelemetry 計装・Mackerel OTLP 送信（デフォルト無効） |
+| `QuakeEewCog` | `cogs/quake.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・P2P API（地震速報） |
+| `TsunamiCog` | `cogs/tsunami.py` | JMA 津波 API ポーリング・観測情報・予報 / 警報通知 |
+| `VolcanoCog` | `cogs/volcano.py` | JMA 火山 API ポーリング・噴火速報・噴火警報 |
+| `UsgsCog` | `cogs/usgs.py` | USGS API ポーリング・海外地震フィルタリング・通知 |
+| `OtherInfoCog` | `cogs/other.py` | 長周期地震動・強震モニタ・気象庁その他情報 |
+| `SystemCog` | `cogs/system.py` | Web Dashboard・`!status`・エラー自動通知・リソース監視 |
+
+### 主要関数
+| 関数 | 説明 |
+|:---|:---|
+| `connect_eew_ws()` | Wolfx EEW WebSocket 接続 |
+| `connect_p2p_eew_ws()` | P2P EEW WebSocket（緊急地震速報（警報）専用・常時稼働） |
+| `fetch_quake()` | 地震情報ポーリング（P2P） |
+| `fetch_tsunami()` | 津波情報ポーリング |
+| `fetch_tsunami_observation()` | 津波観測 / 予報情報ポーリング（JMA） |
+| `fetch_long_period()` | 長周期地震動ポーリング |
+| `fetch_quake_advisory()` | 気象庁その他情報ポーリング |
+| `fetch_usgs_quake()` | USGS ポーリング |
+| `fetch_volcano_info()` | 火山情報ポーリング |
+| `fetch_eruption_info()` | 噴火速報ポーリング（VFVO50） |
+| `fetch_warning_info()` | 噴火警報ポーリング（VFVO53） |
+| `vibration_monitor_loop()` | EEW 発生時の強震モニタ監視 |
+| `speech_worker()` | AquesTalkPi 音声再生ワーカー |
+| `mp3_worker()` | MP3 再生ワーカー |
+| `start_web_dashboard()` | Web Dashboard（aiohttp） |
+| `_build_status_embed()` | !status / /qtl_status 共通 Embed 生成 |
+| `notify_*()` | 各通知関数 |
 
 ---
 
@@ -493,5 +523,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-07-04
+**最終更新**: 2026-07-16
 **対応 Python**: 3.11+
