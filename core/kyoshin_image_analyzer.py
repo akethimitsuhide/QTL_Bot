@@ -2,42 +2,45 @@
 core/kyoshin_image_analyzer.py
 ================================
 強震モニタのリアルタイム震度画像を解析し、
-「疑似観測点（グリッドセル）ごとのリアルタイム震度」を抽出するモジュール。
+「実際に揺れを示す色（黄緑色以上）のピクセルが集中しているグリッドセル」
+のみを抽出するモジュール。
+
+【設計方針の転換について（重要）】
+初版では「グリッド内で最も彩度・明度の高いピクセルを常に代表値として
+採用する」方式だったが、これは背景の青色域（平常時、震度0未満）内の
+GIF圧縮・アンチエイリアシングによる微細な色相ゆらぎまで
+「震度上昇」として拾ってしまい、実際には地震が起きていない瞬間にも
+複数グリッドセルが偶然同時に「上昇」判定され、誤検知（False Positive）
+を引き起こしていた。
+
+参考:
+- https://qiita.com/ingen084/items/82985e8d3227c97c608d
+  （強震モニタの画像から揺れていることを検知する／ingen084氏）
+- ユーザー提供の詳細仕様書（HSVマスク・DBSCANクラスタリング・
+  複数フレーム検証を組み合わせた揺れ検知アルゴリズム）
+
+この反省を踏まえ、以下の方針に転換した:
+1. HSVマスク処理を最初に行い、「震度1相当（黄緑）以上」の色を持つ
+   ピクセルのみを"揺れ候補ピクセル"として抽出する。
+   背景の青色域（震度0未満）は最初から解析対象に含めない
+   （=常時ノイズの発生源そのものを除去する）。
+2. グリッドセル単位で「揺れ候補ピクセルの個数」を数え、
+   一定数以上（MIN_ACTIVE_PIXELS）存在するセルのみを
+   "アクティブセル"として扱う。単一の孤立ピクセル
+   （アンチエイリアシングの縁など）では反応しない。
+3. クラスタリング・複数フレーム検証は
+   core/kyoshin_cluster_tracker.py が担当する
+   （このモジュールは単一フレームの解析のみを行う）。
 
 【設計方針: なぜグリッド分割方式なのか】
 本来、観測点ごとの震度を得るには「全国の観測点の座標・ピクセル位置対応表」
-が必要だが、そのデータは持っていない。
-
-代わりに、画像を N×N ピクセルのグリッドセルに分割し、
-各セル内で最も彩度・明度の高い非背景色ピクセルを代表値として抽出、
-その色相(Hue)を震度に変換する。グリッドセルの座標そのものを
-「疑似観測点ID」として扱い、隣接する8セルを「近隣観測点」とする。
-
-この方式には以下の利点がある:
-- 外部の観測点データ（座標・近隣リスト）が一切不要
-- core.kyoshin_detector.EventManager にそのまま統合できる
-  （register_station() をグリッド全セル分、機械的に生成できる）
-
-一方で以下の制約がある:
-- 「地名」との対応付けはできない（グリッド座標のみ）
-- グリッドサイズが粗いと、隣接する強い揺れと弱い揺れが
-  同一セルに混在し、代表値が不正確になる可能性がある
-- 南西諸島（奄美大島〜石垣島）は画像左上に本土から離れて配置されている
-  （近隣グリッドが本土クラスタとは自然に分離される）
+が必要だが、そのデータは持っていない。代わりに画像を N×N ピクセルの
+グリッドセルに分割し、セルの座標を疑似観測点として扱う。
 
 【色相→震度変換テーブルについて】
 HUE_TO_SHINDO_ANCHORS は、防災科研(NIED)公式のリアルタイム震度
 カラースケール画像（震度7[赤]〜震度-3[青]の凡例）を実際に
-ピクセル解析して作成した「実データ較正済み」のテーブル。
-震度7(H=0°)から震度-2.95(H≈239°)まで、公式配色の全域をカバーしている。
-
-ただし以下の点に注意:
-- H=0°(純粋な赤)は震度6.14〜7.00の範囲で色が変化しないため、
-  この極域だけは色相のみでの精密な区別ができない
-  （テーブルでは代表値として震度6.54を割り当てている）。
-  正確な最大震度が必要な用途では、この点を踏まえること。
-- カラースケール画像には彩度・明度の情報も含まれるが、
-  本テーブルは色相(Hue)のみを使った近似である。
+ピクセル解析して作成した実データ較正済みのテーブル。
 """
 from __future__ import annotations
 
@@ -50,8 +53,6 @@ logger = logging.getLogger("QTLBot")
 # ===============================
 # 色相 → 震度(実数値) 変換テーブル
 # ===============================
-# 防災科研(NIED)公式カラースケール画像を実際に解析して作成した較正済みテーブル。
-# (色相[度], リアルタイム震度) のペアを、震度7→震度-3の順（色相0°→239°の順）に格納。
 HUE_TO_SHINDO_ANCHORS: list[tuple[float, float]] = [
     (0.00, 6.54), (2.19, 5.92), (4.82, 5.76), (7.44, 5.60), (10.00, 5.44),
     (12.57, 5.28), (15.12, 5.12), (17.65, 4.96), (20.71, 4.80), (23.53, 4.63),
@@ -67,18 +68,28 @@ HUE_TO_SHINDO_ANCHORS: list[tuple[float, float]] = [
     (235.81, -2.78), (239.37, -2.95),
 ]
 
-# 背景色（黒）とみなす明度・彩度のしきい値
-BACKGROUND_VALUE_THRESHOLD = 0.05   # これ未満のV(明度)は背景として無視
+BACKGROUND_VALUE_THRESHOLD = 0.05   # これ未満のV(明度)は背景(黒)として無視
+
+# ===============================
+# 揺れ色抽出のしきい値（HSVマスク処理）
+# ===============================
+# 「震度1相当」以上（テーブル上では概ね hue<=76°程度）を"揺れ候補色"とする。
+# 参考資料の「黄色以上を抽出する」という考え方に基づく。
+# これより弱い色（背景の青〜水色〜緑域）は、GIFノイズの温床であるため
+# 最初から解析対象に含めない。
+ACTIVE_SHINDO_FLOOR = 1.0
+
+# 1グリッドセル内で、この個数以上の「揺れ候補ピクセル」が
+# 存在しない限り、そのセルはアクティブとみなさない
+# （アンチエイリアシングによる単一の縁ピクセルでの誤反応を防ぐ）。
+MIN_ACTIVE_PIXELS = 3
 
 
 def hue_to_realtime_shindo(hue_deg: float) -> float:
-    """
-    色相（度、0〜360）をリアルタイム震度（実数値。例: 4.5=震度5弱相当）に変換する。
-    HUE_TO_SHINDO_ANCHORS（NIED公式カラースケール実測値）を線形補間して求める。
-    """
+    """色相（度、0〜360）をリアルタイム震度（実数値）に変換する。"""
     h = hue_deg
     if h > 239.37:
-        h = 239.37  # 最も青い(=最も弱い)色相でクリップ
+        h = 239.37
     if h < 0:
         h = 0
 
@@ -92,31 +103,56 @@ def hue_to_realtime_shindo(hue_deg: float) -> float:
     return anchors[-1][1]
 
 
+def _shindo_to_hue_ceiling(shindo_floor: float) -> float:
+    """
+    「この震度以上」に対応する色相の上限値(度)を、
+    HUE_TO_SHINDO_ANCHORS を逆引きして求める。
+    （テーブルは hue が増えるほど shindo が減る単調減少なので、
+    shindo_floor 以上となる hue の範囲は [0, ceiling] になる）
+    """
+    anchors = HUE_TO_SHINDO_ANCHORS
+    for i in range(len(anchors) - 1):
+        h1, s1 = anchors[i]
+        h2, s2 = anchors[i + 1]
+        if s1 >= shindo_floor >= s2:
+            if s1 == s2:
+                return h2
+            ratio = (s1 - shindo_floor) / (s1 - s2)
+            return h1 + (h2 - h1) * ratio
+    return anchors[-1][0]
+
+
 @dataclass
 class GridCellReading:
     cell_id: str
     shindo: float
     x: int
     y: int
+    active_pixel_count: int = 0
 
 
 class KyoshinImageAnalyzer:
     """
-    強震モニタ画像をグリッド分割し、セルごとの疑似震度を抽出するアナライザ。
+    強震モニタ画像から、揺れ色（震度1相当以上）のピクセルが
+    一定数以上集中しているグリッドセルのみを抽出するアナライザ。
+
+    背景の青色域は最初から解析対象に含めないため、
+    平常時（地震が起きていない瞬間）は原則として
+    アクティブセルが0件になる（＝ノイズ源そのものの除去）。
     """
 
-    def __init__(self, grid_size: int = 10):
-        """
-        Parameters
-        ----------
-        grid_size : グリッドセルの一辺のピクセル数（大きいほど粗いが処理は軽い）
-        """
+    def __init__(self, grid_size: int = 10,
+                 active_shindo_floor: float = ACTIVE_SHINDO_FLOOR,
+                 min_active_pixels: int = MIN_ACTIVE_PIXELS):
         self.grid_size = grid_size
+        self.active_shindo_floor = active_shindo_floor
+        self.min_active_pixels = min_active_pixels
+        self._hue_ceiling = _shindo_to_hue_ceiling(active_shindo_floor)
 
     def analyze(self, image) -> list[GridCellReading]:
         """
-        PIL.Image を受け取り、グリッドセルごとの GridCellReading のリストを返す。
-        画像は RGB モードに変換済みであることを想定（呼び出し側で convert("RGB") 済みでも良い）。
+        PIL.Image を受け取り、アクティブなグリッドセルのみの
+        GridCellReading リストを返す（非アクティブなセルは含まれない）。
         """
         if image.mode != "RGB":
             image = image.convert("RGB")
@@ -127,24 +163,26 @@ class KyoshinImageAnalyzer:
 
         for gy in range(0, h, self.grid_size):
             for gx in range(0, w, self.grid_size):
-                best_shindo = None
-                best_score = -1.0  # 彩度×明度が最大のピクセルを代表値とする
+                active_pixels: list[float] = []  # このセル内の揺れ候補ピクセルの震度値
 
                 for y in range(gy, min(gy + self.grid_size, h)):
                     for x in range(gx, min(gx + self.grid_size, w)):
                         r, g, b = pixels[x, y]
                         hh, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
                         if vv < BACKGROUND_VALUE_THRESHOLD:
-                            continue  # 背景（黒）はスキップ
-                        score = ss * vv
-                        if score > best_score:
-                            best_score = score
-                            best_shindo = hue_to_realtime_shindo(hh * 360)
+                            continue  # 背景（黒）
+                        hue_deg = hh * 360
+                        if hue_deg > self._hue_ceiling:
+                            continue  # 揺れ色（黄緑以上）ではない → 背景の青色域なので無視
+                        active_pixels.append(hue_to_realtime_shindo(hue_deg))
 
-                if best_shindo is not None:
+                if len(active_pixels) >= self.min_active_pixels:
                     cell_id = f"g{gx // self.grid_size}_{gy // self.grid_size}"
                     readings.append(GridCellReading(
-                        cell_id=cell_id, shindo=best_shindo, x=gx, y=gy,
+                        cell_id=cell_id,
+                        shindo=max(active_pixels),  # セル内の最大震度を代表値とする
+                        x=gx, y=gy,
+                        active_pixel_count=len(active_pixels),
                     ))
 
         return readings
@@ -153,12 +191,6 @@ class KyoshinImageAnalyzer:
         """
         画像サイズから、全グリッドセルの station_id と
         8近傍セルの近隣リストを機械的に生成する。
-        core.kyoshin_detector.EventManager.register_station() への
-        一括登録に使う。
-
-        Returns
-        -------
-        dict[cell_id, list[neighbor_cell_id]]
         """
         cols = (image_width + self.grid_size - 1) // self.grid_size
         rows = (image_height + self.grid_size - 1) // self.grid_size

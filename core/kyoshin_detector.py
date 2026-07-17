@@ -48,7 +48,15 @@ logger = logging.getLogger("QTLBot")
 class DetectorConfig:
     history_window_sec: float = 10.0        # 過去何秒分の履歴を保持するか
     poll_interval_sec: float = 1.0           # ingest() が呼ばれる想定間隔（バッファサイズ計算に使用）
-    rise_threshold: float = 0.5              # 「上昇トリガー」とみなす震度上昇幅のデフォルト値
+
+    # ⚠️ 重要: 以下の震度関連のしきい値は全て「実震度値」（10倍していない値。
+    # 例: 震度3なら 3.0）で統一している。
+    # 過去バージョンでは「震度の10倍値」を前提にした設計になっており、
+    # 実データ較正済みの KyoshinImageAnalyzer が返す実震度値と単位が
+    # 一致していなかった（rise_threshold=0.5 のつもりが実質 震度0.05 の
+    # 変化で発火する、という過敏すぎる設定になっていた）。
+    # 過敏な誤検知の一因だったため、実震度スケールに統一した。
+    rise_threshold: float = 0.5              # 「上昇トリガー」とみなす実震度の上昇幅
     rise_threshold_overrides: dict = field(default_factory=lambda: {
         # ノイズの多い大都市圏は個別にしきい値を上げる（city_group名で指定）
         "tokyo":     0.8,
@@ -56,20 +64,21 @@ class DetectorConfig:
     })
     neighbor_trigger_count: int = 2          # 近隣で同時に何点上昇していれば「本物」とみなすか
     base_timeout_sec: float = 15.0           # 観測点がイベントに留まる基本の猶予時間
-    timeout_per_shindo: float = 5.0          # 震度1につき追加される猶予時間（秒）
-    blacklist_shindo_threshold: float = 30.0 # 震度3相当（10倍値）。ブラックリスト判定の下限
-    blacklist_shindo_threshold_island: float = 45.0  # 離島は震度5弱相当
-    blacklist_flat_diff: float = 1.0         # 「ほぼ変化なし」とみなす上昇幅の上限
-    active_floor_shindo: float = 10.0        # 震度1相当（10倍値）。これ未満に落ち着いたら
+    timeout_per_shindo: float = 5.0          # 実震度1につき追加される猶予時間（秒）
+    blacklist_shindo_threshold: float = 3.0  # 震度3以上。ブラックリスト判定の下限（ingen084氏の記事の基準に準拠）
+    blacklist_shindo_threshold_island: float = 4.5  # 離島は震度5弱以上
+    blacklist_flat_diff: float = 0.3         # 「ほぼ変化なし」とみなす実震度の上昇幅の上限
+    active_floor_shindo: float = 1.0         # 実震度1相当。これ未満に落ち着いたら
                                               # 動的タイマーの延長を止める（平常domain扱い）
 
-    # フェーズ境界（震度10倍値。例: 45 = 震度5弱）
+    # フェーズ境界（実震度値）。ingen084氏の記事の基準にそのまま準拠:
+    # https://qiita.com/ingen084/items/82985e8d3227c97c608d
     phase_bounds: dict = field(default_factory=lambda: {
-        "Weaker":   10,   # 震度1未満〜
-        "Weak":     30,   # 震度3〜
-        "Medium":   45,   # 震度5弱〜
-        "Strong":   55,   # 震度6弱〜
-        "Stronger": 70,   # 震度7〜
+        "Weaker":   -1.5,  # 実震度-1.5以上-1.0未満
+        "Weak":     -1.0,  # 実震度-1.0以上1未満
+        "Medium":    1.0,  # 実震度1以上3未満
+        "Strong":    3.0,  # 実震度3以上5弱未満
+        "Stronger":  4.5,  # 実震度5弱以上
     })
 
 
@@ -95,6 +104,7 @@ class Station:
     blacklisted: bool = False
     _rose_this_tick: bool = False   # このtickで上昇トリガーが立ったか（内部フラグ）
     _seen_this_tick: bool = False   # このtickでingest()による新規観測値を受け取ったか（内部フラグ）
+    _pre_confirmed_this_tick: bool = False  # ClusterTracker等、上位層で既にクラスタ確定済みか（内部フラグ）
     expire_at: float | None = None  # このstationがイベントに留まれる期限（monotonic time）
 
     def push(self, now: float, shindo: float, window_sec: float) -> None:
@@ -222,6 +232,28 @@ class EventManager:
 
         station._seen_this_tick = True
 
+    def ingest_confirmed(self, station_id: str, shindo: float, now: float) -> None:
+        """
+        既に上位層（core.kyoshin_cluster_tracker.ClusterTracker 等）で
+        クラスタリング・複数フレーム持続確認済みの観測点を直接取り込む。
+
+        通常の ingest() が行う「rise_threshold による上昇トリガー判定」
+        「ブラックリスト判定」はスキップし、tick() で直接イベント割当対象
+        （confirmed_ids）として扱われるようにする。
+
+        これは、独自の敏感な閾値判定（EventManager内蔵のrise_threshold等）
+        が誤検知の温床になっていたため、より頑健なHSVマスク＋クラスタリング＋
+        複数フレーム検証を行う上位層に検知の主導権を委ねるためのインターフェース。
+        """
+        station = self.stations.get(station_id)
+        if station is None or station.blacklisted:
+            return
+        station.push(now, shindo, self.config.history_window_sec)
+        station._seen_this_tick = True
+        station._pre_confirmed_this_tick = True
+        station._rose_this_tick = False  # 独自の上昇トリガー判定は使わない
+        station._flat_and_high = False   # ブラックリスト判定もスキップする
+
     # ===============================
     # tick: イベントの生成・更新・マージ・終了判定
     # ===============================
@@ -229,6 +261,7 @@ class EventManager:
         changes: list[_Change] = []
 
         risen_ids = [sid for sid, st in self.stations.items() if st._rose_this_tick]
+        pre_confirmed_ids = [sid for sid, st in self.stations.items() if st._pre_confirmed_this_tick]
 
         # ── ブラックリスト化（周囲が無反応なのに単独でフラット&高震度） ──
         # 既にイベントに参加中の観測点は、進行中の地震で震度が高止まりしているだけの
@@ -258,6 +291,14 @@ class EventManager:
                 if n in self.stations and self.stations[n]._rose_this_tick
             )
             if neighbor_rise_count >= self.config.neighbor_trigger_count:
+                confirmed_ids.append(sid)
+
+        # ── 事前確定済み（ClusterTracker等）は近隣検証をスキップして直接確定扱いにする ──
+        for sid in pre_confirmed_ids:
+            st = self.stations[sid]
+            if st.blacklisted:
+                continue
+            if sid not in confirmed_ids:
                 confirmed_ids.append(sid)
 
         # ── イベント割当 / 新規作成 / マージ ──
@@ -311,7 +352,7 @@ class EventManager:
             shindo = st.current_shindo or 0.0
             if shindo < self.config.active_floor_shindo:
                 continue  # 平常域まで収まった → タイマーを延長せず自然減衰に任せる
-            extension = self.config.base_timeout_sec + shindo * self.config.timeout_per_shindo / 10.0
+            extension = self.config.base_timeout_sec + shindo * self.config.timeout_per_shindo
             st.expire_at = now + extension
 
         # ── 期限切れ観測点の離脱 ──
@@ -329,6 +370,7 @@ class EventManager:
         for st in self.stations.values():
             st._rose_this_tick = False
             st._seen_this_tick = False
+            st._pre_confirmed_this_tick = False
 
         return changes
 
