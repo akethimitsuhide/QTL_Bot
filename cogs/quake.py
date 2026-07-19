@@ -694,8 +694,13 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
 
-            # PLUM法の場合は「約」を付けない
-            depth_display = f"約{depth_str}km" if not is_plum else depth_str
+            # PLUM法の場合は「約」を付けない。深さ 0km は「ごく浅い」と表示する。
+            if is_plum:
+                depth_display = depth_str
+            elif depth == 0:
+                depth_display = "ごく浅い"
+            else:
+                depth_display = f"約{depth_str}km"
             
             description = (
                 f"**発生時刻： {origin_time}**\n"
@@ -860,13 +865,13 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
         self.last_eew_data = data.copy()
 
     def _is_intensity_changed_significantly(self, prev: str, current: str) -> bool:
-        order = ["不明", "1", "2", "3", "4", "5弱", "推定5弱以上", "5強", "6弱", "6強", "7"]
+        order = ["不明", "1", "2", "3", "4", "5弱", "推定5弱以上", "5強", "6弱", "6強", "7", "7以上"]
         try:
             idx_prev = order.index(prev)
             idx_cur = order.index(current)
             return abs(idx_cur - idx_prev) >= 1
         except ValueError:
-            return False
+            return True
 
     # ===============================
     # EEW 音声再生ロジック
@@ -1136,23 +1141,34 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
 
         embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
 
-        name = hypo.get("name", "調査中")
+        name = hypo.get("name") or "調査中"
         mag = hypo.get("magnitude", -1)
         depth = hypo.get("depth", -1)
 
         mag_str = f"M{mag}" if mag != -1 else "調査中"
-        depth_str = f"約{depth}km" if depth != -1 else "調査中"
+        if depth == 0:
+            depth_str = "ごく浅い"
+        elif depth != -1:
+            depth_str = f"約{depth}km"
+        else:
+            depth_str = "調査中"
 
         occur_time = format_jma_time(eq.get("time", "不明"))
 
-        description = (
-            f"**発表機関： {source}**\n"
-            f"**発生時刻： {occur_time}**\n"
-            f"**震源地： {name}**\n"
-            f"**最大震度： {max_scale_str}**\n"
-            f"**マグニチュード： {mag_str}**\n"
-            f"**深さ： {depth_str}**"
-        )
+        name_display = "調査中" if issue_type == "ScalePrompt" else name
+        show_intensity = issue_type != "Destination"
+        desc_lines = [
+            f"**発表機関： {source}**",
+            f"**発生時刻： {occur_time}**",
+            f"**震源地： {name_display}**",
+        ]
+        if show_intensity:
+            desc_lines.append(f"**最大震度： {max_scale_str}**")
+        desc_lines += [
+            f"**マグニチュード： {mag_str}**",
+            f"**深さ： {depth_str}**",
+        ]
+        description = "\n".join(desc_lines)
 
         dom_tsunami = eq.get("domesticTsunami", "None")
         description += f"\n\n{TSUNAMI_MAP.get(dom_tsunami, '情報なし')}"
@@ -1254,10 +1270,11 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                 f" マグニチュードは {mag_str} と推定されます。"
             )
         elif issue_type == "Foreign":
-            # 遠地地震
+            # 遠地地震 / 遠地大規模噴火
+            foreign_event_text = "遠地地震がありました。" if is_volcano else "海外で規模の大きな地震がありました。"
             speak_text = (
                 f"{title}。"
-                f"{time_str}遠地地震がありました。"
+                f"{time_str}{foreign_event_text}"
                 f" 震源地は {name}。"
                 f" マグニチュードは {mag_str}。{tsunami_speak}"
             )
