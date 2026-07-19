@@ -32,6 +32,7 @@ https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYY
 """
 import io
 import logging
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -39,7 +40,14 @@ import discord
 from discord.ext import commands
 import aiohttp
 
-from core.config import CHANNEL_ID, KYOSHIN_CHANNEL_ID, ENABLE_KYOSHIN
+from core.config import (
+    CHANNEL_ID, KYOSHIN_CHANNEL_ID, ENABLE_KYOSHIN,
+    KYOSHIN_GRID_SIZE, KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
+    KYOSHIN_IMAGE_MAX_RETRY, KYOSHIN_POLL_INTERVAL_SEC, KYOSHIN_NOTIFY_INTERVAL_SEC,
+    KYOSHIN_MIN_CLUSTER_SIZE, KYOSHIN_REQUIRED_FRAMES, KYOSHIN_MIN_ACTIVE_PIXELS,
+    KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION,
+    KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
+)
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
 from core.kyoshin_image_analyzer import KyoshinImageAnalyzer
@@ -59,14 +67,8 @@ JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
 # 設定（例: ラズパイがUTCのまま等）に依存させず、常に明示的にJSTで計算する。
 JST = ZoneInfo("Asia/Tokyo")
 
-GRID_SIZE = 10
-
-IMAGE_DELAY_SEC = 6
-IMAGE_STEP_SEC = 3
-IMAGE_MAX_RETRY = 4
-
-# 通知抑止の最小観測点数（これ以下は「検出していない」扱いにする）
-MIN_STATIONS_FOR_NOTIFICATION = 2
+# フェーズの強さの序列（KYOSHIN_MIN_NOTIFY_PHASE との比較に使用）
+PHASE_ORDER = ["Weaker", "Weak", "Medium", "Strong", "Stronger"]
 
 # 定性的なフェーズ名の日本語表示（震度の具体的数値は一切出さない）
 PHASE_LABEL_JA = {
@@ -78,6 +80,13 @@ PHASE_LABEL_JA = {
 }
 
 
+def _phase_index(phase: str) -> int:
+    try:
+        return PHASE_ORDER.index(phase)
+    except ValueError:
+        return 0
+
+
 class KyoshinMonitorCog(commands.Cog):
     """強震モニタ画像の解析（HSVマスク＋クラスタリング＋複数フレーム検証）による揺れ検知・Discord通知を行う Cog。"""
 
@@ -87,8 +96,14 @@ class KyoshinMonitorCog(commands.Cog):
         self.kyoshin_channel = None
         self.session: aiohttp.ClientSession | None = None
 
-        self.analyzer = KyoshinImageAnalyzer(grid_size=GRID_SIZE)
-        self.cluster_tracker = ClusterTracker()
+        self.analyzer = KyoshinImageAnalyzer(
+            grid_size=KYOSHIN_GRID_SIZE,
+            min_active_pixels=KYOSHIN_MIN_ACTIVE_PIXELS,
+        )
+        self.cluster_tracker = ClusterTracker(
+            min_cluster_size=KYOSHIN_MIN_CLUSTER_SIZE,
+            required_consecutive_frames=KYOSHIN_REQUIRED_FRAMES,
+        )
         self._stations_registered = False
         self._last_image_url: str | None = None
 
@@ -97,11 +112,18 @@ class KyoshinMonitorCog(commands.Cog):
             send_kyoshin_image=self._send_kyoshin_image,
             on_event_ended=self._on_event_ended,
             config=DetectorConfig(),
-            poll_interval_sec=2.0,
-            image_interval_sec=3.0,
+            poll_interval_sec=KYOSHIN_POLL_INTERVAL_SEC,
+            image_interval_sec=KYOSHIN_NOTIFY_INTERVAL_SEC,
             use_confirmed_ingest=True,  # ClusterTracker確定済みセルのみ受け取る
         )
         self._monitor_task = None
+
+        if KYOSHIN_DEBUG_SAVE_IMAGE:
+            os.makedirs(KYOSHIN_DEBUG_IMAGE_DIR, exist_ok=True)
+            logger.info(
+                f"KyoshinMonitorCog: デバッグ画像保存を有効化しました "
+                f"(保存先: {KYOSHIN_DEBUG_IMAGE_DIR})"
+            )
 
     async def cog_load(self):
         self.session = aiohttp.ClientSession(
@@ -149,7 +171,7 @@ class KyoshinMonitorCog(commands.Cog):
         for cell_id, neighbors in grid.items():
             self.monitor.event_manager.register_station(cell_id, neighbors=neighbors)
         self._stations_registered = True
-        logger.info(f"KyoshinMonitorCog: 疑似観測点を{len(grid)}件登録しました（grid_size={GRID_SIZE}px）")
+        logger.info(f"KyoshinMonitorCog: 疑似観測点を{len(grid)}件登録しました（grid_size={KYOSHIN_GRID_SIZE}px）")
 
     async def _fetch_current_shindo_map(self) -> dict[str, float]:
         """
@@ -190,6 +212,9 @@ class KyoshinMonitorCog(commands.Cog):
         if not tracker_result.confirmed_cell_ids:
             return {}
 
+        if KYOSHIN_DEBUG_SAVE_IMAGE:
+            self._save_debug_image(image_bytes, len(tracker_result.confirmed_cell_ids))
+
         # confirmed なセルのみ、震度値と共に返す
         shindo_by_cell = {r.cell_id: r.shindo for r in active_readings}
         return {
@@ -198,12 +223,28 @@ class KyoshinMonitorCog(commands.Cog):
             if cell_id in shindo_by_cell
         }
 
+    def _save_debug_image(self, image_bytes: bytes, confirmed_count: int) -> None:
+        """
+        confirmed判定が出たフレームの元画像をローカルに保存する（デバッグ・事後検証用）。
+        KYOSHIN_DEBUG_SAVE_IMAGE=true のときのみ呼ばれる。
+        保存自体の失敗はBot本体の動作に影響させないよう握りつぶしてログのみ出す。
+        """
+        try:
+            ts = datetime.now(JST).strftime("%Y%m%d_%H%M%S_%f")
+            filename = f"kyoshin_{ts}_cells{confirmed_count}.gif"
+            path = os.path.join(KYOSHIN_DEBUG_IMAGE_DIR, filename)
+            with open(path, "wb") as f:
+                f.write(image_bytes)
+            logger.debug(f"KyoshinMonitorCog: デバッグ画像を保存しました: {path}")
+        except Exception as e:
+            logger.warning(f"KyoshinMonitorCog: デバッグ画像の保存に失敗しました: {e}")
+
     async def _download_latest_image(self) -> tuple[bytes | None, str | None]:
         """
         現在時刻から少し過去に遡りながら、実際に存在する最新の jma_s 画像を探してダウンロードする。
         """
-        for i in range(IMAGE_MAX_RETRY):
-            dt = datetime.now(JST) - timedelta(seconds=IMAGE_DELAY_SEC + IMAGE_STEP_SEC * i)
+        for i in range(KYOSHIN_IMAGE_MAX_RETRY):
+            dt = datetime.now(JST) - timedelta(seconds=KYOSHIN_IMAGE_DELAY_SEC + KYOSHIN_IMAGE_STEP_SEC * i)
             ts = dt.strftime("%Y%m%d%H%M%S")
             url = f"{JMA_S_BASE}/{dt.strftime('%Y%m%d')}/{ts}.jma_s.gif"
             try:
@@ -222,15 +263,24 @@ class KyoshinMonitorCog(commands.Cog):
         """
         揺れ検知イベントが継続中、強震モニタ画像をDiscordに送信する。
 
-        検出観測点数が MIN_STATIONS_FOR_NOTIFICATION 未満の場合は
+        検出観測点数が KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION 未満の場合は
         「検出していない」扱いとして通知を送らない。
+        また event.phase が KYOSHIN_MIN_NOTIFY_PHASE より弱い場合も
+        通知を送らない（検知自体は継続するが、通知だけ抑制する）。
         リアルタイム震度の具体的な数値は防災科研の利用規約に配慮し表示しない。
         """
         member_count = len(event.member_station_ids)
-        if member_count < MIN_STATIONS_FOR_NOTIFICATION:
+        if member_count < KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION:
             logger.debug(
                 f"KyoshinMonitorCog: 観測点数{member_count}件のため通知をスキップします"
-                f"（検出していない扱い、閾値={MIN_STATIONS_FOR_NOTIFICATION}）"
+                f"（検出していない扱い、閾値={KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION}）"
+            )
+            return
+
+        if _phase_index(event.phase) < _phase_index(KYOSHIN_MIN_NOTIFY_PHASE):
+            logger.debug(
+                f"KyoshinMonitorCog: フェーズ{event.phase}は"
+                f"KYOSHIN_MIN_NOTIFY_PHASE={KYOSHIN_MIN_NOTIFY_PHASE}未満のため通知をスキップします"
             )
             return
 

@@ -49,6 +49,25 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _getenv_nonempty(key: str, default: str) -> str:
+    """
+    os.getenv() の空文字フォールバック問題を回避するヘルパー。
+
+    .env に `KEY=`（値が空）とだけ書かれている場合、os.getenv(key, default)
+    は「キーが存在する」とみなして空文字列を返してしまい、default 側へ
+    フォールバックしない。特にチャンネルID系の多段フォールバック
+    （例: EEW_CHANNEL_ID未設定→CHANNEL_IDを使う、という設計）では、
+    .env.example をそのまま .env にコピーしただけの状態（各行が
+    `KEY=` の空値）で int() 変換が失敗し Bot が起動できなくなる。
+    このヘルパーは値が空文字列の場合も「未設定」として扱い、
+    default 引数（＝呼び出し側で組み立てた次のフォールバック値）を返す。
+    """
+    value = os.getenv(key)
+    if value is None or value.strip() == "":
+        return default
+    return value
+
+
 def _env_bool(key: str, default: bool) -> bool:
     v = os.getenv(key, "")
     if not v:
@@ -104,15 +123,15 @@ AUDIO_PLAYER    = os.getenv("AUDIO_PLAYER", "aplay")
 # ===============================
 # チャンネル ID 設定
 # ===============================
-EEW_CHANNEL_ID       = int(os.getenv("EEW_CHANNEL_ID",       os.getenv("CHANNEL_ID", "0")))
-QUAKE_CHANNEL_ID     = int(os.getenv("QUAKE_CHANNEL_ID",     os.getenv("CHANNEL_ID", "0")))
-TSUNAMI_CHANNEL_ID   = int(os.getenv("TSUNAMI_CHANNEL_ID",   os.getenv("CHANNEL_ID", "0")))
-OTHER_CHANNEL_ID     = int(os.getenv("OTHER_CHANNEL_ID",     os.getenv("CHANNEL_ID", "0")))
-P2P_EEW_CHANNEL_ID   = int(os.getenv("P2P_EEW_CHANNEL_ID",   os.getenv("EEW_CHANNEL_ID", os.getenv("CHANNEL_ID", "0"))))
-KYOSHIN_CHANNEL_ID   = int(os.getenv("KYOSHIN_CHANNEL_ID",   os.getenv("OTHER_CHANNEL_ID", os.getenv("CHANNEL_ID", "0"))))
-ADMIN_CHANNEL_ID     = int(os.getenv("ADMIN_CHANNEL_ID",   "0"))
-VOLCANO_CHANNEL_ID   = int(os.getenv("VOLCANO_CHANNEL_ID",   os.getenv("CHANNEL_ID", "0")))
-USGS_CHANNEL_ID      = int(os.getenv("USGS_CHANNEL_ID", os.getenv("QUAKE_CHANNEL_ID", os.getenv("CHANNEL_ID", "0"))))
+EEW_CHANNEL_ID       = int(_getenv_nonempty("EEW_CHANNEL_ID",       _getenv_nonempty("CHANNEL_ID", "0")))
+QUAKE_CHANNEL_ID     = int(_getenv_nonempty("QUAKE_CHANNEL_ID",     _getenv_nonempty("CHANNEL_ID", "0")))
+TSUNAMI_CHANNEL_ID   = int(_getenv_nonempty("TSUNAMI_CHANNEL_ID",   _getenv_nonempty("CHANNEL_ID", "0")))
+OTHER_CHANNEL_ID     = int(_getenv_nonempty("OTHER_CHANNEL_ID",     _getenv_nonempty("CHANNEL_ID", "0")))
+P2P_EEW_CHANNEL_ID   = int(_getenv_nonempty("P2P_EEW_CHANNEL_ID",   _getenv_nonempty("EEW_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
+KYOSHIN_CHANNEL_ID   = int(_getenv_nonempty("KYOSHIN_CHANNEL_ID",   _getenv_nonempty("OTHER_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
+ADMIN_CHANNEL_ID     = int(_getenv_nonempty("ADMIN_CHANNEL_ID",   "0"))
+VOLCANO_CHANNEL_ID   = int(_getenv_nonempty("VOLCANO_CHANNEL_ID",   _getenv_nonempty("CHANNEL_ID", "0")))
+USGS_CHANNEL_ID      = int(_getenv_nonempty("USGS_CHANNEL_ID", _getenv_nonempty("QUAKE_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
 
 # ===============================
 # USGS 地震情報設定
@@ -168,6 +187,40 @@ ENABLE_LONG_PERIOD = _env_bool("ENABLE_LONG_PERIOD", True)
 ENABLE_ADVISORY    = _env_bool("ENABLE_ADVISORY", True)
 ENABLE_TSUNAMI_OBS = _env_bool("ENABLE_TSUNAMI_OBS", True)
 ENABLE_KYOSHIN     = _env_bool("ENABLE_KYOSHIN", True)
+
+# ===============================
+# 強震モニタ画像解析（Kyoshin）詳細設定
+# ===============================
+# 画像取得・解析パイプラインの各段階（グリッド分割 → HSVマスク →
+# クラスタリング → 複数フレーム検証 → 通知）を個別にチューニングできる
+# ようにする。値の意味は cogs/kyoshin_monitor.py 冒頭のdocstring、
+# および core/kyoshin_detector.py の DetectorConfig を参照。
+KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # px。画像を何px四方の疑似観測点セルに分割するか
+KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 秒。NIED側の配信遅延を見込んで遡る基準秒数
+KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
+KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
+KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "2.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
+KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "3.0")) # 秒。イベント継続中の画像通知の再送間隔
+
+KYOSHIN_MIN_CLUSTER_SIZE     = _env_int("KYOSHIN_MIN_CLUSTER_SIZE", 3)        # 個。これ未満のセル数のクラスタは孤立ノイズとして無視
+KYOSHIN_REQUIRED_FRAMES      = _env_int("KYOSHIN_REQUIRED_FRAMES", 2)         # 回。クラスタをconfirmed（確定）とみなすために必要な連続フレーム数
+KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 3)       # 個。1セル内でこの数以上「揺れ候補ピクセル」がないとアクティブとみなさない
+
+# 通知を送信する最小フェーズ（定性的な強さの下限）。
+# Weaker < Weak < Medium < Strong < Stronger の順に強い。
+# 例えば "Medium" を指定すると、Weaker/Weak 相当のイベントは検知はするが
+# Discord 通知は送らない（誤検知抑制・通知過多防止のための調整用）。
+KYOSHIN_MIN_NOTIFY_PHASE     = os.getenv("KYOSHIN_MIN_NOTIFY_PHASE", "Weaker")
+
+# 通知を送るために必要な最小の検出観測点（グリッドセル）数。
+# これ未満は「検出していない」扱いとして通知を送らない。
+KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION = _env_int("KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION", 2)
+
+# デバッグ用: confirmed 判定が出たフレームの元画像をローカルに一時保存するか。
+# 誤検知の事後検証用。常時有効にするとディスクを圧迫するため、
+# 通常運用では false を推奨。
+KYOSHIN_DEBUG_SAVE_IMAGE     = _env_bool("KYOSHIN_DEBUG_SAVE_IMAGE", False)
+KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_debug_images")
 
 # ===============================
 # EEW / API エラー挙動設定
