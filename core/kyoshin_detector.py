@@ -83,7 +83,7 @@ class DetectorConfig:
 
 
 def _phase_from_shindo(shindo: float, config: DetectorConfig) -> str:
-    """震度（10倍値）からフェーズ名を判定する。"""
+    """実震度値（10倍していない値。例: 震度3なら3.0）からフェーズ名を判定する。"""
     phase = "Weaker"
     for name, bound in sorted(config.phase_bounds.items(), key=lambda kv: kv[1]):
         if shindo >= bound:

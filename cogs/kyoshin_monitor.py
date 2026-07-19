@@ -33,6 +33,7 @@ https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYY
 import io
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
@@ -53,6 +54,10 @@ except ImportError:
     _PIL_AVAILABLE = False
 
 JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
+
+# NIEDの画像URLはJST基準で命名されているため、サーバーのローカルタイムゾーン
+# 設定（例: ラズパイがUTCのまま等）に依存させず、常に明示的にJSTで計算する。
+JST = ZoneInfo("Asia/Tokyo")
 
 GRID_SIZE = 10
 
@@ -198,7 +203,7 @@ class KyoshinMonitorCog(commands.Cog):
         現在時刻から少し過去に遡りながら、実際に存在する最新の jma_s 画像を探してダウンロードする。
         """
         for i in range(IMAGE_MAX_RETRY):
-            dt = datetime.now() - timedelta(seconds=IMAGE_DELAY_SEC + IMAGE_STEP_SEC * i)
+            dt = datetime.now(JST) - timedelta(seconds=IMAGE_DELAY_SEC + IMAGE_STEP_SEC * i)
             ts = dt.strftime("%Y%m%d%H%M%S")
             url = f"{JMA_S_BASE}/{dt.strftime('%Y%m%d')}/{ts}.jma_s.gif"
             try:
