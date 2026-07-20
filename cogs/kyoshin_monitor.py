@@ -30,11 +30,14 @@ https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYY
 https://smi.lmoniexp.bosai.go.jp/webservice/server/pros/latest.json
 
 【Discord通知の内容について】
-- リアルタイム震度の具体的な数値は表示しない
-  （防災科研の利用規約に配慮し、定性的なフェーズ名のみを表示する）
-- 検出観測点（グリッドセル）数が1件以下の場合は「検出していない」扱いとし、
-  通知を送信しない（孤立した末端セルだけが残っている状態を
-  誤って継続通知しないようにするため）
+- 検知した揺れ検知イベントの通知には、jma_s系統・abrspmx_s(LMoni)系統の
+  両方の画像と、kwatch-24h.netの振動レベルを表示する
+- 通知の色は、jma_s系統から推定した実震度に基づく独自カラーマップ
+  （core.kyoshin_shared.JMA_S_SHINDO_COLORS）で決定する
+- 検出観測点（グリッドセル）数は通知本文には表示しない
+  （内部的な閾値判定にのみ使用する）
+- 通知に必要な最小観測点数は、実震度（震度0相当 / 震度1相当以上）に
+  応じて2段階に分ける（KYOSHIN_MIN_STATIONS_SHINDO0 / SHINDO1）
 """
 import io
 import logging
@@ -51,13 +54,16 @@ from core.config import (
     KYOSHIN_GRID_SIZE, KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
     KYOSHIN_IMAGE_MAX_RETRY, KYOSHIN_POLL_INTERVAL_SEC, KYOSHIN_NOTIFY_INTERVAL_SEC,
     KYOSHIN_MIN_CLUSTER_SIZE, KYOSHIN_REQUIRED_FRAMES, KYOSHIN_MIN_ACTIVE_PIXELS,
-    KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION,
+    KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_SHINDO0, KYOSHIN_MIN_STATIONS_SHINDO1,
     KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
 )
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
 from core.kyoshin_image_analyzer import KyoshinImageAnalyzer
 from core.kyoshin_cluster_tracker import ClusterTracker
+from core.kyoshin_shared import (
+    DualImageFetcher, fetch_vibration_level, shindo_to_color,
+)
 
 logger = logging.getLogger("QTLBot")
 
@@ -119,6 +125,7 @@ class KyoshinMonitorCog(commands.Cog):
         )
         self._stations_registered = False
         self._last_image_url: str | None = None
+        self._dual_image_fetcher = DualImageFetcher()
 
         self.monitor = KyoshinImageMonitor(
             get_readings=self._fetch_current_shindo_map,
@@ -334,19 +341,30 @@ class KyoshinMonitorCog(commands.Cog):
     # ===============================
     async def _send_kyoshin_image(self, event: SeismicEvent) -> None:
         """
-        揺れ検知イベントが継続中、強震モニタ画像をDiscordに送信する。
+        揺れ検知イベントが継続中、強震モニタの通知をDiscordに送信する。
 
-        検出観測点数が KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION 未満の場合は
-        「検出していない」扱いとして通知を送らない。
+        通知に必要な最小観測点数は実震度によって切り替える
+        （震度0相当: KYOSHIN_MIN_STATIONS_SHINDO0 件以上、
+         震度1相当以上: KYOSHIN_MIN_STATIONS_SHINDO1 件以上）。
+        観測点数そのものは通知本文には表示しない（内部の閾値判定にのみ使用）。
+
         また event.phase が KYOSHIN_MIN_NOTIFY_PHASE より弱い場合も
         通知を送らない（検知自体は継続するが、通知だけ抑制する）。
-        リアルタイム震度の具体的な数値は防災科研の利用規約に配慮し表示しない。
+
+        通知には jma_s系統・abrspmx_s(LMoni)系統の両画像と、
+        kwatch-24h.netの振動レベルを含める。通知色は jma_s系統の
+        実震度(event.max_shindo)に基づく独自カラーマップで決定する。
         """
         member_count = len(event.member_station_ids)
-        if member_count < KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION:
+        min_stations = (
+            KYOSHIN_MIN_STATIONS_SHINDO1
+            if event.max_shindo >= 1.0
+            else KYOSHIN_MIN_STATIONS_SHINDO0
+        )
+        if member_count < min_stations:
             logger.debug(
                 f"KyoshinMonitorCog: 観測点数{member_count}件のため通知をスキップします"
-                f"（検出していない扱い、閾値={KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION}）"
+                f"（検出していない扱い、実震度={event.max_shindo:.2f}、閾値={min_stations}）"
             )
             return
 
@@ -360,24 +378,34 @@ class KyoshinMonitorCog(commands.Cog):
         channel = self.kyoshin_channel or self.channel
         if not channel:
             return
-        if not self._last_image_url:
+
+        jma_s_url, lmoni_url = await self._dual_image_fetcher.fetch_urls(self.session)
+        if not jma_s_url and not lmoni_url:
             return
 
+        vib_level = await fetch_vibration_level(self.session)
+
         phase_label = PHASE_LABEL_JA.get(event.phase, "揺れを検知")
+        color = shindo_to_color(event.max_shindo)
+
+        level_str = f"**振動レベル: {vib_level}**\n" if vib_level is not None else "**振動レベル: 取得中...**\n"
 
         embed = discord.Embed(
             title="強震モニタ（画像解析検知）",
             description=(
                 f"{phase_label}\n"
-                f"検知観測点数: {member_count}\n\n"
+                f"{level_str}\n"
                 f"※気象庁公式の情報ではありません。強震モニタ画像の解析による"
-                f"参考情報です。具体的な震度の数値はここでは表示していません。"
+                f"参考情報です。"
             ),
-            color=0xFF6600,
+            color=color,
             timestamp=datetime.now(),
         )
-        embed.set_image(url=self._last_image_url)
-        embed.set_footer(text="防災科研 強震モニタ (jma_s) の画像解析による自動検知")
+        if jma_s_url:
+            embed.set_image(url=jma_s_url)
+        if lmoni_url:
+            embed.set_thumbnail(url=lmoni_url)
+        embed.set_footer(text="防災科研 強震モニタ (jma_s / abrspmx_s) の画像解析による自動検知")
 
         await channel.send(embed=embed)
 

@@ -200,7 +200,9 @@ KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
 KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "2.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
-KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "3.0")) # 秒。イベント継続中の画像通知の再送間隔
+KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "2.0")) # 秒。イベント継続中の画像通知の再送間隔
+# ↑ 3.0→2.0に変更。EEW発表時の振動モニタ通知(cogs/quake.py側)と
+#   間隔を統一するため。
 
 KYOSHIN_MIN_CLUSTER_SIZE     = _env_int("KYOSHIN_MIN_CLUSTER_SIZE", 3)        # 個。これ未満のセル数のクラスタは孤立ノイズとして無視
 KYOSHIN_REQUIRED_FRAMES      = _env_int("KYOSHIN_REQUIRED_FRAMES", 2)         # 回。クラスタをconfirmed（確定）とみなすために必要な連続フレーム数
@@ -219,11 +221,13 @@ KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 
 # Bot側も同様に最弱フェーズから通知するデフォルトとする。
 KYOSHIN_MIN_NOTIFY_PHASE     = os.getenv("KYOSHIN_MIN_NOTIFY_PHASE", "Weaker")
 
-# 通知を送るために必要な最小の検出観測点（グリッドセル）数。
-# これ未満は「検出していない」扱いとして通知を送らない。
-# 参考実装(Kyoshin_v5.6.html)の minNeighbors: 2（近隣2局以上の同時反応で確定）
-# に合わせ、Bot側も2を維持する。
-KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION = _env_int("KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION", 2)
+# 通知を送るために必要な最小の検出観測点（グリッドセル）数を、
+# 震度帯によって切り替える（震度が低いほど誤検知の可能性が高いため、
+# より多くの観測点での同時検出を要求する）。
+# 実震度(event.max_shindo)が1.0未満（震度0相当）の場合はこちら。
+KYOSHIN_MIN_STATIONS_SHINDO0 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO0", 4)
+# 実震度が1.0以上（震度1相当以上）の場合はこちら。
+KYOSHIN_MIN_STATIONS_SHINDO1 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO1", 2)
 
 # デバッグ用: confirmed 判定が出たフレームの元画像をローカルに一時保存するか。
 # 誤検知の事後検証用。常時有効にするとディスクを圧迫するため、
