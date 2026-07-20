@@ -204,16 +204,25 @@ KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "3
 
 KYOSHIN_MIN_CLUSTER_SIZE     = _env_int("KYOSHIN_MIN_CLUSTER_SIZE", 3)        # 個。これ未満のセル数のクラスタは孤立ノイズとして無視
 KYOSHIN_REQUIRED_FRAMES      = _env_int("KYOSHIN_REQUIRED_FRAMES", 2)         # 回。クラスタをconfirmed（確定）とみなすために必要な連続フレーム数
-KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 3)       # 個。1セル内でこの数以上「揺れ候補ピクセル」がないとアクティブとみなさない
+KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。1セル内でこの数以上「揺れ候補ピクセル」がないとアクティブとみなさない
+# ↑ 3→2に緩和。参考実装(Kyoshin_v5.6.html)のSHAKE_DETECTION_CONFIGでは
+#   近隣2局の同時反応(minNeighbors=2)のみを要求しており、Bot側のセル単位の
+#   最小ピクセル数まで厳しく取る必要はないと判断。3だと弱い揺れの
+#   ピクセル数がしきい値未満になり「検知そのものが起きない」原因になりやすい。
 
 # 通知を送信する最小フェーズ（定性的な強さの下限）。
 # Weaker < Weak < Medium < Strong < Stronger の順に強い。
 # 例えば "Medium" を指定すると、Weaker/Weak 相当のイベントは検知はするが
 # Discord 通知は送らない（誤検知抑制・通知過多防止のための調整用）。
+# 参考実装(Kyoshin_v5.6.html)は震度の定性フェーズによる通知抑制を
+# 行っておらず、検知した揺れをそのまま表示する設計のため、
+# Bot側も同様に最弱フェーズから通知するデフォルトとする。
 KYOSHIN_MIN_NOTIFY_PHASE     = os.getenv("KYOSHIN_MIN_NOTIFY_PHASE", "Weaker")
 
 # 通知を送るために必要な最小の検出観測点（グリッドセル）数。
 # これ未満は「検出していない」扱いとして通知を送らない。
+# 参考実装(Kyoshin_v5.6.html)の minNeighbors: 2（近隣2局以上の同時反応で確定）
+# に合わせ、Bot側も2を維持する。
 KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION = _env_int("KYOSHIN_MIN_STATIONS_FOR_NOTIFICATION", 2)
 
 # デバッグ用: confirmed 判定が出たフレームの元画像をローカルに一時保存するか。

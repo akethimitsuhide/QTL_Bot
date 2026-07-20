@@ -23,6 +23,12 @@ core.kyoshin_cluster_tracker を統合し、強震モニタ画像の解析によ
 https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYYMMDDHHMMSS}.jma_s.gif
 （防災科研 リアルタイム震度モニタの公開画像。系統は jma_s のみを使用する）
 
+画像の時刻決定には、まず以下の latest.json API から実際に配信されている
+最新時刻(latest_time)を取得し、その時刻をもとに画像URLを構築する
+（従来の「現在時刻から遡ってリトライ探索する」方式は、latest.json取得に
+失敗した場合のフォールバックとしてのみ使用する）。
+https://smi.lmoniexp.bosai.go.jp/webservice/server/pros/latest.json
+
 【Discord通知の内容について】
 - リアルタイム震度の具体的な数値は表示しない
   （防災科研の利用規約に配慮し、定性的なフェーズ名のみを表示する）
@@ -62,6 +68,13 @@ except ImportError:
     _PIL_AVAILABLE = False
 
 JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
+
+# 実際に配信されている最新画像の時刻を取得するAPI。
+# レスポンス例:
+#   {"request_time": "2026/07/20 07:51:22", "latest_time": "2026/07/20 07:51:21",
+#    "result": {"status": "success", "message": ""}, "security": {...}}
+# latest_time は日本時間(JST)で "YYYY/MM/DD HH:MM:SS" 形式。
+KYOSHIN_LATEST_TIME_API = "https://smi.lmoniexp.bosai.go.jp/webservice/server/pros/latest.json"
 
 # NIEDの画像URLはJST基準で命名されているため、サーバーのローカルタイムゾーン
 # 設定（例: ラズパイがUTCのまま等）に依存させず、常に明示的にJSTで計算する。
@@ -239,10 +252,70 @@ class KyoshinMonitorCog(commands.Cog):
         except Exception as e:
             logger.warning(f"KyoshinMonitorCog: デバッグ画像の保存に失敗しました: {e}")
 
+    async def _fetch_latest_image_time(self) -> datetime | None:
+        """
+        latest.json から実際に配信されている最新画像の時刻(latest_time)を取得する。
+
+        取得・パースに失敗した場合は None を返す（呼び出し側は従来の
+        リトライ探索方式にフォールバックする）。
+        """
+        try:
+            async with self.session.get(
+                KYOSHIN_LATEST_TIME_API, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(
+                        f"KyoshinMonitorCog: latest.json取得失敗 (status={resp.status})"
+                    )
+                    return None
+                data = await resp.json(content_type=None)
+        except Exception as e:
+            logger.debug(f"KyoshinMonitorCog: latest.json取得エラー: {e}")
+            return None
+
+        try:
+            if data.get("result", {}).get("status") != "success":
+                logger.debug(
+                    f"KyoshinMonitorCog: latest.jsonのresult.statusが異常: {data.get('result')}"
+                )
+                return None
+            latest_time_str = data["latest_time"]
+            # "YYYY/MM/DD HH:MM:SS" 形式（JST）としてパースする
+            dt = datetime.strptime(latest_time_str, "%Y/%m/%d %H:%M:%S").replace(tzinfo=JST)
+            return dt
+        except (KeyError, ValueError) as e:
+            logger.debug(f"KyoshinMonitorCog: latest.jsonのパースに失敗しました: {e}")
+            return None
+
     async def _download_latest_image(self) -> tuple[bytes | None, str | None]:
         """
-        現在時刻から少し過去に遡りながら、実際に存在する最新の jma_s 画像を探してダウンロードする。
+        実際に存在する最新の jma_s 画像をダウンロードする。
+
+        まず latest.json から配信中の最新時刻を取得し、その時刻ちょうどの
+        画像を1回だけ取得する。latest.json取得・当該時刻画像取得のいずれかに
+        失敗した場合は、現在時刻から少し過去に遡りながら探索する従来方式に
+        フォールバックする。
         """
+        latest_dt = await self._fetch_latest_image_time()
+        if latest_dt is not None:
+            ts = latest_dt.strftime("%Y%m%d%H%M%S")
+            url = f"{JMA_S_BASE}/{latest_dt.strftime('%Y%m%d')}/{ts}.jma_s.gif"
+            try:
+                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        return data, url
+                    logger.debug(
+                        f"KyoshinMonitorCog: latest.json時刻の画像取得失敗 "
+                        f"(status={resp.status}, url={url})。従来方式にフォールバックします"
+                    )
+            except Exception as e:
+                logger.debug(
+                    f"KyoshinMonitorCog: latest.json時刻の画像取得エラー ({url}): {e}。"
+                    f"従来方式にフォールバックします"
+                )
+
+        # ── フォールバック: 現在時刻から遡りながらリトライ探索 ──
         for i in range(KYOSHIN_IMAGE_MAX_RETRY):
             dt = datetime.now(JST) - timedelta(seconds=KYOSHIN_IMAGE_DELAY_SEC + KYOSHIN_IMAGE_STEP_SEC * i)
             ts = dt.strftime("%Y%m%d%H%M%S")
