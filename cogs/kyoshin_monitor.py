@@ -1,23 +1,37 @@
 """
 cogs/kyoshin_monitor.py
 ========================
-core.kyoshin_detector / core.kyoshin_image_monitor / core.kyoshin_image_analyzer /
-core.kyoshin_cluster_tracker を統合し、強震モニタ画像の解析による
-揺れ検知と、Discord への画像通知を実際に行う Cog。
+core.kyoshin_detector / core.kyoshin_image_monitor / core.kyoshin_image_analyzer を
+統合し、強震モニタ画像の解析による揺れ検知と、Discord への画像通知を
+実際に行う Cog。
 
-【検知パイプライン（方針転換後）】
-1. KyoshinImageAnalyzer.analyze(): 画像をHSVマスク処理し、
-   震度1相当以上の色を持つピクセルが一定数集中しているグリッドセルのみ抽出
-   （背景の青色域は最初から解析対象に含めない）
-2. ClusterTracker.update(): 抽出されたアクティブセル群を8近傍で連結成分化し、
-   最小サイズ以上・複数フレーム連続で持続しているクラスタのみ confirmed とする
-3. EventManager.ingest_confirmed(): confirmed 済みのセルのみを直接取り込む
-   （EventManager独自の敏感な上昇トリガー・近隣検証はバイパスする）
+【検知パイプライン（2026-07-22 方針転換後）】
+1. KyoshinImageAnalyzer.analyze_all(): 画像を全グリッドセル（アクティブ・
+   非アクティブ問わず）の代表震度に変換する
+2. EventManager.ingest(): 各セルの震度の時系列（過去10秒分）を追跡し、
+   「上昇幅がしきい値を超えたセル」を検出したら、その近隣セルも
+   同時に上昇しているかで真偽を判定する（ingen084氏の記事のアルゴリズム）
+3. EventManager.tick(): 判定された観測点群をイベントとしてまとめる
+
+【方針転換の経緯】
+当初はHSVマスクで抽出した「アクティブセル（絶対震度が閾値以上）」を
+8近傍の連結成分でクラスタリングし、複数フレーム持続を見る
+（core.kyoshin_cluster_tracker.ClusterTracker）方式だったが、これは
+「震度の絶対値が静的に隣接している」ことしか見ておらず、単一観測点
+由来のGIF圧縮ノイズが偶然2〜3セルにまたがるだけで誤検知に至る
+ケースが多発した。
+
+ingen084氏の記事（強震モニタの画像から揺れていることを検知する）が
+提唱する「観測点ごとの震度の時系列上昇幅を追跡し、近隣観測点も
+同時に上昇しているか」という動的な変化ベースの判定の方が、
+静的な絶対値の隣接判定よりも本物の地震と単発ノイズを区別する
+能力が高いと判断し、EventManager.ingest()（この記事のアルゴリズムを
+実装したコアロジック）を検知の主軸に据える方針に転換した。
+ClusterTrackerは使用しないこととした。
 
 参考:
 - https://qiita.com/ingen084/items/82985e8d3227c97c608d
-- ユーザー提供の詳細仕様書（HSVマスク・DBSCANクラスタリング・
-  複数フレーム検証を組み合わせた揺れ検知アルゴリズム）
+  （強震モニタの画像から揺れていることを検知する／ingen084氏）
 
 【画像取得元】
 https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYYMMDDHHMMSS}.jma_s.gif
@@ -53,14 +67,14 @@ from core.config import (
     CHANNEL_ID, KYOSHIN_CHANNEL_ID, ENABLE_KYOSHIN,
     KYOSHIN_GRID_SIZE, KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
     KYOSHIN_IMAGE_MAX_RETRY, KYOSHIN_POLL_INTERVAL_SEC, KYOSHIN_NOTIFY_INTERVAL_SEC,
-    KYOSHIN_MIN_CLUSTER_SIZE, KYOSHIN_REQUIRED_FRAMES, KYOSHIN_MIN_ACTIVE_PIXELS,
+    KYOSHIN_MIN_ACTIVE_PIXELS, KYOSHIN_ACTIVE_SHINDO_FLOOR,
+    KYOSHIN_RISE_THRESHOLD, KYOSHIN_NEIGHBOR_TRIGGER_COUNT,
     KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_SHINDO0, KYOSHIN_MIN_STATIONS_SHINDO1,
     KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
 )
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
 from core.kyoshin_image_analyzer import KyoshinImageAnalyzer
-from core.kyoshin_cluster_tracker import ClusterTracker
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
 )
@@ -107,7 +121,7 @@ def _phase_index(phase: str) -> int:
 
 
 class KyoshinMonitorCog(commands.Cog):
-    """強震モニタ画像の解析（HSVマスク＋クラスタリング＋複数フレーム検証）による揺れ検知・Discord通知を行う Cog。"""
+    """強震モニタ画像の解析（震度の時系列上昇幅＋近隣同時上昇の検証）による揺れ検知・Discord通知を行う Cog。"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -117,11 +131,8 @@ class KyoshinMonitorCog(commands.Cog):
 
         self.analyzer = KyoshinImageAnalyzer(
             grid_size=KYOSHIN_GRID_SIZE,
+            active_shindo_floor=KYOSHIN_ACTIVE_SHINDO_FLOOR,
             min_active_pixels=KYOSHIN_MIN_ACTIVE_PIXELS,
-        )
-        self.cluster_tracker = ClusterTracker(
-            min_cluster_size=KYOSHIN_MIN_CLUSTER_SIZE,
-            required_consecutive_frames=KYOSHIN_REQUIRED_FRAMES,
         )
         self._stations_registered = False
         self._last_image_url: str | None = None
@@ -131,10 +142,17 @@ class KyoshinMonitorCog(commands.Cog):
             get_readings=self._fetch_current_shindo_map,
             send_kyoshin_image=self._send_kyoshin_image,
             on_event_ended=self._on_event_ended,
-            config=DetectorConfig(),
+            config=DetectorConfig(
+                rise_threshold=KYOSHIN_RISE_THRESHOLD,
+                neighbor_trigger_count=KYOSHIN_NEIGHBOR_TRIGGER_COUNT,
+            ),
             poll_interval_sec=KYOSHIN_POLL_INTERVAL_SEC,
             image_interval_sec=KYOSHIN_NOTIFY_INTERVAL_SEC,
-            use_confirmed_ingest=True,  # ClusterTracker確定済みセルのみ受け取る
+            # EventManager.ingest()（震度の時系列上昇幅＋近隣同時上昇の
+            # 検証。ingen084氏の記事のアルゴリズム）を検知の主軸とする。
+            # ClusterTracker（静的な絶対震度の隣接判定）は誤検知の
+            # 温床だったため使用しない。
+            use_confirmed_ingest=False,
         )
         self._monitor_task = None
 
@@ -178,7 +196,7 @@ class KyoshinMonitorCog(commands.Cog):
             self._monitor_task = self.bot.loop.create_task(self.monitor.run())
             logger.info(
                 "KyoshinMonitorCog: 監視ループを開始しました"
-                "（HSVマスク＋クラスタリング＋複数フレーム検証方式）"
+                "（震度の時系列上昇幅＋近隣同時上昇の検証方式）"
             )
 
     # ===============================
@@ -195,21 +213,23 @@ class KyoshinMonitorCog(commands.Cog):
 
     async def _fetch_current_shindo_map(self) -> dict[str, float]:
         """
-        強震モニタ画像(jma_s系統)を取得し、
-        1. HSVマスク処理でアクティブセルを抽出(KyoshinImageAnalyzer)
-        2. クラスタリング＋複数フレーム検証(ClusterTracker)
-        を経て、confirmed(確定)されたセルのみを返す。
+        強震モニタ画像(jma_s系統)を取得し、全グリッドセル（アクティブ・
+        非アクティブ問わず）の代表震度を dict[cell_id, shindo] で返す。
 
-        画像が取得できない、または confirmed なセルが無い場合は空の dict を返す。
+        「本物の地震かどうか」の判定はここでは行わない。ここでは
+        画像→震度マップへの変換のみを行い、実際の判定（時系列上昇幅の
+        追跡・近隣同時上昇の検証）は core.kyoshin_detector.EventManager.
+        ingest() / tick()（呼び出し元の core.kyoshin_image_monitor.
+        KyoshinImageMonitor.run()）に委ねる。
+
+        画像が取得できない場合は空の dict を返す（EventManagerには
+        何もフィードされず、そのフレームの観測値は欠測扱いになる）。
         """
         if not _PIL_AVAILABLE:
             return {}
 
         image_bytes, url = await self._download_latest_image()
         if image_bytes is None:
-            # 画像取得失敗時もクラスタ追跡は更新しておく（空フレームとして扱い、
-            # 継続中のクラスタが「消失」とみなされ streak がリセットされるのを許容する）
-            self.cluster_tracker.update([])
             return {}
 
         self._last_image_url = url
@@ -218,30 +238,24 @@ class KyoshinMonitorCog(commands.Cog):
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception as e:
             logger.warning(f"KyoshinMonitorCog: 画像デコードに失敗しました: {e}")
-            self.cluster_tracker.update([])
             return {}
 
         self._register_stations_once(img.width, img.height)
 
-        # Stage1: HSVマスク処理によるアクティブセル抽出
-        active_readings = self.analyzer.analyze(img)
-
-        # Stage2+3: クラスタリング＋複数フレーム持続確認
-        tracker_result = self.cluster_tracker.update(active_readings)
-
-        if not tracker_result.confirmed_cell_ids:
-            return {}
+        # 全グリッドセル（非アクティブ含む）の代表震度を返す。
+        # EventManager.ingest() が時系列の上昇幅を正しく追跡できるよう、
+        # 揺れていないセルにも背景相当の代表値を明示的にフィードする。
+        shindo_map = self.analyzer.analyze_all(img)
 
         if KYOSHIN_DEBUG_SAVE_IMAGE:
-            self._save_debug_image(image_bytes, len(tracker_result.confirmed_cell_ids))
+            active_count = sum(
+                1 for v in shindo_map.values()
+                if v >= KYOSHIN_ACTIVE_SHINDO_FLOOR
+            )
+            if active_count > 0:
+                self._save_debug_image(image_bytes, active_count)
 
-        # confirmed なセルのみ、震度値と共に返す
-        shindo_by_cell = {r.cell_id: r.shindo for r in active_readings}
-        return {
-            cell_id: shindo_by_cell[cell_id]
-            for cell_id in tracker_result.confirmed_cell_ids
-            if cell_id in shindo_by_cell
-        }
+        return shindo_map
 
     def _save_debug_image(self, image_bytes: bytes, confirmed_count: int) -> None:
         """

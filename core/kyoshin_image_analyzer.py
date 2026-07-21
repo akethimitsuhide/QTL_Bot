@@ -214,6 +214,66 @@ class KyoshinImageAnalyzer:
 
         return readings
 
+    def analyze_all(self, image) -> dict[str, float]:
+        """
+        PIL.Image を受け取り、全グリッドセル（背景相当の非アクティブな
+        セルも含む）の代表震度を dict[cell_id, shindo] で返す。
+
+        【analyze() との違い・使い分け】
+        analyze() は「揺れ候補色（震度 active_shindo_floor 以上）の
+        ピクセルが min_active_pixels 個以上あるセルのみ」を返す、
+        静的な閾値ベースの一次フィルタ用途。
+
+        analyze_all() は core.kyoshin_detector.EventManager.ingest() に
+        渡すためのもので、ingen084氏の記事
+        (https://qiita.com/ingen084/items/82985e8d3227c97c608d) が
+        提唱する「観測点ごとの震度の時系列上昇幅を追跡し、近隣観測点も
+        同時に上昇しているかで真偽を判定する」というアルゴリズムを
+        機能させるには、アクティブ/非アクティブを問わず全セルの
+        現在値を毎フレーム継続的にフィードする必要がある
+        （そうしないと「上昇→元に戻った」という履歴が追跡できず、
+        次に同じセルが弱いノイズで反応した際の基準値が不正確になる）。
+
+        非アクティブセル（揺れ候補ピクセルが min_active_pixels 未満）は、
+        背景色相当の代表値として active_shindo_floor よりわずかに
+        小さい値（キリの良い基準値）を返す。実際のセル内最大色を
+        使わないのは、背景ノイズの微細な揺らぎをそのまま数値化して
+        履歴に混入させないため。
+        """
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        w, h = image.size
+        pixels = image.load()
+        result: dict[str, float] = {}
+        # 非アクティブセルの代表値。active_shindo_floor未満の固定値にすることで、
+        # 「アクティブ→非アクティブ」の変化もEventManager側で正しく
+        # 「下降」として記録される。
+        inactive_value = self.active_shindo_floor - 1.0
+
+        for gy in range(0, h, self.grid_size):
+            for gx in range(0, w, self.grid_size):
+                active_pixels: list[float] = []
+
+                for y in range(gy, min(gy + self.grid_size, h)):
+                    for x in range(gx, min(gx + self.grid_size, w)):
+                        r, g, b = pixels[x, y]
+                        hh, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                        if vv < BACKGROUND_VALUE_THRESHOLD:
+                            continue
+                        hue_deg = hh * 360
+                        if hue_deg > self._hue_ceiling:
+                            continue
+                        active_pixels.append(hue_to_realtime_shindo(hue_deg))
+
+                cell_id = f"g{gx // self.grid_size}_{gy // self.grid_size}"
+                if len(active_pixels) >= self.min_active_pixels:
+                    result[cell_id] = max(active_pixels)
+                else:
+                    result[cell_id] = inactive_value
+
+        return result
+
     def build_station_grid(self, image_width: int, image_height: int) -> dict[str, list[str]]:
         """
         画像サイズから、全グリッドセルの station_id と

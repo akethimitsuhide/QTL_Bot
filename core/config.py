@@ -191,10 +191,25 @@ ENABLE_KYOSHIN     = _env_bool("ENABLE_KYOSHIN", True)
 # ===============================
 # 強震モニタ画像解析（Kyoshin）詳細設定
 # ===============================
-# 画像取得・解析パイプラインの各段階（グリッド分割 → HSVマスク →
-# クラスタリング → 複数フレーム検証 → 通知）を個別にチューニングできる
-# ようにする。値の意味は cogs/kyoshin_monitor.py 冒頭のdocstring、
-# および core/kyoshin_detector.py の DetectorConfig を参照。
+# 画像取得・解析パイプラインの各段階（グリッド分割 → 全セル震度化 →
+# 時系列上昇幅の追跡 → 近隣同時上昇の検証 → 通知）を個別に
+# チューニングできるようにする。値の意味は cogs/kyoshin_monitor.py
+# 冒頭のdocstring、および core/kyoshin_detector.py の DetectorConfig を参照。
+#
+# 【2026-07-22 検知アルゴリズムの方針転換】
+# 当初は「HSVマスクで抽出したアクティブセルを8近傍で連結成分化し、
+# 最小サイズ以上・複数フレーム持続で確定させる」(ClusterTracker)方式
+# だったが、これは震度の絶対値が静的に隣接しているかしか見ておらず、
+# 単一観測点由来のGIF圧縮ノイズが偶然2〜3セルにまたがるだけで
+# 誤検知に至るケースが多発した。
+# ingen084氏の記事(https://qiita.com/ingen084/items/82985e8d3227c97c608d)
+# が提唱する「観測点ごとの震度の時系列上昇幅を追跡し、近隣観測点も
+# 同時に上昇しているか」という動的な変化ベースの判定（
+# core.kyoshin_detector.EventManager.ingest()に実装済み）の方が、
+# 静的な絶対値の隣接判定よりも本物の地震と単発ノイズを区別する
+# 能力が高いと判断し、こちらを検知の主軸に切り替えた。
+# ClusterTracker関連の設定(旧KYOSHIN_MIN_CLUSTER_SIZE / 
+# KYOSHIN_REQUIRED_FRAMES)は廃止した。
 KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # px。画像を何px四方の疑似観測点セルに分割するか
 KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 秒。NIED側の配信遅延を見込んで遡る基準秒数
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
@@ -204,64 +219,70 @@ KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "2
 # ↑ 3.0→2.0に変更。EEW発表時の振動モニタ通知(cogs/quake.py側)と
 #   間隔を統一するため。
 
-KYOSHIN_MIN_CLUSTER_SIZE     = _env_int("KYOSHIN_MIN_CLUSTER_SIZE", 3)        # 個。これ未満のセル数のクラスタは孤立ノイズとして無視
-# ↑ 3→2→3の経緯(2026-07-21)。当初3→2に緩和したが、実運用で
-#   単一観測点由来のGIF圧縮ノイズが偶然隣接2セルにまたがり、
-#   confirmed判定されてしまう誤検知が数秒おきに多発した
-#   （実際には他社製ソフトも検知しないレベルのノイズだった）。
-#   2セルという最小ラインは、ノイズと本物の揺れを区別する
-#   マージンとして不十分だったため、3に戻して安全側に倒す。
-
-KYOSHIN_REQUIRED_FRAMES      = _env_int("KYOSHIN_REQUIRED_FRAMES", 2)         # 回。クラスタをconfirmed（確定）とみなすために必要な連続フレーム数
-# ↑ ここは緩めない。1にすると単発ノイズがそのまま確定してしまい
-#   誤検知が急増するため、複数フレームでの再現性チェックは維持する。
-
 KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。1セル内でこの数以上「揺れ候補ピクセル」がないとアクティブとみなさない
-# ↑ 3→2に緩和したところまでは実害が確認されていない。この後
-#   2→1へさらに緩和したが、誤検知多発を受けて2に戻した
-#   （KYOSHIN_MIN_CLUSTER_SIZEを3に戻したことが誤検知対策の
-#   主眼であり、こちらは安全マージンとして2を維持する）。
+# ↑ このピクセル数フィルタは、KyoshinImageAnalyzer.analyze_all() が
+#   各セルの代表震度を計算する際の一次フィルタとして引き続き使う
+#   （明らかに単一ピクセルしかないセルにまで反応しないようにするため）。
+#   真の検知判定（誤検知対策の主眼）は下記のKYOSHIN_RISE_THRESHOLD /
+#   KYOSHIN_NEIGHBOR_TRIGGER_COUNTが担う。
 
 # HSVマスク処理で「揺れ候補ピクセル」とみなす実震度の下限値。
 # これ未満の実震度に相当する色（背景の青〜水色域）は、GIFノイズの
-# 温床であるため最初から解析対象に含めない。
+# 温床であるため最初から解析対象に含めない（analyze_all()の一次フィルタ）。
 # 【2026-07-21 緩和の経緯・1回目】当初は1.0（気象庁震度階級の震度1相当）
 # だったが、実際の地震（気象庁震度1、山梨県東部・富士五湖）で
 # 画像解析側の検知が一切反応しなかった事例が発生した。気象庁震度階級は
 # 離散値、防災科研リアルタイム震度は連続値であり、気象庁震度1の地震でも
 # 各観測点のリアルタイム震度実数値は0.5〜1.4程度に分布しうる。1.0だと
-# その多くがHSVマスク段階で除外され、後段のクラスタリング・確定判定に
-# 一切到達しない（＝検知そのものが起きない）ことが主要因だったと判断し、
-# 0.5に緩和した。
+# その多くがHSVマスク段階で除外され、後段の判定に一切到達しない
+# （＝検知そのものが起きない）ことが主要因だったと判断し、0.5に緩和した。
 # 【2026-07-21 巻き戻し】0.5→0.2へさらに緩和したところ、単一観測点の
 # GIF圧縮ノイズ（実震度0.2程度）まで解析対象に含まれるようになり、
 # 数秒おきの誤検知（他社製ソフトでは検知しないレベルのノイズ）が
-# 多発した。0.2は背景ノイズとの区別が付かないレベルだったと判断し、
-# 0.5に戻す。
+# 多発した。0.5に戻す。
+# 【2026-07-22 追記】検知アルゴリズムをEventManager.ingest()による
+# 時系列上昇幅ベースの判定に切り替えたため、この閾値はあくまで
+# 「明らかに揺れていない色を除外する一次フィルタ」としての役割に
+# 限定される。誤検知対策の主眼はKYOSHIN_RISE_THRESHOLDと
+# KYOSHIN_NEIGHBOR_TRIGGER_COUNTに移した。
 KYOSHIN_ACTIVE_SHINDO_FLOOR  = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0.5"))
+
+# 「上昇トリガー」とみなす実震度の上昇幅（過去10秒前の値との差分）。
+# ingen084氏の記事の核心となるパラメータ。単一観測点の震度が
+# この幅以上急上昇した場合にのみ「候補」として扱う（絶対値ではなく
+# 変化量を見ることで、常に薄く色が乗っているセルなどの静的ノイズを
+# 自然に除外できる）。
+# デフォルトは core.kyoshin_detector.DetectorConfig の既定値(0.5)と
+# 同じにしている。
+KYOSHIN_RISE_THRESHOLD = float(os.getenv("KYOSHIN_RISE_THRESHOLD", "0.5"))
+
+# 上昇トリガーが立った観測点について、8近傍の観測点のうち何点が
+# 「同時に」上昇トリガーを満たしていれば本物の揺れとみなすか。
+# ingen084氏の記事における「周囲の観測点も上昇していた場合、
+# 揺れている、という判定を行う」の実装部分。値を上げるほど、
+# より広範囲で同時多発的な上昇でないと確定しなくなり、誤検知に
+# 対して厳しくなる（その分、検知の即応性・感度は下がる）。
+KYOSHIN_NEIGHBOR_TRIGGER_COUNT = _env_int("KYOSHIN_NEIGHBOR_TRIGGER_COUNT", 2)
 
 # 通知を送信する最小フェーズ（定性的な強さの下限）。
 # Weaker < Weak < Medium < Strong < Stronger の順に強い。
 # 例えば "Medium" を指定すると、Weaker/Weak 相当のイベントは検知はするが
 # Discord 通知は送らない（誤検知抑制・通知過多防止のための調整用）。
-# 参考実装(Kyoshin_v5.6.html)は震度の定性フェーズによる通知抑制を
-# 行っておらず、検知した揺れをそのまま表示する設計のため、
-# Bot側も同様に最弱フェーズから通知するデフォルトとする。
+# ingen084氏の記事の基準に準拠し、Bot側も最弱フェーズから通知する
+# デフォルトとする。
 KYOSHIN_MIN_NOTIFY_PHASE     = os.getenv("KYOSHIN_MIN_NOTIFY_PHASE", "Weaker")
 
 # 通知を送るために必要な最小の検出観測点（グリッドセル）数を、
 # 震度帯によって切り替える（震度が低いほど誤検知の可能性が高いため、
 # より多くの観測点での同時検出を要求する）。
 # 実震度(event.max_shindo)が1.0未満（震度0相当）の場合はこちら。
-# 2026-07-21: 4→3へ緩和したが、他の閾値(特にKYOSHIN_MIN_CLUSTER_SIZE)
-# の緩和と重なって誤検知が多発したため、4に戻す。
 KYOSHIN_MIN_STATIONS_SHINDO0 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO0", 4)
 # 実震度が1.0以上（震度1相当以上）の場合はこちら。
 KYOSHIN_MIN_STATIONS_SHINDO1 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO1", 2)
 
-# デバッグ用: confirmed 判定が出たフレームの元画像をローカルに一時保存するか。
-# 誤検知の事後検証用。常時有効にするとディスクを圧迫するため、
-# 通常運用では false を推奨。
+# デバッグ用: アクティブセルが1件以上あったフレームの元画像をローカルに
+# 一時保存するか。誤検知の事後検証用。常時有効にするとディスクを
+# 圧迫するため、通常運用では false を推奨。
 KYOSHIN_DEBUG_SAVE_IMAGE     = _env_bool("KYOSHIN_DEBUG_SAVE_IMAGE", False)
 KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_debug_images")
 
