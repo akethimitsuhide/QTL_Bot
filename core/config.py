@@ -256,6 +256,28 @@ KYOSHIN_ACTIVE_SHINDO_FLOOR  = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0
 # 同じにしている。
 KYOSHIN_RISE_THRESHOLD = float(os.getenv("KYOSHIN_RISE_THRESHOLD", "0.5"))
 
+# 【2026-07-22 追加】基準値(baseline)の計算方法を「N秒前ちょうどの1点」
+# から「範囲内サンプルの平均」に変更した。
+# 参考: https://qiita.com/ingen084/items/82985e8d3227c97c608d
+#       のHTML実装(p_s(14).html)が採用するbaselineAvg方式。
+# 基準値がノイズ1点に左右されにくくなり、より安定した上昇幅の
+# 判定ができる。単一のグラフ画像から得られる観測点の埼玉県北部の
+# 地震（M2, 最大震度1）で検知漏れが発生した事例を受けて導入。
+KYOSHIN_BASELINE_WINDOW_START_SEC = float(os.getenv("KYOSHIN_BASELINE_WINDOW_START_SEC", "10.0"))
+KYOSHIN_BASELINE_WINDOW_END_SEC   = float(os.getenv("KYOSHIN_BASELINE_WINDOW_END_SEC", "25.0"))
+
+# 現在の実震度がこの値以上であれば、上昇幅・速度の条件を満たしていなくても
+# 無条件で候補（上昇トリガー）とみなす救済ロジック。
+# 参考HTML実装の `|| latest.value >= 8`（震度1相当）に相当する。
+# ポーリング間隔の谷間で「上昇の瞬間」を捉えきれず、基準値との差分が
+# たまたま閾値未満になってしまうケースを救済する。
+KYOSHIN_HIGH_VALUE_BYPASS_SHINDO = float(os.getenv("KYOSHIN_HIGH_VALUE_BYPASS_SHINDO", "1.0"))
+
+# 観測点ごとに保持する震度履歴の長さ（秒）。KYOSHIN_BASELINE_WINDOW_END_SEC
+# より短くすると基準値の計算に必要なサンプルが欠落するため、
+# 通常はBASELINE_WINDOW_END_SECと同じか、それ以上の値にすること。
+KYOSHIN_HISTORY_WINDOW_SEC = float(os.getenv("KYOSHIN_HISTORY_WINDOW_SEC", "25.0"))
+
 # 上昇トリガーが立った観測点について、8近傍の観測点のうち何点が
 # 「同時に」上昇トリガーを満たしていれば本物の揺れとみなすか。
 # ingen084氏の記事における「周囲の観測点も上昇していた場合、

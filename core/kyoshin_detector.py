@@ -46,7 +46,7 @@ logger = logging.getLogger("QTLBot")
 # ===============================
 @dataclass
 class DetectorConfig:
-    history_window_sec: float = 10.0        # 過去何秒分の履歴を保持するか
+    history_window_sec: float = 25.0         # 過去何秒分の履歴を保持するか
     poll_interval_sec: float = 1.0           # ingest() が呼ばれる想定間隔（バッファサイズ計算に使用）
 
     # ⚠️ 重要: 以下の震度関連のしきい値は全て「実震度値」（10倍していない値。
@@ -62,7 +62,30 @@ class DetectorConfig:
         "tokyo":     0.8,
         "kanagawa":  0.8,
     })
+
+    # 【2026-07-22 追加】基準値(baseline)の計算方法をサンプル平均方式に変更。
+    # 参考: https://qiita.com/ingen084/items/82985e8d3227c97c608d
+    #       のHTML実装(p_s(14).html)が採用している手法。
+    # 従来は「ちょうどhistory_window_sec秒前の1点」を基準値としていたが、
+    # これはノイズ1点に基準値が左右されやすく不安定だった。
+    # baseline_window_start_sec 〜 baseline_window_end_sec 秒前の
+    # 範囲内にあるサンプルの平均値を基準値として使うことで、
+    # より安定した基準値を得られるようにする
+    # （例: 10〜25秒前の平均。直近すぎる10秒未満は基準値の計算に含めない
+    #   ことで、ゆっくり立ち上がる揺れ自体を「基準値の一部」として
+    #   吸収してしまうのを防ぐ）。
+    baseline_window_start_sec: float = 10.0
+    baseline_window_end_sec: float = 25.0
+
     neighbor_trigger_count: int = 2          # 近隣で同時に何点上昇していれば「本物」とみなすか
+
+    # 【2026-07-22 追加】現在の実震度がこの値以上であれば、上昇幅・速度の
+    # 条件を満たしていなくても候補（上昇トリガー）とみなす救済ロジック。
+    # 参考HTML実装の `|| latest.value >= 8`（震度1相当）に相当する。
+    # ポーリング間隔の谷間で「上昇の瞬間」を捉えきれず、たまたま基準値との
+    # 差分が閾値未満になってしまうケースを救済する狙い。
+    high_value_bypass_shindo: float = 1.0
+
     base_timeout_sec: float = 15.0           # 観測点がイベントに留まる基本の猶予時間
     timeout_per_shindo: float = 5.0          # 実震度1につき追加される猶予時間（秒）
     blacklist_shindo_threshold: float = 3.0  # 震度3以上。ブラックリスト判定の下限（ingen084氏の記事の基準に準拠）
@@ -122,6 +145,27 @@ class Station:
             else:
                 break
         return result
+
+    def baseline_average(self, now: float, window_start_sec: float, window_end_sec: float) -> float | None:
+        """
+        (now - window_end_sec) <= t <= (now - window_start_sec) の範囲に
+        存在するサンプルの平均値を返す。範囲内にサンプルが1つも無い場合は
+        履歴中の最古の値（存在すれば）にフォールバックする。全く履歴が
+        無い場合は None を返す。
+
+        参考: https://qiita.com/ingen084/items/82985e8d3227c97c608d
+              の参考HTML実装が採用する baselineAvg の計算方法に準拠。
+              単一の「N秒前ちょうどの値」ではなく範囲内サンプルの平均を
+              取ることで、基準値がノイズ1点に左右されにくくなる。
+        """
+        if not self.history:
+            return None
+        lower = now - window_end_sec
+        upper = now - window_start_sec
+        samples = [v for t, v in self.history if lower <= t <= upper]
+        if samples:
+            return sum(samples) / len(samples)
+        return self.history[0][1]
 
     @property
     def current_shindo(self) -> float | None:
@@ -207,10 +251,16 @@ class EventManager:
             diff = 0.0
             has_baseline = False
         else:
-            prev = station.value_at_or_before(now - self.config.history_window_sec)
+            # 【2026-07-22 変更】基準値の計算を、単一の「N秒前ちょうどの値」
+            # から「baseline_window_start_sec〜baseline_window_end_sec秒前
+            # の範囲内サンプルの平均」に変更した（参考HTML実装のbaselineAvg
+            # 方式）。基準値がノイズ1点に左右されにくくなる。
+            prev = station.baseline_average(
+                now,
+                self.config.baseline_window_start_sec,
+                self.config.baseline_window_end_sec,
+            )
             if prev is None:
-                # window_sec 分の履歴がまだ無い場合は、保持している最古の値を基準にする
-                # （起動直後で履歴が浅い間も、可能な範囲で正しく上昇を検知するため）。
                 prev = station.history[0][1]
             diff = shindo - prev
             has_baseline = True
@@ -225,7 +275,16 @@ class EventManager:
             threshold = self.config.blacklist_shindo_threshold_island if station.is_island \
                 else self.config.blacklist_shindo_threshold
             station._flat_and_high = (abs(diff) < self.config.blacklist_flat_diff and shindo >= threshold)
-            station._rose_this_tick = diff >= self._threshold_for(station)
+
+            # 【2026-07-22 追加】上昇幅による判定に加え、現在値そのものが
+            # high_value_bypass_shindo 以上であれば無条件で候補とする
+            # 救済ロジック（参考HTML実装の `|| latest.value >= 8` に相当）。
+            # ポーリング間隔の谷間で「上昇の瞬間」を捉えきれず、基準値との
+            # 差分がたまたま閾値未満になってしまうケースを救済する。
+            station._rose_this_tick = (
+                diff >= self._threshold_for(station)
+                or shindo >= self.config.high_value_bypass_shindo
+            )
         else:
             station._flat_and_high = False
             station._rose_this_tick = False

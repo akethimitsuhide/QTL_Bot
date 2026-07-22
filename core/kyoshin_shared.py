@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from core.config import KYOSHIN_ACTIVE_SHINDO_FLOOR
 from core.kyoshin_image_analyzer import KyoshinImageAnalyzer
 
 logger = logging.getLogger("QTLBot")
@@ -85,7 +86,10 @@ def shindo_to_color(shindo: float | None) -> int:
 
 
 # jma_s画像からの震度推定専用アナライザ（グリッド分割は使わず画面全体で判定するため grid_size は大きめにする）
-_shindo_estimator = KyoshinImageAnalyzer(grid_size=10)
+_shindo_estimator = KyoshinImageAnalyzer(
+    grid_size=10,
+    active_shindo_floor=KYOSHIN_ACTIVE_SHINDO_FLOOR,
+)
 
 
 def estimate_max_shindo_from_image(image_bytes: bytes) -> float | None:
