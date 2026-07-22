@@ -278,6 +278,15 @@ KYOSHIN_HIGH_VALUE_BYPASS_SHINDO = float(os.getenv("KYOSHIN_HIGH_VALUE_BYPASS_SH
 # 通常はBASELINE_WINDOW_END_SECと同じか、それ以上の値にすること。
 KYOSHIN_HISTORY_WINDOW_SEC = float(os.getenv("KYOSHIN_HISTORY_WINDOW_SEC", "25.0"))
 
+# 【2026-07-22 追加】バグ修正: 「一度検知すると通知が止まらない」対策。
+# 震度が高止まりしたまま新規の上昇(_rose_this_tick)が全く起きない状態が
+# 続いた場合、最後に上昇トリガーが立った時刻からこの秒数が経過すると、
+# 動的タイマーの延長を打ち切り、既存のexpire_atを固定して自然減衰に
+# 任せるようにする。値を大きくすると「揺れが収まったと判定するまでの
+# 猶予」が長くなる（誤って早期に打ち切るリスクは下がるが、本当に
+# 収まった後も通知が続く時間は長くなる）。
+KYOSHIN_STALE_AFTER_SEC = float(os.getenv("KYOSHIN_STALE_AFTER_SEC", "20.0"))
+
 # 上昇トリガーが立った観測点について、8近傍の観測点のうち何点が
 # 「同時に」上昇トリガーを満たしていれば本物の揺れとみなすか。
 # ingen084氏の記事における「周囲の観測点も上昇していた場合、

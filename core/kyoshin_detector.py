@@ -88,6 +88,20 @@ class DetectorConfig:
 
     base_timeout_sec: float = 15.0           # 観測点がイベントに留まる基本の猶予時間
     timeout_per_shindo: float = 5.0          # 実震度1につき追加される猶予時間（秒）
+
+    # 【2026-07-22 追加】バグ修正: 「一度検知すると通知が止まらない」対策。
+    # 従来は tick() のたびに「現在の震度が active_floor_shindo 以上なら
+    # 無条件で base_timeout_sec + shindo*timeout_per_shindo 分だけ延長」
+    # という設計だったため、震度が下がらずに高止まりしたまま新規の
+    # 上昇（_rose_this_tick）が全く無い状態が続いても、際限なく
+    # 延長され続けてしまっていた（画像取得元が同一画像を繰り返し
+    # 返してしまうケース等で顕在化する）。
+    # 最後に上昇トリガーが立った時刻(last_rise_at)から
+    # stale_after_sec 秒以上が経過した観測点は、震度の絶対値に
+    # 関わらず「動的延長」を打ち切り、base_timeout_sec のみの
+    # 短い延長に切り替えることで、確実にイベントが終了に向かうようにする。
+    stale_after_sec: float = 20.0
+
     blacklist_shindo_threshold: float = 3.0  # 震度3以上。ブラックリスト判定の下限（ingen084氏の記事の基準に準拠）
     blacklist_shindo_threshold_island: float = 4.5  # 離島は震度5弱以上
     blacklist_flat_diff: float = 0.3         # 「ほぼ変化なし」とみなす実震度の上昇幅の上限
@@ -129,6 +143,10 @@ class Station:
     _seen_this_tick: bool = False   # このtickでingest()による新規観測値を受け取ったか（内部フラグ）
     _pre_confirmed_this_tick: bool = False  # ClusterTracker等、上位層で既にクラスタ確定済みか（内部フラグ）
     expire_at: float | None = None  # このstationがイベントに留まれる期限（monotonic time）
+    last_rise_at: float | None = None  # 最後に上昇トリガー（_rose_this_tick=True）が
+                                        # 立った時刻。震度が高止まりしたまま新規の
+                                        # 上昇が無い状態が続いても際限なく延長され
+                                        # 続けないようにするための基準時刻。
 
     def push(self, now: float, shindo: float, window_sec: float) -> None:
         self.history.append((now, shindo))
@@ -281,10 +299,20 @@ class EventManager:
             # 救済ロジック（参考HTML実装の `|| latest.value >= 8` に相当）。
             # ポーリング間隔の谷間で「上昇の瞬間」を捉えきれず、基準値との
             # 差分がたまたま閾値未満になってしまうケースを救済する。
-            station._rose_this_tick = (
-                diff >= self._threshold_for(station)
-                or shindo >= self.config.high_value_bypass_shindo
-            )
+            rose_by_diff = diff >= self._threshold_for(station)
+            rose_by_bypass = shindo >= self.config.high_value_bypass_shindo
+            station._rose_this_tick = rose_by_diff or rose_by_bypass
+
+            # 【2026-07-22 バグ修正】last_rise_at（動的タイマー延長の基準時刻）
+            # は rose_by_diff（＝実際に基準値からの上昇があったこと）が
+            # 成立した場合のみ更新する。rose_by_bypass（現在値が高いという
+            # 理由だけの救済判定）まで含めて last_rise_at を更新すると、
+            # 震度が変化せず高止まりし続けているだけの状態でも
+            # 「常に上昇中」と誤認され続け、stale_after_sec による
+            # タイムアウト打ち切りが機能しなくなってしまう
+            # （＝一度検知すると通知が止まらないバグの直接原因だった）。
+            if rose_by_diff:
+                station.last_rise_at = now
         else:
             station._flat_and_high = False
             station._rose_this_tick = False
@@ -312,6 +340,7 @@ class EventManager:
         station._pre_confirmed_this_tick = True
         station._rose_this_tick = False  # 独自の上昇トリガー判定は使わない
         station._flat_and_high = False   # ブラックリスト判定もスキップする
+        station.last_rise_at = now       # 事前確定扱いのたびに「上昇中」とみなす
 
     # ===============================
     # tick: イベントの生成・更新・マージ・終了判定
@@ -405,12 +434,35 @@ class EventManager:
         # 毎tick必ず呼ばれ続けるため、ここで無条件に延長するとイベントが
         # 実質的に永遠に終了しなくなってしまう（揺れが収まったのに
         # 検知が終わらないバグの原因）。
+        #
+        # 【2026-07-22 追加のバグ修正】上記の対策だけでは、震度が
+        # active_floor_shindo 以上のまま「高止まり」し続け、かつ新規の
+        # 上昇（_rose_this_tick）が全く起きないケース（画像取得元が
+        # 同一画像を繰り返し返してしまう等）で、動的延長が無限に
+        # 繰り返されてしまう別のバグがあった。
+        # 最後に上昇トリガーが立った時刻(last_rise_at)から
+        # stale_after_sec 秒以上が経過している場合は、延長そのものを
+        # 行わない（base_timeout_sec分の再延長すら行わない）。
+        # ここで「base_timeout_secのみ延長」としてしまうと、ingest()が
+        # 毎tick呼ばれ続ける実運用では expire_at が毎回 now+15秒に
+        # 再設定され続け、結局 now > expire_at が永遠に成立しない
+        # （＝一度検知すると通知が止まらないバグが再現する）。
+        # 延長を完全に止めることで、既存の expire_at がそのまま固定され、
+        # 時間経過とともに必ず期限切れになるようにする。
         for sid, st in self.stations.items():
             if st.event_id is None or not st._seen_this_tick:
                 continue
             shindo = st.current_shindo or 0.0
             if shindo < self.config.active_floor_shindo:
                 continue  # 平常域まで収まった → タイマーを延長せず自然減衰に任せる
+
+            is_stale = (
+                st.last_rise_at is not None
+                and (now - st.last_rise_at) >= self.config.stale_after_sec
+            )
+            if is_stale:
+                continue  # 新規の上昇が長時間無い → 延長せず自然減衰に任せる
+
             extension = self.config.base_timeout_sec + shindo * self.config.timeout_per_shindo
             st.expire_at = now + extension
 
