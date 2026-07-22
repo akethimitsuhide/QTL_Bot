@@ -369,11 +369,32 @@ class EventManager:
                     logger.warning(f"KyoshinDetector: 観測点 {sid} をブラックリスト化しました（機器異常疑い）")
 
         # ── 空間クロスバリデーション: 上昇トリガー成立の判定 ──
+        #
+        # 【2026-07-22 追加のバグ修正・その2】stale_after_sec による動的
+        # タイマー延長の停止だけでは不十分だった。震度が高止まりしたまま
+        # _rose_this_tick が true であり続けるセルは、イベント終了直後の
+        # tick でも再び confirmed_ids に入ってしまい、「イベント終了 →
+        # 同じtickで即座に新規イベント再生成」が無限に繰り返されてしまう
+        # バグがあった（「一度検知すると通知が止まらない」の真因）。
+        # まだどのイベントにも所属していない（st.event_id is None）セルは、
+        # last_rise_at から stale_after_sec 秒以上が経過している場合、
+        # 新規イベント化のトリガーとして使わせない（confirmed_idsから除外）。
+        # 既に何らかのイベントに所属中のセルは、震度が高いままの情報を
+        # 保持し続けるため、staleでも除外しない
+        # （expire_atの延長自体は別途スキップされ、自然に離脱していく）。
+        def _is_stale(st: "Station") -> bool:
+            return (
+                st.last_rise_at is not None
+                and (now - st.last_rise_at) >= self.config.stale_after_sec
+            )
+
         confirmed_ids = []
         for sid in risen_ids:
             st = self.stations[sid]
             if st.blacklisted:
                 continue
+            if st.event_id is None and _is_stale(st):
+                continue  # 新規イベント化のトリガーとしては使わせない
             neighbor_rise_count = sum(
                 1 for n in st.neighbors
                 if n in self.stations and self.stations[n]._rose_this_tick
