@@ -375,29 +375,42 @@ class EventManager:
         # _rose_this_tick が true であり続けるセルは、イベント終了直後の
         # tick でも再び confirmed_ids に入ってしまい、「イベント終了 →
         # 同じtickで即座に新規イベント再生成」が無限に繰り返されてしまう
-        # バグがあった（「一度検知すると通知が止まらない」の真因）。
-        # まだどのイベントにも所属していない（st.event_id is None）セルは、
-        # last_rise_at から stale_after_sec 秒以上が経過している場合、
-        # 新規イベント化のトリガーとして使わせない（confirmed_idsから除外）。
-        # 既に何らかのイベントに所属中のセルは、震度が高いままの情報を
-        # 保持し続けるため、staleでも除外しない
-        # （expire_atの延長自体は別途スキップされ、自然に離脱していく）。
+        # バグがあった（「一度検知すると通知が止まらない」の真因その1）。
+        #
+        # 【2026-07-23 追加のバグ修正・その3】その2の対策
+        # （st.event_id is None のセルのみ stale チェックする）だけでは
+        # まだ不十分だった。「既にイベントに所属中のセル」は stale
+        # チェックが一切スキップされる設計だったため、そのセルは
+        # 震度が高いままの限り _rose_this_tick=True であり続け、
+        # neighbor_rise_count の計算に使われる際に「別の、まだ
+        # イベント未所属の近隣セル」の新規イベント化トリガーとして
+        # カウントされ続けてしまう。結果として、1440セル規模の実運用
+        # では、既存イベントの近くでノイズが時々発生するたびに新しい
+        # セルが次々と合流し、イベント全体が数時間単位で終わらなく
+        # なる現象が実際のログで確認された。
+        # stale判定は event_id の有無に関わらず一律で適用し、staleな
+        # セルは risen_ids・confirmed_ids・neighbor_rise_count のいずれ
+        # からも除外する（＝「新しい情報を提供していないセル」として
+        # 扱う）ことで、この問題を解消する。イベントからの実際の離脱は
+        # 引き続き expire_at ベースの自然減衰に任せる。
         def _is_stale(st: "Station") -> bool:
             return (
                 st.last_rise_at is not None
                 and (now - st.last_rise_at) >= self.config.stale_after_sec
             )
 
+        # stale なセルは risen_ids から除外した「有効な上昇中セル」集合を
+        # 別途用意し、neighbor_rise_count の計算にはこちらを使う。
+        active_risen_ids = {sid for sid in risen_ids if not _is_stale(self.stations[sid])}
+
         confirmed_ids = []
-        for sid in risen_ids:
+        for sid in active_risen_ids:
             st = self.stations[sid]
             if st.blacklisted:
                 continue
-            if st.event_id is None and _is_stale(st):
-                continue  # 新規イベント化のトリガーとしては使わせない
             neighbor_rise_count = sum(
                 1 for n in st.neighbors
-                if n in self.stations and self.stations[n]._rose_this_tick
+                if n in self.stations and n in active_risen_ids
             )
             if neighbor_rise_count >= self.config.neighbor_trigger_count:
                 confirmed_ids.append(sid)
