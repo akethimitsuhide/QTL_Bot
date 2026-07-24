@@ -210,14 +210,26 @@ ENABLE_KYOSHIN     = _env_bool("ENABLE_KYOSHIN", True)
 # 能力が高いと判断し、こちらを検知の主軸に切り替えた。
 # ClusterTracker関連の設定(旧KYOSHIN_MIN_CLUSTER_SIZE / 
 # KYOSHIN_REQUIRED_FRAMES)は廃止した。
+#
+# 【2026-07-23 検知終了ロジックの根本的な再設計】
+# 「一度検知すると通知が止まらない」バグが3回にわたり形を変えて
+# 再発した。原因は「震度が高いというだけで無条件に上昇中とみなす
+# 救済ロジック(旧KYOSHIN_HIGH_VALUE_BYPASS_SHINDO)」と「観測点ごとの
+# 複雑な動的延長タイマー(旧KYOSHIN_STALE_AFTER_SEC等)」の組み合わせが
+# 構造的に「自己終息しない状態」を生み出しやすい設計だったこと。
+# 救済ロジックを完全に撤廃し（上昇判定は基準値との差分のみで行う。
+# 震度が一定のまま推移すれば基準値も収束し、差分は自然にゼロへ近づく
+# ため、上昇判定自体が放っておいても自己終息する）、イベントの生死は
+# 「イベントに属するいずれかの観測点で最後に本物の上昇があった時刻」
+# という単一の値(last_rise_at)だけで判定するよう単純化した。
+# 旧KYOSHIN_HIGH_VALUE_BYPASS_SHINDO・旧KYOSHIN_STALE_AFTER_SECは廃止し、
+# 単一のKYOSHIN_EVENT_TIMEOUT_SECに統合した。
 KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # px。画像を何px四方の疑似観測点セルに分割するか
 KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 秒。NIED側の配信遅延を見込んで遡る基準秒数
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
 KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "2.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
 KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "2.0")) # 秒。イベント継続中の画像通知の再送間隔
-# ↑ 3.0→2.0に変更。EEW発表時の振動モニタ通知(cogs/quake.py側)と
-#   間隔を統一するため。
 
 KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。1セル内でこの数以上「揺れ候補ピクセル」がないとアクティブとみなさない
 # ↑ このピクセル数フィルタは、KyoshinImageAnalyzer.analyze_all() が
@@ -229,63 +241,30 @@ KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 
 # HSVマスク処理で「揺れ候補ピクセル」とみなす実震度の下限値。
 # これ未満の実震度に相当する色（背景の青〜水色域）は、GIFノイズの
 # 温床であるため最初から解析対象に含めない（analyze_all()の一次フィルタ）。
-# 【2026-07-21 緩和の経緯・1回目】当初は1.0（気象庁震度階級の震度1相当）
-# だったが、実際の地震（気象庁震度1、山梨県東部・富士五湖）で
-# 画像解析側の検知が一切反応しなかった事例が発生した。気象庁震度階級は
-# 離散値、防災科研リアルタイム震度は連続値であり、気象庁震度1の地震でも
-# 各観測点のリアルタイム震度実数値は0.5〜1.4程度に分布しうる。1.0だと
-# その多くがHSVマスク段階で除外され、後段の判定に一切到達しない
-# （＝検知そのものが起きない）ことが主要因だったと判断し、0.5に緩和した。
-# 【2026-07-21 巻き戻し】0.5→0.2へさらに緩和したところ、単一観測点の
-# GIF圧縮ノイズ（実震度0.2程度）まで解析対象に含まれるようになり、
-# 数秒おきの誤検知（他社製ソフトでは検知しないレベルのノイズ）が
-# 多発した。0.5に戻す。
-# 【2026-07-22 追記】検知アルゴリズムをEventManager.ingest()による
-# 時系列上昇幅ベースの判定に切り替えたため、この閾値はあくまで
-# 「明らかに揺れていない色を除外する一次フィルタ」としての役割に
-# 限定される。誤検知対策の主眼はKYOSHIN_RISE_THRESHOLDと
-# KYOSHIN_NEIGHBOR_TRIGGER_COUNTに移した。
+# 0.5より下げると、単一観測点のGIF圧縮ノイズまで解析対象に含まれ
+# 誤検知の原因になることが確認されているため、0.5を推奨する。
 KYOSHIN_ACTIVE_SHINDO_FLOOR  = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0.5"))
 
-# 「上昇トリガー」とみなす実震度の上昇幅（過去10秒前の値との差分）。
+# 「上昇トリガー」とみなす実震度の上昇幅（基準値との差分）。
 # ingen084氏の記事の核心となるパラメータ。単一観測点の震度が
 # この幅以上急上昇した場合にのみ「候補」として扱う（絶対値ではなく
 # 変化量を見ることで、常に薄く色が乗っているセルなどの静的ノイズを
-# 自然に除外できる）。
-# デフォルトは core.kyoshin_detector.DetectorConfig の既定値(0.5)と
-# 同じにしている。
+# 自然に除外できる）。震度の絶対値による無条件の救済判定は行わない
+# （震度が高止まりし続ける限り真であり続けてしまい、「検知が終わらない
+# バグ」の直接原因になるため）。
 KYOSHIN_RISE_THRESHOLD = float(os.getenv("KYOSHIN_RISE_THRESHOLD", "0.5"))
 
-# 【2026-07-22 追加】基準値(baseline)の計算方法を「N秒前ちょうどの1点」
-# から「範囲内サンプルの平均」に変更した。
-# 参考: https://qiita.com/ingen084/items/82985e8d3227c97c608d
-#       のHTML実装(p_s(14).html)が採用するbaselineAvg方式。
-# 基準値がノイズ1点に左右されにくくなり、より安定した上昇幅の
-# 判定ができる。単一のグラフ画像から得られる観測点の埼玉県北部の
-# 地震（M2, 最大震度1）で検知漏れが発生した事例を受けて導入。
+# 基準値(baseline)は「過去10〜25秒前」の範囲内サンプルの平均で計算する
+# （参考: https://qiita.com/ingen084/items/82985e8d3227c97c608d
+#  のHTML実装が採用するbaselineAvg方式）。単一の「N秒前ちょうどの値」
+# より、ノイズ1点に基準値が左右されにくく安定する。
 KYOSHIN_BASELINE_WINDOW_START_SEC = float(os.getenv("KYOSHIN_BASELINE_WINDOW_START_SEC", "10.0"))
 KYOSHIN_BASELINE_WINDOW_END_SEC   = float(os.getenv("KYOSHIN_BASELINE_WINDOW_END_SEC", "25.0"))
-
-# 現在の実震度がこの値以上であれば、上昇幅・速度の条件を満たしていなくても
-# 無条件で候補（上昇トリガー）とみなす救済ロジック。
-# 参考HTML実装の `|| latest.value >= 8`（震度1相当）に相当する。
-# ポーリング間隔の谷間で「上昇の瞬間」を捉えきれず、基準値との差分が
-# たまたま閾値未満になってしまうケースを救済する。
-KYOSHIN_HIGH_VALUE_BYPASS_SHINDO = float(os.getenv("KYOSHIN_HIGH_VALUE_BYPASS_SHINDO", "1.0"))
 
 # 観測点ごとに保持する震度履歴の長さ（秒）。KYOSHIN_BASELINE_WINDOW_END_SEC
 # より短くすると基準値の計算に必要なサンプルが欠落するため、
 # 通常はBASELINE_WINDOW_END_SECと同じか、それ以上の値にすること。
 KYOSHIN_HISTORY_WINDOW_SEC = float(os.getenv("KYOSHIN_HISTORY_WINDOW_SEC", "25.0"))
-
-# 【2026-07-22 追加】バグ修正: 「一度検知すると通知が止まらない」対策。
-# 震度が高止まりしたまま新規の上昇(_rose_this_tick)が全く起きない状態が
-# 続いた場合、最後に上昇トリガーが立った時刻からこの秒数が経過すると、
-# 動的タイマーの延長を打ち切り、既存のexpire_atを固定して自然減衰に
-# 任せるようにする。値を大きくすると「揺れが収まったと判定するまでの
-# 猶予」が長くなる（誤って早期に打ち切るリスクは下がるが、本当に
-# 収まった後も通知が続く時間は長くなる）。
-KYOSHIN_STALE_AFTER_SEC = float(os.getenv("KYOSHIN_STALE_AFTER_SEC", "20.0"))
 
 # 上昇トリガーが立った観測点について、8近傍の観測点のうち何点が
 # 「同時に」上昇トリガーを満たしていれば本物の揺れとみなすか。
@@ -294,6 +273,14 @@ KYOSHIN_STALE_AFTER_SEC = float(os.getenv("KYOSHIN_STALE_AFTER_SEC", "20.0"))
 # より広範囲で同時多発的な上昇でないと確定しなくなり、誤検知に
 # 対して厳しくなる（その分、検知の即応性・感度は下がる）。
 KYOSHIN_NEIGHBOR_TRIGGER_COUNT = _env_int("KYOSHIN_NEIGHBOR_TRIGGER_COUNT", 2)
+
+# イベントの生死を決めるたった1つの値。イベントに属するいずれかの
+# 観測点で最後に「本物の上昇トリガー」が立ってから、この秒数が
+# 経過したら、震度の絶対値に関わらずイベントを終了する。
+# 値を大きくすると「揺れが収まったと判定するまでの猶予」が長くなる
+# （誤って早期に打ち切るリスクは下がるが、本当に収まった後も通知が
+# 続く時間は長くなる）。
+KYOSHIN_EVENT_TIMEOUT_SEC = float(os.getenv("KYOSHIN_EVENT_TIMEOUT_SEC", "60.0"))
 
 # 通知を送信する最小フェーズ（定性的な強さの下限）。
 # Weaker < Weak < Medium < Strong < Stronger の順に強い。

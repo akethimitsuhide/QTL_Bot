@@ -69,7 +69,6 @@ class KyoshinImageMonitor:
         on_event_ended: OnEventEndedFn | None = None,
         poll_interval_sec: float = 1.0,
         image_interval_sec: float = 2.0,
-        use_confirmed_ingest: bool = False,
     ):
         self.event_manager = EventManager(config)
         self._get_readings = get_readings
@@ -77,12 +76,6 @@ class KyoshinImageMonitor:
         self._on_event_ended = on_event_ended
         self.poll_interval_sec = poll_interval_sec
         self.image_interval_sec = image_interval_sec
-        # True の場合、get_readings() が返す観測点は「呼び出し側で既に
-        # クラスタリング・複数フレーム検証済み」とみなし、
-        # EventManager.ingest_confirmed()（独自の上昇トリガー・近隣検証を
-        # スキップする経路）を使う。
-        # False（デフォルト）の場合は従来通り EventManager.ingest() を使う。
-        self.use_confirmed_ingest = use_confirmed_ingest
 
         self._running = False
         self._image_tasks: dict[str, asyncio.Task] = {}  # event_id -> 画像通知継続タスク
@@ -104,10 +97,7 @@ class KyoshinImageMonitor:
                 now = asyncio.get_event_loop().time()
 
                 for station_id, shindo in readings.items():
-                    if self.use_confirmed_ingest:
-                        self.event_manager.ingest_confirmed(station_id, shindo, now)
-                    else:
-                        self.event_manager.ingest(station_id, shindo, now)
+                    self.event_manager.ingest(station_id, shindo, now)
 
                 changes = self.event_manager.tick(now)
 

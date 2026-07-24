@@ -70,8 +70,7 @@ from core.config import (
     KYOSHIN_MIN_ACTIVE_PIXELS, KYOSHIN_ACTIVE_SHINDO_FLOOR,
     KYOSHIN_RISE_THRESHOLD, KYOSHIN_NEIGHBOR_TRIGGER_COUNT,
     KYOSHIN_BASELINE_WINDOW_START_SEC, KYOSHIN_BASELINE_WINDOW_END_SEC,
-    KYOSHIN_HIGH_VALUE_BYPASS_SHINDO, KYOSHIN_HISTORY_WINDOW_SEC,
-    KYOSHIN_STALE_AFTER_SEC,
+    KYOSHIN_HISTORY_WINDOW_SEC, KYOSHIN_EVENT_TIMEOUT_SEC,
     KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_SHINDO0, KYOSHIN_MIN_STATIONS_SHINDO1,
     KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
 )
@@ -150,17 +149,11 @@ class KyoshinMonitorCog(commands.Cog):
                 neighbor_trigger_count=KYOSHIN_NEIGHBOR_TRIGGER_COUNT,
                 baseline_window_start_sec=KYOSHIN_BASELINE_WINDOW_START_SEC,
                 baseline_window_end_sec=KYOSHIN_BASELINE_WINDOW_END_SEC,
-                high_value_bypass_shindo=KYOSHIN_HIGH_VALUE_BYPASS_SHINDO,
                 history_window_sec=KYOSHIN_HISTORY_WINDOW_SEC,
-                stale_after_sec=KYOSHIN_STALE_AFTER_SEC,
+                event_timeout_sec=KYOSHIN_EVENT_TIMEOUT_SEC,
             ),
             poll_interval_sec=KYOSHIN_POLL_INTERVAL_SEC,
             image_interval_sec=KYOSHIN_NOTIFY_INTERVAL_SEC,
-            # EventManager.ingest()（震度の時系列上昇幅＋近隣同時上昇の
-            # 検証。ingen084氏の記事のアルゴリズム）を検知の主軸とする。
-            # ClusterTracker（静的な絶対震度の隣接判定）は誤検知の
-            # 温床だったため使用しない。
-            use_confirmed_ingest=False,
         )
         self._monitor_task = None
 
