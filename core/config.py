@@ -280,7 +280,7 @@ KYOSHIN_NEIGHBOR_TRIGGER_COUNT = _env_int("KYOSHIN_NEIGHBOR_TRIGGER_COUNT", 2)
 # 値を大きくすると「揺れが収まったと判定するまでの猶予」が長くなる
 # （誤って早期に打ち切るリスクは下がるが、本当に収まった後も通知が
 # 続く時間は長くなる）。
-KYOSHIN_EVENT_TIMEOUT_SEC = float(os.getenv("KYOSHIN_EVENT_TIMEOUT_SEC", "60.0"))
+KYOSHIN_EVENT_TIMEOUT_SEC = float(os.getenv("KYOSHIN_EVENT_TIMEOUT_SEC", "45.0"))
 
 # 通知を送信する最小フェーズ（定性的な強さの下限）。
 # Weaker < Weak < Medium < Strong < Stronger の順に強い。
