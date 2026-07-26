@@ -98,7 +98,21 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
         self.recent_eews: dict = {}
         self.recent_eews_max_size = 50
         self.last_eew_data = None
+        # 以下2つは旧実装の名残。実際の警報地域・音声フラグ判定は
+        # EventID単位の self.eew_state に移行済みで、この2つは使用されていない
+        # （他コードからの参照互換のためフィールドのみ残している）。
         self.last_warn_areas: set = set()
+
+        # ── EventID単位の警報対象地域・状態管理 ──
+        # 複数のEEWが同時進行しているとき、last_eew_data / last_warn_areas /
+        # audio_flags を単一の値で共有すると別のEEW同士で状態が混線してしまう
+        # ため、EventIDをキーにした辞書で独立管理する。
+        # cumulative_warn_areas: そのEEWで過去に一度でも警報(Type=="警報")対象
+        #   になった地域名（REGION_MAP変換後）の累積セット。予想震度の
+        #   発表・未発表の入れ替わりで一時的に要素が欠けても、このセットが
+        #   縮小することはなく、常に「今までで一番広い範囲」を保持する。
+        self.eew_state: dict[str, dict] = {}
+        self._eew_state_max_size = 50
         self.monitored_event_id = None
         self.vibration_monitor_task: asyncio.Task | None = None
         self._last_zencyu_time: datetime | None = None  # zencyu.mp3 最終再生時刻（15分クールダウン）
@@ -147,6 +161,8 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
             "lv1000":    "lv1000.mp3",
             "lv2000":    "lv2000.mp3",
         }
+        # 旧実装の名残（EventID単位のeew_state[event_id]["audio_flags"]に移行済み。
+        # 現在は使用されていないが互換のためフィールドのみ残している）。
         self.audio_flags = {"warning": False, "int3": False, "first": False, "final": False, "cancel": False}
 
     # ===============================
@@ -577,6 +593,39 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
     # ===============================
 
 
+    def _extract_alert_regions(self, data: dict) -> set:
+        """
+        Wolfx形式のEEWデータから、警報(Type in ("警報","到達済"))対象の
+        地域名（REGION_MAP変換後）の集合を抽出する。
+        """
+        alert_regions = set()
+        for area in data.get("WarnArea", []):
+            chiiki = area.get("Chiiki")
+            if chiiki and area.get("Type", "").lower() in ("警報", "到達済"):
+                alert_regions.add(REGION_MAP.get(chiiki, "その他"))
+        return alert_regions
+
+    def _update_cumulative_warn_areas(self, event_id: str, data: dict, now: float) -> set:
+        """
+        EventIDごとに、警報対象地域の「これまでで一番広い範囲」を保持・更新する。
+
+        WarnArea は予想震度の発表・未発表の切り替わりで要素が増減することが
+        あり、単純に「今回のdataだけ」を見て通知本文を作ると対象地域が
+        減ったように見えてしまう。そこで、一度でも警報対象になった地域は
+        そのEEW（EventID）が終息するまで保持し続け、常に累積の和集合を返す。
+        """
+        state = self.eew_state.setdefault(event_id, {
+            "cumulative_warn_areas": set(),
+            "last_warn_areas": set(),
+            "audio_flags": {"warning": False, "int3": False, "first": False, "final": False, "cancel": False},
+            "prev_data": None,
+        })
+        state["_touched"] = now
+
+        current_regions = self._extract_alert_regions(data)
+        state["cumulative_warn_areas"] |= current_regions
+        return state["cumulative_warn_areas"]
+
     async def notify_eew(self, data, is_test=False, channel_override=None,
                          start_monitor=True, source: str = "wolfx"):
         """
@@ -628,6 +677,24 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
             # 新規エントリを追加
             self.recent_eews[event_id] = (data, now)
 
+            # ===============================
+            # EventID単位の累積警報対象地域を更新
+            # ===============================
+            # recent_eews と同じTTL/LRUで eew_state も掃除する
+            # （進行中のEEWと1対1で対応させるため）。
+            self.eew_state = {
+                eid: st for eid, st in self.eew_state.items()
+                if eid in self.recent_eews
+            }
+            while len(self.eew_state) >= self._eew_state_max_size:
+                oldest_eid = min(
+                    self.eew_state.keys(),
+                    key=lambda eid: self.eew_state[eid].get("_touched", 0)
+                )
+                del self.eew_state[oldest_eid]
+
+            cumulative_warn_areas = self._update_cumulative_warn_areas(event_id, data, now)
+
             if start_monitor and serial == 1 and self.monitored_event_id is None:
                 self.monitored_event_id = event_id
                 if self.vibration_monitor_task:
@@ -654,6 +721,8 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                 embed_summary = discord.Embed(title="複数の緊急地震速報が発表されています", color=0xFF0000, timestamp=datetime.now())
                 summary_desc = ""
                 sorted_eews = sorted(self.recent_eews.items(), key=lambda x: x[1][1])
+                merged_warn_regions = set()
+                any_warn = False
                 for eid, (old_data, _) in sorted_eews:
                     title_text = old_data.get('Title', '緊急地震速報')
                     s = int(old_data.get("Serial", 1))
@@ -668,7 +737,40 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                     else:
                         mag = old_data.get("Magnitude") or old_data.get("Magunitude") or "不明"
                     
-                    summary_desc += f"**{title_text} ({serial_text})**\n震源地: {hypo} / 予想最大震度: {max_int} / M{mag}\n\n"
+                    depth_text = str(old_data.get("Depth", "不明")).replace("km", "").strip()
+                    depth_display = "推定なし" if old_data.get("isAssumption", False) else f"約{depth_text}km"
+
+                    summary_desc += f"**{title_text} ({serial_text})**\n震源地: {hypo} / 予想最大震度: {max_int} / M{mag} / 深さ: {depth_display}\n\n"
+
+                    if old_data.get("isWarn"):
+                        any_warn = True
+                    # 各EEW（EventID）の累積警報地域をマージする。
+                    # サマリー表示時点では最新dataが反映済みとは限らないため、
+                    # eew_state 側の累積セットを参照する（無ければ現在dataから抽出）。
+                    eid_state = self.eew_state.get(eid)
+                    if eid_state:
+                        merged_warn_regions |= eid_state["cumulative_warn_areas"]
+                    else:
+                        merged_warn_regions |= self._extract_alert_regions(old_data)
+
+                notes = []
+                if any_warn:
+                    notes.append("**⚠強い揺れに警戒してください。**")
+                    if any(
+                        safe_bool(d.get("isSea", False)) and safe_float(
+                            d.get("Magnitude") or d.get("Magunitude") or 0
+                        ) >= 6.8 and safe_int(str(d.get("Depth", "999")).replace("km", "").strip()) <= 151
+                        for _, (d, _) in sorted_eews if not d.get("isAssumption", False)
+                    ):
+                        notes.append("**⚠ 念の為海岸から離れてください**")
+                if notes:
+                    summary_desc += "\n".join(notes) + "\n"
+
+                if merged_warn_regions:
+                    summary_desc += "\n**【強い揺れが予想される地域】**\n"
+                    for region in sorted(merged_warn_regions):
+                        summary_desc += f"■ {region}　"
+
                 embed_summary.description = summary_desc.strip()
                 await channel.send(embed=embed_summary)
 
@@ -731,16 +833,10 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                 description += "\n\n" + "\n".join(notes)
 
             warn_areas = data.get("WarnArea", [])
-            if warn_areas:
-                alert_regions = set()
-                for area in warn_areas:
-                    chiiki = area.get("Chiiki")
-                    if chiiki and area.get("Type", "").lower() in ("警報", "到達済"):
-                        alert_regions.add(REGION_MAP.get(chiiki, "その他"))
-                if alert_regions:
-                    description += "\n\n**【強い揺れが予想される地域】**\n"
-                    for region in sorted(alert_regions):
-                        description += f"■ {region}　"
+            if cumulative_warn_areas:
+                description += "\n\n**【強い揺れが予想される地域】**\n"
+                for region in sorted(cumulative_warn_areas):
+                    description += f"■ {region}　"
 
             if warn_areas:
                 forecast_groups = defaultdict(list)
@@ -799,8 +895,8 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                 self.monitored_event_id = None
                 if self.vibration_monitor_task:
                     self.vibration_monitor_task.cancel()
-            asyncio.create_task(self.generate_and_speak_eew(data))
-            await self.play_eew_sound(data)
+            asyncio.create_task(self.generate_and_speak_eew(data, cumulative_warn_areas))
+            await self.play_eew_sound(data, cumulative_warn_areas)
 
         except Exception as e:
             logger.error(f"notify_eew エラー:\n{traceback.format_exc()}")
@@ -808,36 +904,35 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
     # ===============================
     # 読み上げエンジン
     # ===============================
-    async def generate_and_speak_eew(self, data):
+    async def generate_and_speak_eew(self, data, cumulative_warn_areas: set | None = None):
         """QuakeTsunami_antei.html の generateAndPlaySpeech をPythonで再現"""
+        event_id = data.get("EventID")
         serial = int(data.get("Serial", 1))
         is_warn = data.get("isWarn", False)
         is_plum = data.get("isAssumption", False)
         hypo = data.get("Hypocenter", "不明")
         max_int_str = data.get("MaxIntensity", "")
 
-        current_warn_areas = set()
-        for area in data.get("WarnArea", []):
-            if area.get("Type", "").lower() == "警報":
-                chiiki = area.get("Chiiki")
-                if chiiki:
-                    current_warn_areas.add(REGION_MAP.get(chiiki, chiiki))
+        state = self.eew_state.get(event_id)
+        prev_data = state.get("prev_data") if state else None
 
-        prev_warn_areas = set()
-        if self.last_eew_data:
-            for area in self.last_eew_data.get("WarnArea", []):
-                if area.get("Type", "").lower() == "警報":
-                    chiiki = area.get("Chiiki")
-                    if chiiki:
-                        prev_warn_areas.add(REGION_MAP.get(chiiki, chiiki))
+        # 今回時点の「累積」警報対象地域（呼び出し元から渡されなければここで計算）。
+        # 予想震度の発表・未発表でWarnAreaの要素数が増減しても、この累積セットは
+        # 減ることがないため、地域が消えたように読み上げてしまうことを防げる。
+        current_warn_areas = cumulative_warn_areas
+        if current_warn_areas is None:
+            current_warn_areas = self._update_cumulative_warn_areas(event_id, data, datetime.now().timestamp())
+
+        prev_warn_areas = state.get("last_warn_areas", set()) if state else set()
 
         area_changed = current_warn_areas != prev_warn_areas
+        area_increased = bool(current_warn_areas - prev_warn_areas)
         warn_area_text = "、".join(sorted(current_warn_areas)) + "では" if current_warn_areas else ""
 
         text = ""
         priority = 3
 
-        if serial == 1 or self.last_eew_data is None:
+        if serial == 1 or prev_data is None:
             if is_warn:
                 priority = 1
                 text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。{hypo}で地震。推定最大震度{max_int_str}。"
@@ -848,10 +943,14 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                     text += "（PLUM法）"
 
         else:
-            prev_max_int = self.last_eew_data.get("MaxIntensity", "")
-            prev_hypo = self.last_eew_data.get("Hypocenter", "")
+            prev_max_int = prev_data.get("MaxIntensity", "")
+            prev_hypo = prev_data.get("Hypocenter", "")
 
-            if is_warn and area_changed and current_warn_areas:
+            # 警報対象地域が「増加」した場合のみ読み上げる（減った場合や
+            # 変化なしでは読み上げない。予想震度未発表化による見かけ上の
+            # 減少では area_changed のみだと誤って反応してしまうため、
+            # area_increased を条件にする）。
+            if is_warn and area_increased:
                 priority = 1
                 text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。"
 
@@ -866,6 +965,10 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
         if text:
             await self.speak_local(text, priority)
 
+        if state is not None:
+            state["last_warn_areas"] = set(current_warn_areas)
+            state["prev_data"] = data.copy()
+        # 後方互換（!status等、他箇所からの参照用に単一値も更新しておく）
         self.last_eew_data = data.copy()
 
     def _is_intensity_changed_significantly(self, prev: str, current: str) -> bool:
@@ -880,7 +983,7 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
     # ===============================
     # EEW 音声再生ロジック
     # ===============================
-    async def play_eew_sound(self, data):
+    async def play_eew_sound(self, data, cumulative_warn_areas: set | None = None):
         is_cancel = data.get("isCancel", False)
         serial = int(data.get("Serial", 1))
         is_final = data.get("isFinal", False)
@@ -888,67 +991,77 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
         event_id = data.get("EventID")
         max_int_str = data.get("MaxIntensity", "不明")
 
-        if self.last_eew_event_id != event_id:
-            self.audio_flags = {"warning": False, "int3": False, "first": False, "final": False, "cancel": False}
-            self.last_warn_areas = set()
-            self.last_eew_event_id = event_id
+        state = self.eew_state.setdefault(event_id, {
+            "cumulative_warn_areas": set(),
+            "last_warn_areas": set(),
+            "audio_flags": {"warning": False, "int3": False, "first": False, "final": False, "cancel": False},
+            "prev_data": None,
+        })
+        audio_flags = state["audio_flags"]
+
+        # 後方互換：last_eew_event_id を最後に処理したEventIDとして更新
+        self.last_eew_event_id = event_id
 
         if is_cancel:
-            if not self.audio_flags.get("cancel"):
+            if not audio_flags.get("cancel"):
                 await self.play_mp3("eewC")
-                self.audio_flags["cancel"] = True
+                audio_flags["cancel"] = True
                 logger.debug("音声: eewC (キャンセル)")
+            state["prev_data"] = data.copy()
             self.last_eew_data = data.copy()
             return
 
-        current_warn_areas = {
-            a.get("Chiiki") for a in data.get("WarnArea", [])
-            if a.get("Type") == "警報"
-        }
+        # 対象地域はREGION_MAP変換後・累積セット（予想震度の発表/未発表による
+        # 増減の影響を受けない）で統一し、通知本文・読み上げと判定基準を揃える。
+        current_warn_areas = cumulative_warn_areas
+        if current_warn_areas is None:
+            current_warn_areas = self._update_cumulative_warn_areas(event_id, data, datetime.now().timestamp())
 
         should_play_high_alert = False
         if is_warn:
-            if not self.audio_flags.get("warning"):
+            if not audio_flags.get("warning"):
                 should_play_high_alert = True
-                self.audio_flags["warning"] = True
+                audio_flags["warning"] = True
             else:
-                new_areas = current_warn_areas - self.last_warn_areas
+                new_areas = current_warn_areas - state["last_warn_areas"]
                 if new_areas:
                     should_play_high_alert = True
                     logger.info(f"警報地域が追加されました: {new_areas}")
 
         if should_play_high_alert:
             await self.play_mp3("high_alert")
-            self.last_warn_areas = current_warn_areas
+            state["last_warn_areas"] = set(current_warn_areas)
             logger.debug(f"音声: high_alert (地域数: {len(current_warn_areas)})")
-            # last_eew_data はここで更新しない。
+            # prev_data はここで更新しない。
             # generate_and_speak_eew が後から実行されるとき prev==current となり
-            # area_changed=False になってTTS警報地域が読み上げられなくなるため。
+            # area_increased=False になってTTS警報地域が読み上げられなくなるため。
             return
 
         int3_or_higher = ["3", "4", "5弱", "5強", "6弱", "6強", "7", "推定5弱以上"]
         if not is_warn and max_int_str in int3_or_higher:
-            if not self.audio_flags.get("int3"):
+            if not audio_flags.get("int3"):
                 await self.play_mp3("eew3")
-                self.audio_flags["int3"] = True
+                audio_flags["int3"] = True
                 logger.debug("音声: eew3 (震度3以上)")
+                state["prev_data"] = data.copy()
                 self.last_eew_data = data.copy()
                 return
 
-        if is_final and not self.audio_flags.get("final"):
+        if is_final and not audio_flags.get("final"):
             await self.play_mp3("saisyu")
-            self.audio_flags["final"] = True
+            audio_flags["final"] = True
             logger.debug("音声: saisyu (最終報)")
 
         elif serial > 1:
             await self.play_mp3("koushin")
             logger.debug("音声: koushin (更新)")
 
-        elif serial == 1 and not self.audio_flags.get("first"):
+        elif serial == 1 and not audio_flags.get("first"):
             await self.play_mp3("low_alert")
-            self.audio_flags["first"] = True
+            audio_flags["first"] = True
             logger.debug("音声: low_alert (初報)")
 
+        state["prev_data"] = data.copy()
         self.last_eew_data = data.copy()
 
     # ===============================
