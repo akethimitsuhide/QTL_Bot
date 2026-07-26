@@ -288,6 +288,11 @@ class EventManager:
         # 既にイベントに参加中の観測点は、進行中の地震で震度が高止まりしている
         # 可能性があるため、ブラックリスト判定の対象から除外する。
         for sid, st in list(self.stations.items()):
+            if st.blacklisted:
+                # 既にブラックリスト化済みの観測点は ingest() 側で早期returnされ、
+                # _flat_and_high が最後の値のまま凍結され続ける。ここで除外しないと
+                # 毎tick同じ条件が成立し続け、警告ログが無限に出続けてしまう。
+                continue
             if st.event_id is not None:
                 continue
             if st._flat_and_high:
