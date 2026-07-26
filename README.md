@@ -70,10 +70,12 @@
   - レベルが下降し tier が変わった場合は新しい tier の MP3 に切り替わる（100未満は無音）
 
 ### 強震モニタ画像解析（画像解析検知）
-- 強震モニタ画像（`jma_s` 系統）をHSVマスク処理・グリッド分割・クラスタリング・複数フレーム検証の4段階パイプラインで解析し、数値APIを使わず画像のみから揺れを検知する独立機能（`KyoshinMonitorCog`）
+- 強震モニタ画像（`jma_s` 系統）をHSVマスク処理・グリッド分割で解析し、数値APIを使わず画像のみから揺れを検知する独立機能（`KyoshinMonitorCog`）
+- 検知は「基準値（過去10〜25秒平均）との差分による上昇トリガー」＋「8近傍のうち一定数以上が同時に上昇トリガー成立」の空間クロスバリデーション方式（ingen084氏の記事の実装方針を採用）。震度の絶対値のみによる無条件判定は行わない
+- イベントの生死は「最後に本物の上昇トリガーが立ってから `KYOSHIN_EVENT_TIMEOUT_SEC` 秒経過したか」の1点のみで判定（複数条件を組み合わせない単純な状態機械）
+- 周囲が無反応のまま単独でフラット（変化なし）かつ高震度が続く観測点は機器異常とみなし自動的にブラックリスト化し、以後の判定から除外する
 - 画像の時刻決定は `latest.json` API（実際に配信されている最新時刻）を優先取得し、失敗時のみ従来のリトライ探索方式にフォールバック
-- 通知に必要な最小検出観測点数は実震度によって切り替え（震度0相当は4件以上、震度1相当以上は2件以上を要求。誤検知抑制のため）
-- 通知には `jma_s` 系統・`abrspmx_s` 系統の両画像と振動レベルを含める（検出観測点数そのものは通知本文には表示しない）
+- 通知には `jma_s` 系統・`abrspmx_s` 系統の両画像と振動レベルを含める
 - 通知の色は `jma_s` 系統の実震度に基づく独自カラーマップで決定（EEW発表時の強震モニタ通知と共通仕様）
 - Pillow（PIL）が未インストールの場合は自動的に機能をスキップする
 
@@ -208,13 +210,18 @@ python bot.py
 | `KYOSHIN_IMAGE_MAX_RETRY` | 4 | フォールバック探索の最大リトライ回数 |
 | `KYOSHIN_POLL_INTERVAL_SEC` | 2.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒） |
 | `KYOSHIN_NOTIFY_INTERVAL_SEC` | 2.0 | イベント継続中の通知再送間隔（秒） |
-| `KYOSHIN_MIN_CLUSTER_SIZE` | 3 | クラスタとして認める最小メンバー（セル）数 |
-| `KYOSHIN_REQUIRED_FRAMES` | 2 | クラスタを確定（confirmed）とみなすために必要な連続フレーム数 |
-| `KYOSHIN_MIN_ACTIVE_PIXELS` | 2 | 1セル内でアクティブとみなす最小の揺れ候補ピクセル数 |
+| `KYOSHIN_MIN_ACTIVE_PIXELS` | 2 | 1セル内でアクティブとみなす最小の揺れ候補ピクセル数（HSVマスクの一次フィルタ） |
+| `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補ピクセルとみなす実震度の下限。下げるとGIF圧縮ノイズを誤検知しやすくなるため非推奨 |
+| `KYOSHIN_RISE_THRESHOLD` | 0.5 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する |
+| `KYOSHIN_BASELINE_WINDOW_START_SEC` | 10.0 | 基準値計算に使う過去サンプルの開始位置（秒前） |
+| `KYOSHIN_BASELINE_WINDOW_END_SEC` | 25.0 | 基準値計算に使う過去サンプルの終了位置（秒前） |
+| `KYOSHIN_HISTORY_WINDOW_SEC` | 25.0 | 観測点ごとに保持する震度履歴の長さ（秒）。BASELINE_WINDOW_END_SEC以上を推奨 |
+| `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 2 | 上昇トリガー確定に必要な、8近傍のうち同時に上昇トリガーが立っている観測点数 |
+| `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
 | `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
 | `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
-| `KYOSHIN_DEBUG_SAVE_IMAGE` | false | confirmed 判定時の元画像をローカル保存するか（事後検証用） |
+| `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 
 ### 音声設定
@@ -492,13 +499,16 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
    ```bash
    pip list | grep -i pillow
    ```
-2. ログで検知パイプラインの状態を確認
+2. ログで検知の状態を確認
    ```bash
    tail -f qtlbot.log | grep -i kyoshin
-   # "クラスタを確定(confirmed)しました" → 検知自体は成功している
-   # 検知後に通知が来ない場合は KYOSHIN_MIN_STATIONS_SHINDO0 / SHINDO1 の閾値を確認
+   # イベントが生成されているのに通知が来ない場合は
+   # KYOSHIN_MIN_STATIONS_SHINDO0 / SHINDO1、KYOSHIN_MIN_NOTIFY_PHASE の閾値を確認
+   # 特定の観測点の警告ログが繰り返し出る場合は、その観測点が機器異常として
+   # ブラックリスト化されている可能性がある（"ブラックリスト化しました" で検索）
    ```
 3. `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` に保存された画像で誤検知・未検知の状況を事後確認
+4. 揺れが収まった後も通知が続く時間が長い／短いと感じる場合は `KYOSHIN_EVENT_TIMEOUT_SEC`（デフォルト45秒）を調整
 
 ---
 
@@ -523,8 +533,8 @@ QTL_Bot/
     ├── kyoshin_shared.py          - 震度色分け・両画像取得・振動レベル取得の共通ロジック
     │                                 （EEW発表時通知・画像解析検知通知の両方から利用）
     ├── kyoshin_image_analyzer.py  - HSVマスク処理による画像→震度グリッド変換
-    ├── kyoshin_cluster_tracker.py - 検出グリッドセルのクラスタリング・複数フレーム検証
-    └── kyoshin_detector.py        - 揺れ検知イベントのライフサイクル管理（状態機械）
+    ├── kyoshin_detector.py        - 揺れ検知イベントのライフサイクル管理（EventManager による状態機械）
+    └── kyoshin_image_monitor.py   - EventManager と連動し、イベント継続中の画像通知ループを制御
 ```
 
 ### Cog 責務一覧
@@ -559,9 +569,9 @@ QTL_Bot/
 | `start_web_dashboard()` | Web Dashboard（aiohttp） |
 | `_build_status_embed()` | !status / /qtl_status 共通 Embed 生成 |
 | `notify_*()` | 各通知関数 |
-| `KyoshinImageAnalyzer.analyze()` | 強震モニタ画像をグリッド分割し、HSVマスクで揺れ候補セルを抽出 |
-| `ClusterTracker.update()` | アクティブセルを連結成分クラスタリングし、複数フレーム検証で confirmed 判定 |
-| `EventManager.ingest_confirmed()` / `tick()` | 揺れ検知イベントの生成・更新・終了（状態機械） |
+| `KyoshinImageAnalyzer.analyze_all()` | 強震モニタ画像をグリッド分割し、HSVマスクで各セルの実震度を推定 |
+| `EventManager.ingest()` | 観測点ごとに基準値との差分から上昇トリガーを判定し、ブラックリスト仮判定も行う |
+| `EventManager.tick()` | 近隣同時上昇の確認・ブラックリスト確定・イベントの生成/マージ/終了判定を行う |
 | `shindo_to_color()` | 実震度から独自カラーマップに基づく通知色を決定（`core/kyoshin_shared.py`） |
 | `estimate_max_shindo_from_image()` | `jma_s` 画像から画面内の最大実震度を推定（`core/kyoshin_shared.py`） |
 
@@ -578,5 +588,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-07-20
+**最終更新**: 2026-07-27
 **対応 Python**: 3.11+
