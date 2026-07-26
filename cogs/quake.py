@@ -65,6 +65,10 @@ from core.helpers import (
 )
 from core.audio import AudioMixin
 from core.p2p_image import P2PImageMixin
+from core.kyoshin_shared import (
+    DualImageFetcher, fetch_vibration_level, shindo_to_color,
+    estimate_max_shindo_from_image,
+)
 
 logger = logging.getLogger("QTLBot")
 
@@ -954,44 +958,21 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
     # 強震モニタ監視ループ（振動レベル + 強震モニタ画像 + 長周期地震動モニタ画像）
     # ===============================
     async def vibration_monitor_loop(self, target_event_id):
-        KWATCH_URL = "https://kwatch-24h.net/EQLevel.json"
-        JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
-        LMONI_BASE = "https://www.lmoni.bosai.go.jp/monitor/data/data/map_img/RealTimeImg/abrspmx_s"
-        DELAY_SEC  = 4
-        STEP_SEC   = 3
-        MAX_RETRY  = 4
+        """
+        EEW発生時（第一報検知時）から一定時間、jma_s系統・abrspmx_s(LMoni)系統の
+        両画像と振動レベルを2秒間隔でDiscordに通知し続けるループ。
 
-        # 直前に取得できた画像URLをキャッシュして同一秒への重複HEADリクエストを防ぐ
-        _last_jma_s_url:  str | None = None
-        _last_lmoni_url:  str | None = None
-        _last_jma_s_ts:   str        = ""
-        _last_lmoni_ts:   str        = ""
+        通知の色は jma_s画像から推定した実震度に基づき、
+        core.kyoshin_shared.JMA_S_SHINDO_COLORS の独自カラーマップで決定する
+        （kyoshin_monitor.py側の画像解析検知通知と共通のロジック・カラーマップを使用）。
+        """
+        POLL_INTERVAL_SEC = 2  # EEW発表時・揺れ検知時で通知間隔を統一
+
+        image_fetcher = DualImageFetcher()
+
         # 振動レベル MP3 のtier管理（tier変化時のみ再生）
         # 0=100未満, 1=100-999, 2=1000-1999, 3=2000以上
         _prev_vib_tier: int = 0
-
-        async def find_monitor_image(base_url: str, suffix: str,
-                                     last_url: str | None, last_ts: str
-                                     ) -> tuple[str | None, str]:
-            """
-            現在時刻 - DELAY_SEC から遡って画像 URL を返す。
-            直前と同じタイムスタンプなら HEAD リクエストを省略してキャッシュを返す。
-            戻り値: (url | None, timestamp_str)
-            """
-            for i in range(MAX_RETRY):
-                dt = datetime.now() - timedelta(seconds=DELAY_SEC + STEP_SEC * i)
-                ts = dt.strftime("%Y%m%d%H%M%S")
-                # 同じタイムスタンプなら前回結果を再利用
-                if ts == last_ts:
-                    return last_url, last_ts
-                url = f"{base_url}/{dt.strftime('%Y%m%d')}/{ts}.{suffix}.gif"
-                try:
-                    async with self.session.head(url, timeout=3) as resp:
-                        if resp.status == 200:
-                            return url, ts
-                except Exception:
-                    pass
-            return None, last_ts
 
         start_time = datetime.now().timestamp()
         if not ENABLE_KYOSHIN:
@@ -1003,21 +984,8 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                    not self.bot.is_closed() and
                    datetime.now().timestamp() - start_time < 300):
 
-                level = None
-                try:
-                    async with self.session.get(KWATCH_URL, timeout=3) as resp:
-                        if resp.status == 200:
-                            kdata = await resp.json()
-                            level = int(kdata.get("l", 0))
-                except Exception as e:
-                    logger.error(f"強震モニタ: 振動レベル取得エラー: {e}")
-
-                _last_jma_s_url, _last_jma_s_ts  = await find_monitor_image(
-                    JMA_S_BASE, "jma_s", _last_jma_s_url, _last_jma_s_ts
-                )
-                _last_lmoni_url, _last_lmoni_ts = await find_monitor_image(
-                    LMONI_BASE, "abrspmx_s", _last_lmoni_url, _last_lmoni_ts
-                )
+                level = await fetch_vibration_level(self.session)
+                jma_s_url, lmoni_url = await image_fetcher.fetch_urls(self.session)
 
                 # ── 振動レベル MP3（tier 該当中はループごとに継続再生）──
                 if level is not None:
@@ -1032,23 +1000,24 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                     if cur_tier != _prev_vib_tier:
                         logger.info(f"振動レベル tier 変化: {_prev_vib_tier} → {cur_tier} (level={level})")
                         _prev_vib_tier = cur_tier
-                    # tier 0（100未満）以外は該当tierの間、ループ（3秒）ごとに再生し続ける
+                    # tier 0（100未満）以外は該当tierの間、ループ（2秒）ごとに再生し続ける
                     mp3_key = {3: "lv2000", 2: "lv1000", 1: "lv100"}.get(cur_tier)
                     if mp3_key:
                         await self.play_mp3(mp3_key)
                         logger.debug(f"振動レベル MP3 再生: {mp3_key} (level={level})")
 
-                if level is not None or _last_jma_s_url or _last_lmoni_url:
+                if level is not None or jma_s_url or lmoni_url:
+                    # jma_s画像から実震度を推定し、独自カラーマップで通知色を決定する
+                    max_shindo = None
+                    if jma_s_url:
+                        jma_s_bytes = await image_fetcher.fetch_jma_s_bytes(self.session)
+                        if jma_s_bytes:
+                            max_shindo = estimate_max_shindo_from_image(jma_s_bytes)
+                    color = shindo_to_color(max_shindo)
+
                     if level is not None:
-                        if level >= 1000:
-                            color = 0xFF0000
-                        elif level >= 100:
-                            color = 0xFFFF00
-                        else:
-                            color = 0xFFFFFF
                         level_str = f"**振動レベル: {level}**\n"
                     else:
-                        color = 0xAAAAAA
                         level_str = "**振動レベル: 取得中...**\n"
 
                     description = (
@@ -1062,14 +1031,14 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                         timestamp=datetime.now()
                     )
 
-                    if _last_jma_s_url:
-                        embed.set_image(url=_last_jma_s_url)
-                    if _last_lmoni_url:
-                        embed.set_thumbnail(url=_last_lmoni_url)
+                    if jma_s_url:
+                        embed.set_image(url=jma_s_url)
+                    if lmoni_url:
+                        embed.set_thumbnail(url=lmoni_url)
 
                     await channel.send(embed=embed)
 
-                await asyncio.sleep(3)
+                await asyncio.sleep(POLL_INTERVAL_SEC)
 
         except asyncio.CancelledError:
             logger.info(f"強震モニタ監視終了 (EventID={target_event_id})")

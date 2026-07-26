@@ -3,8 +3,8 @@ bot.py
 ======
 QTL_Bot の起動専用エントリーポイント。
 
-【Step6 時点の状態: 全機能の切り出しが完了】
-分割済みの Cog は以下の7つ:
+【Step7 時点の状態: 全機能の切り出しが完了 + 強震モニタ画像解析を追加】
+分割済みの Cog は以下の8つ:
   - ApmCog（Mackerel APM連携。デフォルト無効、全Cogより先に登録）
   - QuakeEewCog（地震・EEW）
   - TsunamiCog（津波・観測・予報・南海トラフ〈tsunami API経由〉）
@@ -12,6 +12,8 @@ QTL_Bot の起動専用エントリーポイント。
   - UsgsCog（USGS海外地震情報）
   - OtherInfoCog（長周期地震動・気象庁その他情報〈quake API経由〉）
   - SystemCog（!status・Web Dashboard・エラー監視・リソース監視）
+  - KyoshinMonitorCog（強震モニタ画像の色相解析による揺れ検知。
+    グリッド分割による疑似観測点方式。Pillowが必要）
 
 これで旧 bot.py（分割前の単一ファイル版）の全機能が新構成へ移行完了した。
 
@@ -93,6 +95,13 @@ async def main():
             from cogs.system import SystemCog
             await bot.add_cog(SystemCog(bot))
             logger.info("SystemCog を登録しました")
+
+            # ── Step7: 強震モニタ画像解析による揺れ検知 Cog ──
+            # ENABLE_KYOSHIN=false で無効化可能。Pillowが未インストールの場合も
+            # on_ready内で検知して安全にスキップする。
+            from cogs.kyoshin_monitor import KyoshinMonitorCog
+            await bot.add_cog(KyoshinMonitorCog(bot))
+            logger.info("KyoshinMonitorCog を登録しました")
 
             logger.info("bot.start() 実行中...")
             await bot.start(BOT_TOKEN)

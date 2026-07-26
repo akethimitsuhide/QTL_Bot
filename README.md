@@ -61,12 +61,23 @@
 - 長周期地震動の観測情報を通知
 
 ### 長周期地震動モニタ
-- EEW 発表時に長周期地震動モニタの画像を通知（3秒間隔で更新）
-- 振動レベルに応じた音声アラート（該当レベルの間、3秒間隔で継続再生）
+- EEW 発表時に強震モニタ画像（`jma_s` 系統）・長周期地震動モニタ画像（`abrspmx_s` 系統）・振動レベルを通知（2秒間隔で更新）
+- 通知の色は `jma_s` 系統の画像から推定した実震度に基づく独自カラーマップで決定（強震モニタ画像解析検知と共通仕様）
+- 振動レベルに応じた音声アラート（該当レベルの間、2秒間隔で継続再生）
   - レベル 100〜999: `lv100.mp3`
   - レベル 1000〜1999: `lv1000.mp3`
   - レベル 2000 以上: `lv2000.mp3`
   - レベルが下降し tier が変わった場合は新しい tier の MP3 に切り替わる（100未満は無音）
+
+### 強震モニタ画像解析（画像解析検知）
+- 強震モニタ画像（`jma_s` 系統）をHSVマスク処理・グリッド分割で解析し、数値APIを使わず画像のみから揺れを検知する独立機能（`KyoshinMonitorCog`）
+- 検知は「基準値（過去10〜25秒平均）との差分による上昇トリガー」＋「8近傍のうち一定数以上が同時に上昇トリガー成立」の空間クロスバリデーション方式（ingen084氏の記事の実装方針を採用）。震度の絶対値のみによる無条件判定は行わない
+- イベントの生死は「最後に本物の上昇トリガーが立ってから `KYOSHIN_EVENT_TIMEOUT_SEC` 秒経過したか」の1点のみで判定（複数条件を組み合わせない単純な状態機械）
+- 周囲が無反応のまま単独でフラット（変化なし）かつ高震度が続く観測点は機器異常とみなし自動的にブラックリスト化し、以後の判定から除外する
+- 画像の時刻決定は `latest.json` API（実際に配信されている最新時刻）を優先取得し、失敗時のみ従来のリトライ探索方式にフォールバック
+- 通知には `jma_s` 系統・`abrspmx_s` 系統の両画像と振動レベルを含める
+- 通知の色は `jma_s` 系統の実震度に基づく独自カラーマップで決定（EEW発表時の強震モニタ通知と共通仕様）
+- Pillow（PIL）が未インストールの場合は自動的に機能をスキップする
 
 ### Web Dashboard / コマンド
 - `GET /status` で詳細な稼働状況を JSON で取得
@@ -81,6 +92,7 @@
 - Python 3.11+
 - discord.py 2.0+
 - aiohttp（非同期 HTTP 通信）
+- Pillow（強震モニタ画像解析検知機能。未インストール時は当該機能のみ自動スキップ）
 - psutil（オプション：システムリソース監視）
 
 ### インストール
@@ -121,6 +133,7 @@ Bot が通知を送信するテキストチャンネルを作成し、ID を `.e
 - `TSUNAMI_CHANNEL_ID` : 津波警報
 - `VOLCANO_CHANNEL_ID` : 火山情報
 - `USGS_CHANNEL_ID` : USGS 海外地震情報（未設定時は `QUAKE_CHANNEL_ID`）
+- `KYOSHIN_CHANNEL_ID` : 強震モニタ画像解析検知（未設定時は `OTHER_CHANNEL_ID`）
 
 未設定のチャンネルはすべて `CHANNEL_ID` にフォールバックします。
 
@@ -186,6 +199,30 @@ python bot.py
 | `WOLFX_HEARTBEAT_TIMEOUT` | 90 | Wolfx heartbeat タイムアウト（秒） |
 | `FETCH_FAILURE_THRESHOLD` | 3 | API 連続失敗でエラー通知する回数 |
 | `FETCH_BACKOFF_SECONDS` | 60 | API 失敗時のバックオフ待機時間（秒） |
+
+### 強震モニタ画像解析（Kyoshin）設定
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `ENABLE_KYOSHIN` | true | 強震モニタ画像解析検知機能の有効化 |
+| `KYOSHIN_GRID_SIZE` | 10 | 画像を何 px 四方の疑似観測点セルに分割するか |
+| `KYOSHIN_IMAGE_DELAY_SEC` | 6 | `latest.json` 取得失敗時のフォールバック探索で遡る基準秒数 |
+| `KYOSHIN_IMAGE_STEP_SEC` | 3 | フォールバック探索で画像が見つからない場合に遡るステップ幅（秒） |
+| `KYOSHIN_IMAGE_MAX_RETRY` | 4 | フォールバック探索の最大リトライ回数 |
+| `KYOSHIN_POLL_INTERVAL_SEC` | 2.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒） |
+| `KYOSHIN_NOTIFY_INTERVAL_SEC` | 2.0 | イベント継続中の通知再送間隔（秒） |
+| `KYOSHIN_MIN_ACTIVE_PIXELS` | 2 | 1セル内でアクティブとみなす最小の揺れ候補ピクセル数（HSVマスクの一次フィルタ） |
+| `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補ピクセルとみなす実震度の下限。下げるとGIF圧縮ノイズを誤検知しやすくなるため非推奨 |
+| `KYOSHIN_RISE_THRESHOLD` | 0.5 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する |
+| `KYOSHIN_BASELINE_WINDOW_START_SEC` | 10.0 | 基準値計算に使う過去サンプルの開始位置（秒前） |
+| `KYOSHIN_BASELINE_WINDOW_END_SEC` | 25.0 | 基準値計算に使う過去サンプルの終了位置（秒前） |
+| `KYOSHIN_HISTORY_WINDOW_SEC` | 25.0 | 観測点ごとに保持する震度履歴の長さ（秒）。BASELINE_WINDOW_END_SEC以上を推奨 |
+| `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 2 | 上昇トリガー確定に必要な、8近傍のうち同時に上昇トリガーが立っている観測点数 |
+| `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
+| `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
+| `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
+| `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
+| `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
+| `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 
 ### 音声設定
 | 変数名 | 既定値 | 説明 |
@@ -457,6 +494,22 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 # enabled が false → USGS_ENABLED=true を設定
 ```
 
+### 強震モニタ画像解析検知（Kyoshin）が通知されない
+1. `ENABLE_KYOSHIN=true` になっているか、Pillow がインストールされているか確認
+   ```bash
+   pip list | grep -i pillow
+   ```
+2. ログで検知の状態を確認
+   ```bash
+   tail -f qtlbot.log | grep -i kyoshin
+   # イベントが生成されているのに通知が来ない場合は
+   # KYOSHIN_MIN_STATIONS_SHINDO0 / SHINDO1、KYOSHIN_MIN_NOTIFY_PHASE の閾値を確認
+   # 特定の観測点の警告ログが繰り返し出る場合は、その観測点が機器異常として
+   # ブラックリスト化されている可能性がある（"ブラックリスト化しました" で検索）
+   ```
+3. `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` に保存された画像で誤検知・未検知の状況を事後確認
+4. 揺れが収まった後も通知が続く時間が長い／短いと感じる場合は `KYOSHIN_EVENT_TIMEOUT_SEC`（デフォルト45秒）を調整
+
 ---
 
 ## コード構成
@@ -466,28 +519,35 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 QTL_Bot/
 ├── bot.py                  - エントリーポイント（Cog 登録・起動のみ）
 ├── cogs/
-│   ├── apm.py              - ApmCog: Mackerel APM 連携（OpenTelemetry OTLP）
-│   ├── quake.py            - QuakeEewCog: 地震・EEW・P2P EEW
-│   ├── tsunami.py          - TsunamiCog: 津波観測・予報
-│   ├── volcano.py          - VolcanoCog: 火山情報・噴火速報・噴火警報
-│   ├── usgs.py             - UsgsCog: USGS 海外地震情報
-│   ├── other.py            - OtherInfoCog: 長周期地震動・気象庁その他情報
-│   └── system.py           - SystemCog: !status・Web Dashboard・エラー監視・リソース監視
+│   ├── apm.py                - ApmCog: Mackerel APM 連携（OpenTelemetry OTLP）
+│   ├── quake.py              - QuakeEewCog: 地震・EEW・P2P EEW
+│   ├── tsunami.py            - TsunamiCog: 津波観測・予報
+│   ├── volcano.py            - VolcanoCog: 火山情報・噴火速報・噴火警報
+│   ├── usgs.py               - UsgsCog: USGS 海外地震情報
+│   ├── other.py              - OtherInfoCog: 長周期地震動・気象庁その他情報
+│   ├── system.py             - SystemCog: !status・Web Dashboard・エラー監視・リソース監視
+│   └── kyoshin_monitor.py    - KyoshinMonitorCog: 強震モニタ画像解析による揺れ検知
 └── core/
-    ├── config.py           - 環境変数読み込み・定数定義
-    └── logging_setup.py    - ログ設定（RotatingFileHandler・重複抑制）
+    ├── config.py                  - 環境変数読み込み・定数定義
+    ├── logging_setup.py           - ログ設定（RotatingFileHandler・重複抑制）
+    ├── kyoshin_shared.py          - 震度色分け・両画像取得・振動レベル取得の共通ロジック
+    │                                 （EEW発表時通知・画像解析検知通知の両方から利用）
+    ├── kyoshin_image_analyzer.py  - HSVマスク処理による画像→震度グリッド変換
+    ├── kyoshin_detector.py        - 揺れ検知イベントのライフサイクル管理（EventManager による状態機械）
+    └── kyoshin_image_monitor.py   - EventManager と連動し、イベント継続中の画像通知ループを制御
 ```
 
 ### Cog 責務一覧
 | Cog | ファイル | 主な責務 |
 |:---|:---|:---|
 | `ApmCog` | `cogs/apm.py` | OpenTelemetry 計装・Mackerel OTLP 送信（デフォルト無効） |
-| `QuakeEewCog` | `cogs/quake.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・P2P API（地震速報） |
+| `QuakeEewCog` | `cogs/quake.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・P2P API（地震速報）・EEW発表時の強震モニタ通知 |
 | `TsunamiCog` | `cogs/tsunami.py` | JMA 津波 API ポーリング・観測情報・予報 / 警報通知 |
 | `VolcanoCog` | `cogs/volcano.py` | JMA 火山 API ポーリング・噴火速報・噴火警報 |
 | `UsgsCog` | `cogs/usgs.py` | USGS API ポーリング・海外地震フィルタリング・通知 |
-| `OtherInfoCog` | `cogs/other.py` | 長周期地震動・強震モニタ・気象庁その他情報 |
+| `OtherInfoCog` | `cogs/other.py` | 長周期地震動・気象庁その他情報 |
 | `SystemCog` | `cogs/system.py` | Web Dashboard・`!status`・エラー自動通知・リソース監視 |
+| `KyoshinMonitorCog` | `cogs/kyoshin_monitor.py` | 強震モニタ画像の解析による揺れ検知・通知（Pillow が必要） |
 
 ### 主要関数
 | 関数 | 説明 |
@@ -503,12 +563,17 @@ QTL_Bot/
 | `fetch_volcano_info()` | 火山情報ポーリング |
 | `fetch_eruption_info()` | 噴火速報ポーリング（VFVO50） |
 | `fetch_warning_info()` | 噴火警報ポーリング（VFVO53） |
-| `vibration_monitor_loop()` | EEW 発生時の強震モニタ監視 |
+| `vibration_monitor_loop()` | EEW 発生時の強震モニタ監視（`jma_s`・`abrspmx_s` 両画像＋振動レベル、2秒間隔） |
 | `speech_worker()` | AquesTalkPi 音声再生ワーカー |
 | `mp3_worker()` | MP3 再生ワーカー |
 | `start_web_dashboard()` | Web Dashboard（aiohttp） |
 | `_build_status_embed()` | !status / /qtl_status 共通 Embed 生成 |
 | `notify_*()` | 各通知関数 |
+| `KyoshinImageAnalyzer.analyze_all()` | 強震モニタ画像をグリッド分割し、HSVマスクで各セルの実震度を推定 |
+| `EventManager.ingest()` | 観測点ごとに基準値との差分から上昇トリガーを判定し、ブラックリスト仮判定も行う |
+| `EventManager.tick()` | 近隣同時上昇の確認・ブラックリスト確定・イベントの生成/マージ/終了判定を行う |
+| `shindo_to_color()` | 実震度から独自カラーマップに基づく通知色を決定（`core/kyoshin_shared.py`） |
+| `estimate_max_shindo_from_image()` | `jma_s` 画像から画面内の最大実震度を推定（`core/kyoshin_shared.py`） |
 
 ---
 
@@ -523,5 +588,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-07-16
+**最終更新**: 2026-07-27
 **対応 Python**: 3.11+
