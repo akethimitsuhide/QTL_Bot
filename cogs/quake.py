@@ -945,16 +945,21 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
         else:
             prev_max_int = prev_data.get("MaxIntensity", "")
             prev_hypo = prev_data.get("Hypocenter", "")
+            intensity_changed = self._is_intensity_changed_significantly(prev_max_int, max_int_str)
 
-            # 警報対象地域が「増加」した場合のみ読み上げる（減った場合や
-            # 変化なしでは読み上げない。予想震度未発表化による見かけ上の
-            # 減少では area_changed のみだと誤って反応してしまうため、
-            # area_increased を条件にする）。
+            # 優先度1: 警報が発表されていて、かつ警報対象地域が「増加」した場合。
+            # 地域拡大と震度上昇が同時に起きていても、ここでは地域拡大の文言のみ
+            # 読み上げ、震度変化の文言（「推定最大震度○○」）は読み上げない。
             if is_warn and area_increased:
                 priority = 1
                 text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。"
 
-            elif self._is_intensity_changed_significantly(prev_max_int, max_int_str):
+            # 優先度2: 予報・警報のいずれであっても、前報（同一EventID内の
+            # 直前のdata）と比較して予想最大震度が変わった場合は
+            # 「推定最大震度○○」と読み上げる。
+            # （警報かつ地域拡大が同時発生している場合は上のブロックで
+            #   既に処理済みのため、ここには落ちてこない）
+            elif intensity_changed:
                 priority = 2
                 text = f"推定最大震度{max_int_str}"
 
