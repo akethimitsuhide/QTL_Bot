@@ -715,12 +715,19 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         if not channel:
             return
 
-        # 記事準拠の警報レベルマッピング
+        # 気象庁公式資料準拠の警報レベルマッピング。
+        # 00=津波なし, 50=津波警報・大津波警報の解除, 51=津波警報,
+        # 52=大津波警報, 53=大津波警報(新規発表/切替),
+        # 60=津波注意報の解除（「なし」ではなく「注意報から解除された」の意味）,
+        # 62=津波注意報, 71/72/73=津波予報（若干の海面変動）
+        # ※ 73 は「津波警報解除、津波予報への切替」を意味する特殊コードだが、
+        #   このBotでは「警報が完全に終わったわけではなく予報段階に移行した」
+        #   という状態のため、危険度としては予報(lv=1)として扱う。
         WARN_LEVELS = {
-            "00": 0, "50": 0,   # なし・解除
+            "00": 0, "50": 0,   # なし・警報系解除
             "51": 4,            # 津波警報
             "52": 5, "53": 5,   # 大津波警報
-            "60": 0,            # なし
+            "60": 0,            # 津波注意報解除（危険度としては0だが、意味は「なし」ではない）
             "62": 2,            # 津波注意報
             "71": 1, "72": 1, "73": 1,  # 津波予報
         }
@@ -779,10 +786,26 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             # {level: {height_desc: [area_name]}} の2段階グループ化
             level_height_areas: dict[int, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
 
+            # 解除コードの内訳を集計する。
+            # Code: 50 = 津波警報・大津波警報の解除、60 = 津波注意報の解除、
+            # 00 = 元々津波なし。同じ配信内にこれらが混在することもあるため、
+            # 実際に解除されたレベルの最大値を別途追跡する
+            # （例: 大津波警報→注意報に切り下げられた地域と、注意報→解除に
+            #   なった地域が同時に配信されるケースがある）。
+            cancelled_from_level = 0  # 0=なし, 2=注意報解除, 4=警報/大津波警報解除
+            has_any_cancel_code = False
+
             for fi in forecast_items:
                 area_name = fi.get("Area", {}).get("Name", "不明")
                 kind_code = fi.get("Category", {}).get("Kind", {}).get("Code", "00")
                 lv = WARN_LEVELS.get(kind_code, 0)
+
+                if kind_code == "50":
+                    has_any_cancel_code = True
+                    cancelled_from_level = max(cancelled_from_level, 4)
+                elif kind_code == "60":
+                    has_any_cancel_code = True
+                    cancelled_from_level = max(cancelled_from_level, 2)
 
                 # 予想高さ取得
                 # TsunamiHeight は dict（{"description": "..."}）の場合と
@@ -808,7 +831,25 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                     max_level = lv
 
             # ── 解除判定 ──
-            is_cancelled = max_level == 0 and bool(forecast_items)
+            # Headline.Text は気象庁側で既に正確な文言（「津波注意報を
+            # 解除しました。」等）が入っているため、これを最優先で使う。
+            # 取得できない場合のみ、上で集計した cancelled_from_level から
+            # 実際に解除された種別を組み立てる（従来はここが固定文言
+            # 「津波警報が解除されました」になっており、実際には津波注意報
+            # のみが解除された場合でも誤って警報解除と案内してしまっていた）。
+            is_cancelled = max_level == 0 and bool(forecast_items) and has_any_cancel_code
+            headline_text = (head.get("Headline", {}) or {}).get("Text", "").strip()
+            if is_cancelled:
+                if headline_text:
+                    cancel_speak_text = headline_text
+                elif cancelled_from_level == 4:
+                    cancel_speak_text = "津波警報が解除されました"
+                elif cancelled_from_level == 2:
+                    cancel_speak_text = "津波注意報が解除されました"
+                else:
+                    cancel_speak_text = "津波の心配はなくなりました"
+            else:
+                cancel_speak_text = ""
 
             # ── description 組み立て（notify_tsunami_observation スタイル準拠） ──
             description = (
@@ -820,7 +861,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 description += f"**{cause_text}**"
 
             if is_cancelled:
-                description += "すべての津波警報・注意報・予報が解除されました。"
+                description += cancel_speak_text or "すべての津波警報・注意報・予報が解除されました。"
             else:
                 # 注意喚起文（絵文字なし）
                 alert_msg = WARN_ALERT.get(max_level, "")
@@ -882,7 +923,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             # ── 読み上げ・音声 ──
             if is_cancelled:
-                await self.speak_local("津波警報が解除されました")
+                await self.speak_local(cancel_speak_text)
             else:
                 speak_label = WARN_LABEL.get(max_level, "津波情報")
                 await self.speak_local(f"{speak_label}が発表されました")

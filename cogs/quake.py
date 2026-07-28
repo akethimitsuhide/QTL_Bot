@@ -93,8 +93,15 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
 
         # ── 地震情報の重複排除状態 ──
         self.last_quake_id = None
-        self.last_eew_event_id = None
-        self.last_eew_serial = 0
+        # EventIDごとに、これまでに処理した最大Serialを記録する。
+        # Wolfx・P2P地震情報の両方が同一EventIDのEEWを別々のWebSocketから
+        # ほぼ同時に配信してくることがあり、以前は単一値(last_eew_event_id/
+        # last_eew_serial)で管理していたためP2P側にはこのガードが存在せず、
+        # 「Wolfx側で既に処理済みの初報を、P2P側がまた初報として処理し直し
+        # 矛盾する震度の読み上げが二重に生成される」という不具合があった。
+        # EventID単位の辞書にすることで、情報源に関わらず「そのEventIDで
+        # 既に見たSerial以下は無視する」を一元的に保証する。
+        self.eew_max_serial_seen: dict[str, int] = {}
         self.recent_eews: dict = {}
         self.recent_eews_max_size = 50
         self.last_eew_data = None
@@ -338,12 +345,14 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                     self._last_recv["wolfx"] = self._wolfx_last_recv
                     self._recv_count["wolfx"] += 1
                     logger.info(f"EEW 検知: EventID={event_id} Serial={serial} → 通知")
-                    if (self.last_eew_event_id is None or
-                            self.last_eew_event_id != event_id or
-                            self.last_eew_serial < serial):
-                        self.last_eew_event_id = event_id
-                        self.last_eew_serial   = serial
+                    if serial > self.eew_max_serial_seen.get(event_id, 0):
+                        self.eew_max_serial_seen[event_id] = serial
                         await self.notify_eew(data, source="wolfx")
+                    else:
+                        logger.debug(
+                            f"EEW 重複/逆行のためスキップ: EventID={event_id} "
+                            f"Serial={serial} (既知の最大Serial={self.eew_max_serial_seen.get(event_id, 0)})"
+                        )
                 except Exception:
                     logger.error(f"EEW 処理エラー:\n{traceback.format_exc()}")
 
@@ -367,7 +376,14 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                     self._last_recv["p2p_eew"] = datetime.now()
                     self._recv_count["p2p_eew"] += 1
                     logger.info(f"P2P EEW 検知: EventID={event_id} Serial={serial}")
-                    await self.notify_eew(wolfx_data, source="p2p_eew")
+                    if serial > self.eew_max_serial_seen.get(event_id, 0):
+                        self.eew_max_serial_seen[event_id] = serial
+                        await self.notify_eew(wolfx_data, source="p2p_eew")
+                    else:
+                        logger.debug(
+                            f"P2P EEW 重複/逆行のためスキップ: EventID={event_id} "
+                            f"Serial={serial} (既知の最大Serial={self.eew_max_serial_seen.get(event_id, 0)})"
+                        )
                 except Exception:
                     logger.error(f"P2P EEW メッセージ処理エラー:\n{traceback.format_exc()}")
 
@@ -440,8 +456,18 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                 sf = safe_int(area.get("scaleFrom", -1))
                 st = safe_int(area.get("scaleTo",   -1))
 
-                # 最大震度追跡（99は70相当で比較）
-                effective = min(st, 70) if st not in (-1, 99) else (sf if sf != -1 else -1)
+                # 最大震度追跡。
+                # scaleTo=99（震度7以上）は「70(震度7)以上」を意味するため、
+                # 70として扱う必要がある。従来コードは st in (-1, 99) のとき
+                # scaleFrom（下限値）にフォールバックしてしまい、99のケースで
+                # 本来の上限値(70)ではなく下限値を採用してしまうバグがあった
+                # （例: scaleFrom=45"5弱", scaleTo=99"7以上" → 誤って5弱扱い）。
+                if st == 99:
+                    effective = 70
+                elif st != -1:
+                    effective = st
+                else:
+                    effective = sf if sf != -1 else -1
                 if effective > max_scale_val:
                     max_scale_val = effective
 
@@ -451,7 +477,8 @@ class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
                     has_warn = True
 
                 shindo1 = scale_map.get(sf, "不明")
-                shindo2 = scale_map.get(min(st, 70) if st == 99 else st, shindo1)
+                shindo2_val = 70 if st == 99 else st
+                shindo2 = scale_map.get(shindo2_val, shindo1)
 
                 warn_areas.append({
                     "Chiiki":      area.get("name", ""),
