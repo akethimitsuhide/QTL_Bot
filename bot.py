@@ -3,10 +3,12 @@ bot.py
 ======
 QTL_Bot の起動専用エントリーポイント。
 
-【Step7 時点の状態: 全機能の切り出しが完了 + 強震モニタ画像解析を追加】
-分割済みの Cog は以下の8つ:
+【Step8 時点の状態: EEW/地震情報Cog分割 + 共通AudioCog導入】
+分割済みの Cog は以下の9つ:
   - ApmCog（Mackerel APM連携。デフォルト無効、全Cogより先に登録）
-  - QuakeEewCog（地震・EEW）
+  - AudioCog（音声読み上げ・MP3再生の実体。EewCog/QuakeInfoCogが共有）
+  - EewCog（緊急地震速報〈Wolfx/P2P EEW〉専用）
+  - QuakeInfoCog（地震情報〈震度速報・各地の震度等〉専用）
   - TsunamiCog（津波・観測・予報・南海トラフ〈tsunami API経由〉）
   - VolcanoCog（火山情報・噴火速報・噴火警報）
   - UsgsCog（USGS海外地震情報）
@@ -15,7 +17,14 @@ QTL_Bot の起動専用エントリーポイント。
   - KyoshinMonitorCog（強震モニタ画像の色相解析による揺れ検知。
     グリッド分割による疑似観測点方式。Pillowが必要）
 
-これで旧 bot.py（分割前の単一ファイル版）の全機能が新構成へ移行完了した。
+【Step8での変更点（令和8年熊本地震を受けて）】
+令和8年熊本地震では、緊急地震速報と地震情報がほぼ同時に、かつ短時間に
+大量発生し、旧QuakeEewCogの単一音声キューでは片方の情報を読み上げ中に
+もう片方の重要な情報が来ても再生が遅れる問題があった。
+そこで旧 QuakeEewCog を EewCog（EEW専用）と QuakeInfoCog（地震情報専用）
+に分割し、両者が共有する音声キューの実体を AudioCog に集約した。
+AudioCog は EewCog・QuakeInfoCog より前に登録する必要がある
+（両Cogの on_ready が AudioCog を bot.get_cog() で参照するため）。
 
 ★★★ 重要: 本番投入前に必ず旧 bot.py と並行稼働させないこと ★★★
 旧 bot.py をまだ動かしている環境がある場合、必ず停止してから
@@ -66,10 +75,22 @@ async def main():
             await bot.add_cog(ApmCog(bot))
             logger.info("ApmCog を登録しました")
 
-            # ── Step1: 地震・EEW Cog ──
-            from cogs.quake import QuakeEewCog
-            await bot.add_cog(QuakeEewCog(bot))
-            logger.info("QuakeEewCog を登録しました")
+            # ── AudioCog（音声読み上げ・MP3再生の実体） ──
+            # EewCog・QuakeInfoCog が on_ready / 通知処理内で
+            # self.bot.get_cog("AudioCog") を参照するため、必ず両者より先に登録する。
+            from cogs.audio_shared import AudioCog
+            await bot.add_cog(AudioCog(bot))
+            logger.info("AudioCog を登録しました")
+
+            # ── EEW（緊急地震速報）Cog ──
+            from cogs.eew import EewCog
+            await bot.add_cog(EewCog(bot))
+            logger.info("EewCog を登録しました")
+
+            # ── 地震情報 Cog ──
+            from cogs.quake import QuakeInfoCog
+            await bot.add_cog(QuakeInfoCog(bot))
+            logger.info("QuakeInfoCog を登録しました")
 
             # ── Step2: 津波 Cog ──
             from cogs.tsunami import TsunamiCog

@@ -13,7 +13,7 @@ notify_quake（地震情報）と notify_tsunami（P2P津波情報）の両方�
 そのため core/audio.py の AudioMixin と同じパターンで
 P2PImageMixin を提供し、両方のCogがこれを多重継承する。
 
-    class QuakeEewCog(commands.Cog, AudioMixin, P2PImageMixin):
+    class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         ...
 
 【要求する self の属性】

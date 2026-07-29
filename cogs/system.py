@@ -14,18 +14,20 @@ Bot全体の稼働状況を横断的に集約する Cog。
 - core.constants   : INT_MAP
 - core.cog_utils   : get_cog_attr（他Cogの状態を安全に取得する）
 
-【Step5 時点の設計: なぜ他Cogの内部状態を直接参照するのか】
+【Step8 時点の設計: なぜ他Cogの内部状態を直接参照するのか】
 分割前は単一クラスの self._last_recv 等を直接読むだけで済んでいたが、
-Cog分割後は QuakeEewCog・TsunamiCog・VolcanoCog・UsgsCog がそれぞれ
-自分自身の _last_recv / _recv_count / 各種タスクハンドルを保持している。
+Cog分割後は EewCog・QuakeInfoCog・AudioCog・TsunamiCog・VolcanoCog・
+UsgsCog がそれぞれ自分自身の _last_recv / _recv_count / 各種タスク
+ハンドルを保持している（EewCog=EEW、QuakeInfoCog=地震情報、
+AudioCog=両者が共有する音声キューの実体）。
 
-SystemCog はこれらを `core.cog_utils.get_cog_attr(self.bot, "QuakeEewCog", "_last_recv")`
+SystemCog はこれらを `core.cog_utils.get_cog_attr(self.bot, "EewCog", "_last_recv")`
 のような形で「Cog名を指定して安全に読みにいく」。
 これは理想的には「各Cogが自分の状態をイベントやプロパティとして公開する」
-設計の方が疎結合だが、Step5時点では既存コードの構造をなるべく壊さず移行する
-ことを優先し、直接属性アクセス方式を採用している。
-Cog名は固定文字列 "QuakeEewCog" 等を使うため、Cogクラス名を変更する際は
-この Cog 内の参照も合わせて更新すること（Step6以降でのリファクタリング候補）。
+設計の方が疎結合だが、既存コードの構造をなるべく壊さず移行することを
+優先し、直接属性アクセス方式を採用している。
+Cog名は固定文字列 "EewCog" 等を使うため、Cogクラス名を変更する際は
+この Cog 内の参照も合わせて更新すること。
 """
 import os
 import time
@@ -194,8 +196,14 @@ class SystemCog(commands.Cog):
     # 他Cogの状態を集約するヘルパー
     # ===============================
 
-    def _quake_attr(self, name, default=None):
-        return get_cog_attr(self.bot, "QuakeEewCog", name, default)
+    def _eew_attr(self, name, default=None):
+        return get_cog_attr(self.bot, "EewCog", name, default)
+
+    def _quake_info_attr(self, name, default=None):
+        return get_cog_attr(self.bot, "QuakeInfoCog", name, default)
+
+    def _audio_attr(self, name, default=None):
+        return get_cog_attr(self.bot, "AudioCog", name, default)
 
     def _tsunami_attr(self, name, default=None):
         return get_cog_attr(self.bot, "TsunamiCog", name, default)
@@ -212,7 +220,8 @@ class SystemCog(commands.Cog):
     def _merged_last_recv(self) -> dict:
         """全Cogの _last_recv を1つの dict にマージして返す。"""
         merged: dict = {}
-        for attr_getter in (self._quake_attr, self._tsunami_attr,
+        for attr_getter in (self._eew_attr, self._quake_info_attr,
+                             self._tsunami_attr,
                              self._volcano_attr, self._usgs_attr,
                              self._other_attr):
             d = attr_getter("_last_recv", {}) or {}
@@ -221,7 +230,8 @@ class SystemCog(commands.Cog):
 
     def _merged_recv_count(self) -> dict:
         merged: dict = {}
-        for attr_getter in (self._quake_attr, self._tsunami_attr,
+        for attr_getter in (self._eew_attr, self._quake_info_attr,
+                             self._tsunami_attr,
                              self._volcano_attr, self._usgs_attr,
                              self._other_attr):
             d = attr_getter("_recv_count", {}) or {}
@@ -298,10 +308,10 @@ class SystemCog(commands.Cog):
                 return "[NG] エラー停止"
             return "[ - ] 完了"
 
-        # Wolfx 状態（QuakeEewCog から取得）
+        # Wolfx 状態（EewCog から取得）
         now_mono = time.monotonic()
-        wolfx_last_heartbeat = self._quake_attr("_wolfx_last_heartbeat")
-        wolfx_last_eew_recv = self._quake_attr("_wolfx_last_eew_recv")
+        wolfx_last_heartbeat = self._eew_attr("_wolfx_last_heartbeat")
+        wolfx_last_eew_recv = self._eew_attr("_wolfx_last_eew_recv")
         if wolfx_last_heartbeat is None:
             wolfx_icon, wolfx_detail = "[ - ]", "heartbeat 未受信（起動中）"
         else:
@@ -366,12 +376,12 @@ class SystemCog(commands.Cog):
 
         # -- タスク稼働状態 --
         task_lines = [
-            f"{task_status(self._quake_attr('fetch_quake'))} **fetch_quake**",
+            f"{task_status(self._quake_info_attr('fetch_quake'))} **fetch_quake**",
             f"{task_status(self._tsunami_attr('fetch_tsunami'))} **fetch_tsunami**",
             f"{task_status(self._tsunami_attr('fetch_tsunami_observation'))} **fetch_tsunami_observation**",
             f"{task_status(self._usgs_attr('fetch_usgs_quake')) if USGS_ENABLED else '[ - ] 無効'} **fetch_usgs_quake**",
-            f"{asyncio_task_status(self._quake_attr('speech_task'))} **speech_worker (quake)**",
-            f"{asyncio_task_status(self._quake_attr('mp3_task'))} **mp3_worker (quake)**",
+            f"{asyncio_task_status(self._audio_attr('speech_task'))} **speech_worker (audio)**",
+            f"{asyncio_task_status(self._audio_attr('mp3_task'))} **mp3_worker (audio)**",
             f"{asyncio_task_status(self._volcano_attr('volcano_task'))} **volcano_poller**",
             f"{asyncio_task_status(self._volcano_attr('eruption_task'))} **eruption_poller**",
             f"{asyncio_task_status(self._volcano_attr('warning_task'))} **warning_poller**",
@@ -476,9 +486,9 @@ class SystemCog(commands.Cog):
                         "recv_count": recv_count.get(key, 0),
                     }
 
-                # EEW 状態（QuakeEewCog から取得）
+                # EEW 状態（EewCog から取得）
                 now_mono = time.monotonic()
-                wolfx_hb = self._quake_attr("_wolfx_last_heartbeat")
+                wolfx_hb = self._eew_attr("_wolfx_last_heartbeat")
                 if wolfx_hb is None:
                     wolfx_ws_status = "connecting"
                     wolfx_hb_elapsed = None
@@ -491,7 +501,7 @@ class SystemCog(commands.Cog):
                         "ws_status": wolfx_ws_status,
                         "heartbeat_elapsed_sec": wolfx_hb_elapsed,
                         "heartbeat_timeout_sec": WOLFX_HEARTBEAT_TIMEOUT,
-                        "last_eew_id": self._quake_attr("last_eew_event_id"),
+                        "last_eew_id": self._eew_attr("last_eew_event_id"),
                         **_api_info("wolfx"),
                     },
                     "p2p_eew": {
@@ -516,12 +526,12 @@ class SystemCog(commands.Cog):
                     return "done"
 
                 tasks_info = {
-                    "fetch_quake": _loop_status(self._quake_attr("fetch_quake")),
+                    "fetch_quake": _loop_status(self._quake_info_attr("fetch_quake")),
                     "fetch_tsunami": _loop_status(self._tsunami_attr("fetch_tsunami")),
                     "fetch_tsunami_observation": _loop_status(self._tsunami_attr("fetch_tsunami_observation")),
                     "fetch_usgs_quake": _loop_status(self._usgs_attr("fetch_usgs_quake")) if USGS_ENABLED else "disabled",
-                    "speech_worker_quake": _task_status(self._quake_attr("speech_task")),
-                    "mp3_worker_quake": _task_status(self._quake_attr("mp3_task")),
+                    "speech_worker_audio": _task_status(self._audio_attr("speech_task")),
+                    "mp3_worker_audio": _task_status(self._audio_attr("mp3_task")),
                     "volcano_poller": _task_status(self._volcano_attr("volcano_task")),
                     "eruption_poller": _task_status(self._volcano_attr("eruption_task")),
                     "warning_poller": _task_status(self._volcano_attr("warning_task")),
@@ -592,7 +602,7 @@ class SystemCog(commands.Cog):
                     "tasks": tasks_info,
                     # 後方互換フィールド
                     "last_eew": {
-                        "event_id": self._quake_attr("last_eew_event_id"),
+                        "event_id": self._eew_attr("last_eew_event_id"),
                         "timestamp": last_recv.get("wolfx").isoformat() if last_recv.get("wolfx") else None,
                     },
                     "volcano_monitoring": {

@@ -227,11 +227,18 @@ python bot.py
 ### 音声設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
-| `AQUESTALK_PATH` | （空） | AquesTalkPi の実行ファイルパス（未設定で音声無効） |
+| `TTS_ENGINE` | aquestalk | 読み上げエンジン（`aquestalk` / `scratchtts`） |
+| `AQUESTALK_PATH` | （空） | AquesTalkPi の実行ファイルパス（未設定で音声無効。`TTS_ENGINE=aquestalk` 時のみ使用） |
 | `AQUESTALK_SPEED` | 150 | AquesTalkPi の読み上げ速度 |
+| `SCRATCHTTS_URL` | Scratch公式API | ScratchTTS のエンドポイント（`TTS_ENGINE=scratchtts` 時のみ使用） |
+| `SCRATCHTTS_LOCALE` | ja-JP | ScratchTTS の言語ロケール |
+| `SCRATCHTTS_GENDER` | female | ScratchTTS の声の性別（`female` / `male`） |
+| `SCRATCHTTS_TIMEOUT_SEC` | 10 | ScratchTTS APIリクエストのタイムアウト秒数 |
 | `AUDIO_PLAYER` | aplay | 音声再生コマンド（`aplay` / `mpg123` 等） |
 | `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ |
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
+
+`TTS_ENGINE=scratchtts` を選択した場合、取得した音声は ffmpeg で約3セミトーン（周波数比 約1.19倍）ピッチアップしてから再生されます（再生時間は変わりません）。ピッチシフトには `ffmpeg` コマンドが必要です。
 
 ### ログ設定
 | 変数名 | 既定値 | 説明 |
@@ -520,7 +527,9 @@ QTL_Bot/
 ├── bot.py                  - エントリーポイント（Cog 登録・起動のみ）
 ├── cogs/
 │   ├── apm.py                - ApmCog: Mackerel APM 連携（OpenTelemetry OTLP）
-│   ├── quake.py              - QuakeEewCog: 地震・EEW・P2P EEW
+│   ├── audio_shared.py       - AudioCog: 音声読み上げ・MP3再生の実体（EewCog/QuakeInfoCogが共有）
+│   ├── eew.py                - EewCog: 緊急地震速報（Wolfx/P2P EEW）専用
+│   ├── quake.py              - QuakeInfoCog: 地震情報（震度速報等）・P2P地震情報ポーリング
 │   ├── tsunami.py            - TsunamiCog: 津波観測・予報
 │   ├── volcano.py            - VolcanoCog: 火山情報・噴火速報・噴火警報
 │   ├── usgs.py               - UsgsCog: USGS 海外地震情報
@@ -530,6 +539,10 @@ QTL_Bot/
 └── core/
     ├── config.py                  - 環境変数読み込み・定数定義
     ├── logging_setup.py           - ログ設定（RotatingFileHandler・重複抑制）
+    ├── audio.py                   - AudioMixin（キュー実体を持つCog用）/ AudioClientMixin（AudioCog参照用）
+    ├── tts_engines.py             - TTSエンジン（AquesTalkPi/ScratchTTS）の切り替え・音声合成
+    ├── ws_helpers.py              - WebSocket自動再接続の共通ループ（EewCog等が使用）
+    ├── fetch_backoff.py           - HTTPポーリングのCircuit Breaker（連続失敗時のバックオフ）
     ├── kyoshin_shared.py          - 震度色分け・両画像取得・振動レベル取得の共通ロジック
     │                                 （EEW発表時通知・画像解析検知通知の両方から利用）
     ├── kyoshin_image_analyzer.py  - HSVマスク処理による画像→震度グリッド変換
@@ -541,7 +554,9 @@ QTL_Bot/
 | Cog | ファイル | 主な責務 |
 |:---|:---|:---|
 | `ApmCog` | `cogs/apm.py` | OpenTelemetry 計装・Mackerel OTLP 送信（デフォルト無効） |
-| `QuakeEewCog` | `cogs/quake.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・P2P API（地震速報）・EEW発表時の強震モニタ通知 |
+| `AudioCog` | `cogs/audio_shared.py` | 音声読み上げ・MP3再生の実体（EewCog・QuakeInfoCogが共有） |
+| `EewCog` | `cogs/eew.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・EEW発表時の強震モニタ通知 |
+| `QuakeInfoCog` | `cogs/quake.py` | P2P API（地震速報・各地の震度等）ポーリング・通知 |
 | `TsunamiCog` | `cogs/tsunami.py` | JMA 津波 API ポーリング・観測情報・予報 / 警報通知 |
 | `VolcanoCog` | `cogs/volcano.py` | JMA 火山 API ポーリング・噴火速報・噴火警報 |
 | `UsgsCog` | `cogs/usgs.py` | USGS API ポーリング・海外地震フィルタリング・通知 |

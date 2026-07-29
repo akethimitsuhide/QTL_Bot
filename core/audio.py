@@ -1,7 +1,16 @@
 """
 core/audio.py
 =============
-音声読み上げ（AquesTalkPi）・MP3再生を提供する Mixin クラス。
+音声読み上げ（AquesTalkPi / ScratchTTS）・MP3再生を提供する Mixin クラス。
+
+【TTS_ENGINE による読み上げエンジンの切り替え】
+.env の TTS_ENGINE で読み上げエンジンを選択できる：
+    TTS_ENGINE=aquestalk  （デフォルト）ローカルの AquesTalkPi バイナリを使用
+    TTS_ENGINE=scratchtts Scratch の音声合成APIをネットワーク経由で使用
+実際の音声合成は core/tts_engines.py の synthesize() に委譲している。
+ScratchTTS を選んだ場合、取得した音声は ffmpeg で約3セミトーン
+（core.tts_engines.SCRATCHTTS_PITCH_SEMITONES）ピッチアップしてから再生する
+（テンポ・再生時間は変えずピッチだけを上げる。詳細は tts_engines.py 参照）。
 
 【設計方針: なぜ Mixin なのか】
 speak_local() や play_mp3() は notify_quake / notify_tsunami / notify_volcano
@@ -13,7 +22,7 @@ speak_local() や play_mp3() は notify_quake / notify_tsunami / notify_volcano
 自分自身の self.speech_queue / self.mp3_queue / self.audio_files を使って
 これらのメソッドをそのまま呼び出せるようになる。
 
-    class QuakeEewCog(commands.Cog, AudioMixin):
+    class TsunamiCog(commands.Cog, AudioMixin):
         def __init__(self, bot):
             self.bot = bot
             self.speech_queue = asyncio.PriorityQueue(maxsize=SPEECH_QUEUE_MAXSIZE)
@@ -21,13 +30,17 @@ speak_local() や play_mp3() は notify_quake / notify_tsunami / notify_volcano
             self.audio_files  = {...}
             ...
 
-【注意: Step1時点では暫定共有】
-現時点では quake.py 以外のCogがまだ分割されていないため、
-speech_queue / mp3_queue は「メインCog（旧 QuakeTsunamiCog）」が
-実質的に保持し続ける。全Cog分割が完了した段階で、
-音声再生を専用の1つの AudioCog に集約し、他のCogは
-`self.bot.get_cog("AudioCog").play_mp3(...)` のように参照する
-形へ移行するのが最終形（Step2以降の課題）。
+【Step8時点: 音声キューの実体を持つCogと、それを参照するだけのCogが混在】
+cogs/audio_shared.py の AudioCog が「音声の実体」を持つ唯一の Cog になった
+（EewCog・QuakeInfoCog がこれを使う）。この2Cogは自分自身のキューを持たず、
+AudioMixin ではなく本ファイルの AudioClientMixin を継承し、
+`self.bot.get_cog("AudioCog").speak_local(...)` に相当する処理を
+簡潔に呼び出せるようにしている。
+
+一方 tsunami.py / volcano.py / usgs.py / other.py は今なお AudioMixin を
+直接継承し、自分自身の speech_queue / mp3_queue を保持したままである
+（Step8ではEEW・地震情報の2Cogのみを対象とした）。将来的に全Cogを
+AudioCogへ統合する場合は、これらのCogも AudioClientMixin に置き換える。
 
 【bot.py からの移行元】
 元 bot.py の speak_local() 〜 play_mp3() 定義（旧 1602〜1728行目付近）。
@@ -40,7 +53,9 @@ import logging
 from core.config import (
     AQUESTALK_PATH, AQUESTALK_SPEED, AUDIO_PLAYER,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
+    TTS_ENGINE, SCRATCHTTS_LOCALE, SCRATCHTTS_GENDER,
 )
+from core.tts_engines import synthesize, SCRATCHTTS_PITCH_SEMITONES
 
 logger = logging.getLogger("QTLBot")
 
@@ -51,6 +66,39 @@ try:
 except Exception as e:
     _PYGAME_AVAILABLE = False
     print(f"[WARNING] pygame.mixer の初期化に失敗しました。MP3再生は無効です: {e}")
+
+
+class AudioClientMixin:
+    """
+    自分自身のキューを持たず、共通の AudioCog（cogs/audio_shared.py）に
+    処理を委譲するための薄い Mixin。
+
+    EewCog・QuakeInfoCog のように「音声の実体は持たないが speak_local /
+    play_mp3 を呼びたい」Cogがこれを継承する。継承先は self.bot を
+    持っている必要がある（commands.Cog は通常持っている）。
+
+    AudioCog が何らかの理由でまだ登録されていない場合は、警告ログを
+    出すだけで例外にはしない（起動順序の問題で通知自体が失われるのを防ぐ）。
+    """
+
+    def _get_audio_cog(self):
+        audio_cog = self.bot.get_cog("AudioCog")
+        if audio_cog is None:
+            logger.warning(
+                "AudioCog が見つかりません。音声再生をスキップします "
+                "（bot.py での登録順序を確認してください）"
+            )
+        return audio_cog
+
+    async def speak_local(self, text: str, priority: int = 2):
+        audio_cog = self._get_audio_cog()
+        if audio_cog is not None:
+            await audio_cog.speak_local(text, priority)
+
+    async def play_mp3(self, key: str):
+        audio_cog = self._get_audio_cog()
+        if audio_cog is not None:
+            await audio_cog.play_mp3(key)
 
 
 class AudioMixin:
@@ -79,10 +127,16 @@ class AudioMixin:
             )
 
     async def speech_worker(self):
-        if not AQUESTALK_PATH:
+        if TTS_ENGINE == "aquestalk" and not AQUESTALK_PATH:
             logger.info("AQUESTALK_PATH 未設定のため音声読み上げ機能は無効です")
             return
-        logger.info(f"音声読み上げ開始: {AQUESTALK_PATH} / player={AUDIO_PLAYER} / speed={AQUESTALK_SPEED}")
+        logger.info(
+            f"音声読み上げ開始: engine={TTS_ENGINE} "
+            f"/ player={AUDIO_PLAYER}"
+            + (f" / aquestalk={AQUESTALK_PATH} speed={AQUESTALK_SPEED}" if TTS_ENGINE == "aquestalk" else
+               f" / scratchtts locale={SCRATCHTTS_LOCALE} gender={SCRATCHTTS_GENDER} "
+               f"pitch=+{SCRATCHTTS_PITCH_SEMITONES}semitones")
+        )
         queue_warn_threshold = max(SPEECH_QUEUE_MAXSIZE * 0.8, 1)
 
         while not self.bot.is_closed():
@@ -94,31 +148,22 @@ class AudioMixin:
                     logger.warning(f"音声キュー圧力高 (深さ: {queue_size}/{SPEECH_QUEUE_MAXSIZE})")
 
                 logger.info(f"音声再生開始 [優先度{priority}] (キュー深さ: {queue_size}): {text[:60]}")
-                escaped = text.replace('"', '\\"')
 
-                tts_proc = await asyncio.create_subprocess_exec(
-                    AQUESTALK_PATH, "-s", str(AQUESTALK_SPEED), escaped,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                tts_out, tts_err = await tts_proc.communicate()
-                logger.info(f"AquesTalkPi 終了コード={tts_proc.returncode} 出力バイト数={len(tts_out)}")
-                if tts_err:
-                    logger.warning(f"AquesTalkPi stderr: {tts_err.decode(errors='replace')[:200]}")
+                audio_out = await synthesize(TTS_ENGINE, text)
 
-                if tts_out:
+                if audio_out:
                     play_proc = await asyncio.create_subprocess_exec(
                         AUDIO_PLAYER, "-",
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    _, play_err = await play_proc.communicate(input=tts_out)
+                    _, play_err = await play_proc.communicate(input=audio_out)
                     logger.info(f"{AUDIO_PLAYER} 終了コード={play_proc.returncode}")
                     if play_err and play_proc.returncode != 0:
                         logger.warning(f"{AUDIO_PLAYER} stderr: {play_err.decode(errors='replace')[:200]}")
                 else:
-                    logger.warning(f"音声生成失敗（出力なし）: {text[:60]}")
+                    logger.warning(f"音声生成失敗（出力なし, engine={TTS_ENGINE}）: {text[:60]}")
 
                 self.speech_queue.task_done()
                 await asyncio.sleep(0.8)

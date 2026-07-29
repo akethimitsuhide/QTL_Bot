@@ -18,8 +18,8 @@ None を返す。SystemCog はほぼ全てのCogの状態を横断的に集約�
 【使用例】
     from core.cog_utils import get_cog_attr
 
-    last_recv = get_cog_attr(bot, "QuakeEewCog", "_last_recv", default={})
-    wolfx_hb  = get_cog_attr(bot, "QuakeEewCog", "_wolfx_last_heartbeat")
+    last_recv = get_cog_attr(bot, "EewCog", "_last_recv", default={})
+    wolfx_hb  = get_cog_attr(bot, "EewCog", "_wolfx_last_heartbeat")
 """
 from discord.ext import commands
 

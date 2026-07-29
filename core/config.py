@@ -99,8 +99,15 @@ except ValueError:
     raise SystemExit(1)
 
 # ===============================
-# 音声設定（AquesTalkPi）
+# 音声設定（AquesTalkPi / ScratchTTS）
 # ===============================
+# TTS_ENGINE: "aquestalk"（デフォルト、ローカルのAquesTalkPiバイナリを使用）
+#             または "scratchtts"（Scratch の音声合成APIをネットワーク経由で使用）
+TTS_ENGINE = os.getenv("TTS_ENGINE", "aquestalk").strip().lower()
+if TTS_ENGINE not in ("aquestalk", "scratchtts"):
+    logger.warning(f"TTS_ENGINE の値が不正です（{TTS_ENGINE!r}）。aquestalk にフォールバックします")
+    TTS_ENGINE = "aquestalk"
+
 _raw_aquestalk = os.getenv("AQUESTALK_PATH", "").strip().rstrip("/")
 if _raw_aquestalk:
     if os.path.isdir(_raw_aquestalk):
@@ -119,6 +126,22 @@ if _raw_aquestalk:
 AQUESTALK_PATH  = _raw_aquestalk or None
 AQUESTALK_SPEED = int(os.getenv("AQUESTALK_SPEED", "150"))
 AUDIO_PLAYER    = os.getenv("AUDIO_PLAYER", "aplay")
+
+if TTS_ENGINE == "aquestalk" and not AQUESTALK_PATH:
+    logger.info("AQUESTALK_PATH 未設定のため音声読み上げ機能は無効です（TTS_ENGINE=aquestalk）")
+
+# ── ScratchTTS（Scratch音声合成API） ──
+# エンドポイント仕様: https://synthesis-service.scratch.mit.edu/synth
+#   ?locale=<言語ロケール>&gender=<female|male>&text=<喋る内容>
+# ネットワーク経由のためレイテンシがAquesTalkPiより大きく、
+# 外部サービスの可用性に依存する点に留意（fetch失敗時は読み上げをスキップする）。
+SCRATCHTTS_URL    = os.getenv("SCRATCHTTS_URL", "https://synthesis-service.scratch.mit.edu/synth")
+SCRATCHTTS_LOCALE = os.getenv("SCRATCHTTS_LOCALE", "ja-JP")
+SCRATCHTTS_GENDER = os.getenv("SCRATCHTTS_GENDER", "female").strip().lower()
+if SCRATCHTTS_GENDER not in ("female", "male"):
+    logger.warning(f"SCRATCHTTS_GENDER の値が不正です（{SCRATCHTTS_GENDER!r}）。female にフォールバックします")
+    SCRATCHTTS_GENDER = "female"
+SCRATCHTTS_TIMEOUT_SEC = float(os.getenv("SCRATCHTTS_TIMEOUT_SEC", "10"))
 
 # ===============================
 # チャンネル ID 設定
