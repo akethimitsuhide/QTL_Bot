@@ -413,6 +413,7 @@ class EewCog(commands.Cog, AudioClientMixin):
             "cumulative_warn_areas": set(),
             "last_warn_areas": set(),
             "audio_flags": {"warning": False, "int3": False, "first": False, "final": False, "cancel": False},
+            "audio_warn_areas": set(),
             "prev_data": None,
         })
         state["_touched"] = now
@@ -677,7 +678,19 @@ class EewCog(commands.Cog, AudioClientMixin):
                 self.monitored_event_id = None
                 if self.vibration_monitor_task:
                     self.vibration_monitor_task.cancel()
-            asyncio.create_task(self.generate_and_speak_eew(data, cumulative_warn_areas))
+            # generate_and_speak_eew と play_eew_sound はどちらも
+            # self.eew_state[event_id] の同じフィールド（last_warn_areas /
+            # prev_data）を参照・更新する。以前は generate_and_speak_eew を
+            # asyncio.create_task で非同期実行していたため、play_eew_sound
+            # が先に完了して state を書き換えてしまい、generate_and_speak_eew
+            # 側の「前回との比較」が常に「変化なし」に潰れてしまう競合状態
+            # (race condition) があった（例: 警報対象地域が拡大しても
+            # 「緊急地震速報。○○では強い揺れに警戒してください」が
+            # 一切読み上げられず、high_alert.mp3 だけが鳴る）。
+            # 読み上げ判定（何をどう読むか）を先に確定・実行し、
+            # その後に効果音を鳴らす順序に統一することで、
+            # 両者が同じ state を同時に触らないようにする。
+            await self.generate_and_speak_eew(data, cumulative_warn_areas)
             await self.play_eew_sound(data, cumulative_warn_areas)
 
         except Exception:
@@ -758,6 +771,18 @@ class EewCog(commands.Cog, AudioClientMixin):
     # EEW 音声再生ロジック
     # ===============================
     async def play_eew_sound(self, data, cumulative_warn_areas: set | None = None):
+        """
+        EEW 用の効果音（MP3）を鳴らすかどうかだけを判定する。
+
+        読み上げ（generate_and_speak_eew）が使う state["last_warn_areas"] /
+        state["prev_data"] は一切更新しない。これらは「次に読み上げる時に
+        何と比較するか」を決める読み上げ専用の状態であり、効果音の再生判定
+        （state["audio_flags"] と state["audio_warn_areas"]）とは独立させる
+        ことで、どちらの処理が先に完了しても互いの判定に影響しないようにする。
+        （両者が同じフィールドを共有していたことで、地域拡大時に
+        「緊急地震速報。○○では強い揺れに警戒してください」が読み上げられず
+        high_alert.mp3 だけが鳴る不具合があった。）
+        """
         is_cancel = data.get("isCancel", False)
         serial = int(data.get("Serial", 1))
         is_final = data.get("isFinal", False)
@@ -769,8 +794,10 @@ class EewCog(commands.Cog, AudioClientMixin):
             "cumulative_warn_areas": set(),
             "last_warn_areas": set(),
             "audio_flags": {"warning": False, "int3": False, "first": False, "final": False, "cancel": False},
+            "audio_warn_areas": set(),
             "prev_data": None,
         })
+        state.setdefault("audio_warn_areas", set())
         audio_flags = state["audio_flags"]
 
         self.last_eew_event_id = event_id
@@ -780,8 +807,6 @@ class EewCog(commands.Cog, AudioClientMixin):
                 await self.play_mp3("eewC")
                 audio_flags["cancel"] = True
                 logger.debug("音声: eewC (キャンセル)")
-            state["prev_data"] = data.copy()
-            self.last_eew_data = data.copy()
             return
 
         current_warn_areas = cumulative_warn_areas
@@ -794,14 +819,14 @@ class EewCog(commands.Cog, AudioClientMixin):
                 should_play_high_alert = True
                 audio_flags["warning"] = True
             else:
-                new_areas = current_warn_areas - state["last_warn_areas"]
+                new_areas = current_warn_areas - state["audio_warn_areas"]
                 if new_areas:
                     should_play_high_alert = True
                     logger.info(f"警報地域が追加されました: {new_areas}")
 
         if should_play_high_alert:
             await self.play_mp3("high_alert")
-            state["last_warn_areas"] = set(current_warn_areas)
+            state["audio_warn_areas"] = set(current_warn_areas)
             logger.debug(f"音声: high_alert (地域数: {len(current_warn_areas)})")
             return
 
@@ -811,8 +836,6 @@ class EewCog(commands.Cog, AudioClientMixin):
                 await self.play_mp3("eew3")
                 audio_flags["int3"] = True
                 logger.debug("音声: eew3 (震度3以上)")
-                state["prev_data"] = data.copy()
-                self.last_eew_data = data.copy()
                 return
 
         if is_final and not audio_flags.get("final"):
