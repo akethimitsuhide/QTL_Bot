@@ -60,6 +60,20 @@ logger = logging.getLogger("QTLBot")
 
 WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
 
+# Web Dashboard のバインドアドレス。
+# デフォルトは 127.0.0.1（ローカルホストのみ）にし、以前の "0.0.0.0"
+# （誰でもアクセス可能）を既定挙動から外した。LAN内の別端末から見たい
+# 場合などは .env で明示的に WEB_DASHBOARD_HOST=0.0.0.0 等を指定する。
+WEB_DASHBOARD_HOST = os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1").strip()
+
+# アクセスを許可するクライアントIPのカンマ区切りリスト（例: "192.168.1.10,192.168.1.20"）。
+# 空（未設定）の場合はIP制限を行わない（WEB_DASHBOARD_HOST側の制御のみに委ねる）。
+# CIDR表記（例: "192.168.1.0/24"）にも対応する。
+_raw_allowed_ips = os.getenv("WEB_DASHBOARD_ALLOWED_IPS", "").strip()
+WEB_DASHBOARD_ALLOWED_IPS = [
+    ip.strip() for ip in _raw_allowed_ips.split(",") if ip.strip()
+] if _raw_allowed_ips else []
+
 
 class SystemCog(commands.Cog):
     """Bot全体の稼働状況集約・エラー監視・Web Dashboardを扱う Cog。"""
@@ -438,12 +452,49 @@ class SystemCog(commands.Cog):
     async def start_web_dashboard(self):
         """Web ダッシュボード（aiohttp）を起動"""
         from aiohttp import web
+        import ipaddress
         try:
             import psutil
         except ImportError:
             psutil = None
 
         port = WEB_DASHBOARD_PORT
+        host = WEB_DASHBOARD_HOST
+        allowed_ips = WEB_DASHBOARD_ALLOWED_IPS
+
+        # 起動時に許可IP設定の妥当性を検証しておく（CIDR/単一IPどちらも可）。
+        # 不正な値が混じっていた場合はログで警告しつつ、その値だけ無視する
+        # （Web Dashboard自体の起動を止めない）。
+        _validated_networks = []
+        for ip_str in allowed_ips:
+            try:
+                _validated_networks.append(ipaddress.ip_network(ip_str, strict=False))
+            except ValueError:
+                logger.warning(
+                    f"WEB_DASHBOARD_ALLOWED_IPS: 不正なIP/CIDR表記のためスキップします: {ip_str!r}"
+                )
+
+        @web.middleware
+        async def ip_allowlist_middleware(request, handler):
+            """
+            WEB_DASHBOARD_ALLOWED_IPS が設定されている場合、リストにない
+            送信元IPからのアクセスを 403 で拒否する。未設定（空リスト）の
+            場合は何もチェックしない（WEB_DASHBOARD_HOST 側の制御のみに委ねる）。
+            """
+            if _validated_networks:
+                peername = request.transport.get_extra_info("peername") if request.transport else None
+                client_ip_str = peername[0] if peername else request.remote
+                try:
+                    client_ip = ipaddress.ip_address(client_ip_str)
+                except (ValueError, TypeError):
+                    logger.warning(f"Web Dashboard: 送信元IPの解析に失敗しました ({client_ip_str!r}) → 拒否します")
+                    return web.json_response({"error": "forbidden"}, status=403)
+
+                if not any(client_ip in net for net in _validated_networks):
+                    logger.warning(f"Web Dashboard: 許可されていないIPからのアクセスを拒否しました: {client_ip_str}")
+                    return web.json_response({"error": "forbidden"}, status=403)
+
+            return await handler(request)
 
         async def status_handler(request):
             """GET /status - ステータス JSON を返す（拡充版）"""
@@ -635,17 +686,30 @@ class SystemCog(commands.Cog):
                 )
 
         try:
-            self._web_app = web.Application()
+            self._web_app = web.Application(middlewares=[ip_allowlist_middleware])
             self._web_app.router.add_get("/status", status_handler)
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
 
             self._web_runner = web.AppRunner(self._web_app)
             await self._web_runner.setup()
-            site = web.TCPSite(self._web_runner, "0.0.0.0", port)
+            site = web.TCPSite(self._web_runner, host, port)
             await site.start()
 
-            logger.info(f"Web ダッシュボード起動: http://localhost:{port}/status")
+            if allowed_ips:
+                ip_note = f"許可IP: {', '.join(allowed_ips)}"
+            else:
+                ip_note = "IP制限なし（WEB_DASHBOARD_HOSTのバインド範囲のみで制御）"
+            logger.info(
+                f"Web ダッシュボード起動: http://{host}:{port}/status ({ip_note})"
+            )
+            if host == "0.0.0.0" and not allowed_ips:
+                logger.warning(
+                    "Web Dashboard が 0.0.0.0（全アドレス）にバインドされ、"
+                    "かつ WEB_DASHBOARD_ALLOWED_IPS も未設定です。"
+                    "ネットワーク環境によっては外部から誰でもアクセスできる状態です。"
+                    "必要に応じて WEB_DASHBOARD_ALLOWED_IPS の設定を推奨します。"
+                )
         except Exception as e:
             logger.error(f"Web ダッシュボード起動失敗: {e}")
 

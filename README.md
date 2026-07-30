@@ -256,6 +256,10 @@ python bot.py
 |:---|:---|:---|
 | `WEB_DASHBOARD_ENABLED` | false | Web Dashboard の有効化 |
 | `WEB_DASHBOARD_PORT` | 8080 | Web Dashboard のポート番号 |
+| `WEB_DASHBOARD_HOST` | 127.0.0.1 | Web Dashboard がバインドするアドレス。このマシン以外からアクセスさせたい場合のみ `0.0.0.0` 等を指定する |
+| `WEB_DASHBOARD_ALLOWED_IPS` | （空） | アクセスを許可するクライアントIPのカンマ区切りリスト（CIDR表記可）。空の場合はIP制限なし |
+
+`WEB_DASHBOARD_HOST=0.0.0.0` にする場合は、`WEB_DASHBOARD_ALLOWED_IPS` で許可するIPを明示的に絞ることを強く推奨する（未設定のまま `0.0.0.0` にすると、ネットワーク環境によっては外部から誰でも `/status` 等にアクセスできる状態になる）。
 
 ### ステータス表示設定
 | 変数名 | 既定値 | 説明 |
@@ -389,6 +393,75 @@ curl http://localhost:8080/health/full | jq
 curl http://localhost:8080/health
 # {"status": "online"}
 ```
+
+---
+
+## CLIテスト実行機能
+
+自動テスト（pytest等）は現時点で整備されていないが、代わりに実際のBotプロセス上で
+サンプルJSONデータを使って特定Cogの通知ロジック（Embed生成・読み上げ・効果音）だけを
+動かし、実チャンネルで目視・耳で確認できるCLIテスト実行機能を用意している。
+
+### 使い方
+
+```bash
+python3 bot.py --test_<対象> <JSONファイルパス>
+```
+
+Botは通常通り起動し、全Cogの `on_ready` が完了した後に指定したテストを1回実行し、
+完了後に自動的にプロセスを終了する。
+
+### 対応している `--test_<対象>`
+
+| 対象 | 呼び出し先 | サンプルJSON |
+|:---|:---|:---|
+| `eew` | `EewCog.notify_eew` | `tests/fixtures/eew_sample.json` |
+| `quake` | `QuakeInfoCog.notify_quake` | `tests/fixtures/quake_sample.json` |
+| `tsunami` | `TsunamiCog.notify_tsunami` | `tests/fixtures/tsunami_sample.json` |
+| `tsunami_observation` | `TsunamiCog.notify_tsunami_observation` | （気象庁 VTSE51 形式のJSONを用意） |
+| `tsunami_forecast` | `TsunamiCog.notify_tsunami_forecast` | （気象庁 VTSE41 形式のJSONを用意） |
+| `volcano` | `VolcanoCog._notify_volcano` | `tests/fixtures/volcano_sample.json` |
+| `volcano_eruption` | `VolcanoCog._notify_eruption` | （eruption.json の1エントリ形式） |
+| `volcano_warning` | `VolcanoCog._notify_warning` | （warning.json の1エントリ形式） |
+| `usgs` | `UsgsCog.notify_usgs_quake` | `tests/fixtures/usgs_sample.json` |
+| `other_long_period` | `OtherInfoCog.notify_long_period` | （長周期地震動情報の list item 形式） |
+| `other_quake_advisory` | `OtherInfoCog.notify_quake_advisory` | （その他地震情報の list item 形式） |
+
+実行例：
+
+```bash
+python3 bot.py --test_eew tests/fixtures/eew_sample.json
+python3 bot.py --test_quake tests/fixtures/quake_sample.json
+python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
+```
+
+### テストであることの明記
+
+`notify_eew` / `notify_quake` / `notify_tsunami` 等、`is_test` 引数に対応している関数は、
+テスト実行時に以下の形でテストであることを明示する：
+- Embedタイトルの先頭に **「【テスト】」** を付与
+- Embedフッターに **「※これはテスト通知です。」** を表示
+
+`_notify_volcano` 等、`is_test` 引数に未対応の関数（既存実装の都合）は、
+`core/test_runner.py` の `_inject_test_marker()` により、JSON内のタイトル系フィールド
+（`headTitle` 等）へ動的に「【テスト】」を付与してから呼び出す。
+
+さらに、コンソール出力とBotログの両方に以下のような明示的なテストバナーが出力される：
+
+```
+============================================================
+[TEST] これはテスト実行です — 対象: eew (EewCog.notify_eew)
+[TEST] 入力ファイル: tests/fixtures/eew_sample.json
+============================================================
+```
+
+### サンプルJSONの追加
+
+`tests/fixtures/` に用意されていない対象（`tsunami_observation` 等）は、
+対応する `notify_*` 関数が受け取る `data` 引数と同じ構造のJSONファイルを
+自分で用意すれば動作する。気象庁の実データ（`list.json` から辿れる詳細JSON）や
+過去にDiscordへ送信された通知の元データを保存しておくと、回帰確認用の
+サンプルとして再利用しやすい。
 
 ---
 

@@ -15,6 +15,13 @@ TTS_ENGINE の設定値に応じて、テキストから再生可能な音声バ
 いずれのエンジンも、生成に失敗した場合は None を返す
 （呼び出し元の speech_worker が「生成失敗」としてログを出し、
  再生をスキップする）。
+
+【ClientSession のシングルトン化について】
+ScratchTTS用の aiohttp.ClientSession はモジュールレベルで1つだけ保持し、
+使い回す（_get_scratchtts_session()）。TCP接続確立・TLSハンドシェイクの
+コストを毎回払わないようにするための最適化。Bot終了時は
+close_scratchtts_session() を呼び出して明示的にクローズすること
+（bot.py の finally 節で呼び出し済み）。
 """
 import asyncio
 import logging
@@ -34,6 +41,41 @@ logger = logging.getLogger("QTLBot")
 # 周波数比 = 2^(semitones/12)。3セミトーンで約1.1892倍。
 SCRATCHTTS_PITCH_SEMITONES = 3.0
 _PITCH_RATIO = 2 ** (SCRATCHTTS_PITCH_SEMITONES / 12)
+
+# ── ScratchTTS 用 ClientSession シングルトン ──
+# 以前は synthesize_scratchtts() 呼び出しのたびに aiohttp.ClientSession を
+# 新規生成していたため、TCP接続確立・TLSハンドシェイクのコストが読み上げの
+# たびに発生していた（ScratchTTSは仕様上「重複読み上げOK」で呼び出し頻度が
+# 高くなりうるため、影響が大きい）。モジュールレベルで1つのセッションを
+# 保持し、初回呼び出し時にのみ生成して使い回す。
+# ClientSession はイベントループに紐づくため、生成は必ず実行中の
+# イベントループ内（= 非同期関数の中）で行う。二重生成を防ぐため
+# asyncio.Lock で保護する。
+_scratchtts_session: aiohttp.ClientSession | None = None
+_scratchtts_session_lock = asyncio.Lock()
+
+
+async def _get_scratchtts_session() -> aiohttp.ClientSession:
+    """ScratchTTS用のClientSessionをシングルトンとして取得する（なければ生成）。"""
+    global _scratchtts_session
+    if _scratchtts_session is None or _scratchtts_session.closed:
+        async with _scratchtts_session_lock:
+            # ロック待ちの間に他のタスクが生成済みの可能性があるため再チェック
+            if _scratchtts_session is None or _scratchtts_session.closed:
+                _scratchtts_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=SCRATCHTTS_TIMEOUT_SEC)
+                )
+                logger.info("ScratchTTS: ClientSession を新規生成しました")
+    return _scratchtts_session
+
+
+async def close_scratchtts_session() -> None:
+    """Bot終了時に呼び出し、ScratchTTS用のClientSessionを明示的に閉じる。"""
+    global _scratchtts_session
+    if _scratchtts_session is not None and not _scratchtts_session.closed:
+        await _scratchtts_session.close()
+        logger.info("ScratchTTS: ClientSession を閉じました")
+    _scratchtts_session = None
 
 
 async def synthesize_aquestalk(text: str) -> bytes | None:
@@ -74,13 +116,12 @@ async def synthesize_scratchtts(text: str) -> bytes | None:
     url = f"{SCRATCHTTS_URL}?{urllib.parse.urlencode(params)}"
 
     try:
-        timeout = aiohttp.ClientTimeout(total=SCRATCHTTS_TIMEOUT_SEC)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    logger.warning(f"ScratchTTS 取得失敗: HTTP {resp.status} ({text[:30]})")
-                    return None
-                raw_audio = await resp.read()
+        session = await _get_scratchtts_session()
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                logger.warning(f"ScratchTTS 取得失敗: HTTP {resp.status} ({text[:30]})")
+                return None
+            raw_audio = await resp.read()
     except asyncio.TimeoutError:
         logger.warning(f"ScratchTTS タイムアウト（{SCRATCHTTS_TIMEOUT_SEC}秒）: {text[:30]}")
         return None
