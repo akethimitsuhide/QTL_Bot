@@ -46,11 +46,18 @@ class P2PImageMixin:
             return None
         return f"https://cdn.p2pquake.net/app/images/{image_id}_trim_big.png"
 
-    async def _attach_p2p_image(self, message: discord.Message, image_id: str) -> None:
+    async def _attach_p2p_image(self, message: discord.Message, image_id: str,
+                                 on_failure=None) -> None:
         """
         P2P CDN への画像アップロード遅延対策。
         通知直後は画像が未生成のことがあるため、最大 MAX_RETRY 回リトライして
         URL が有効になったタイミングでメッセージを編集して画像を追加する。
+
+        on_failure : 全リトライ失敗時に呼ばれるコールバック（省略可）。
+            `await on_failure(message, url)` の形で1回だけ呼び出される。
+            呼び出し元（notify_quake等）はこれを使って、地図画像が
+            結局表示できなかった場合のフォールバック処理
+            （本文への震度一覧追記・リンクのみ貼付など）を行える。
         """
         if not image_id:
             return
@@ -88,3 +95,8 @@ class P2PImageMixin:
                 logger.debug(f"P2P画像確認エラー: {e} attempt={attempt+1}")
 
         logger.info(f"P2P画像: {MAX_RETRY}回リトライ後も取得できませんでした id={image_id}")
+        if on_failure:
+            try:
+                await on_failure(message, url)
+            except Exception as e:
+                logger.error(f"P2P画像取得失敗時のフォールバック処理でエラー: {e}")

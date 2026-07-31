@@ -112,3 +112,29 @@ def format_jma_time(raw: str) -> str:
         )
     except Exception:
         return raw
+
+
+def format_latlon(latitude: float, longitude: float) -> str:
+    """
+    10進数の緯度経度を「度分秒（小数第1位までの秒）」形式の文字列に変換する。
+
+    例: 32.561056, 130.378667 -> "32°33′39.8、130°22′43.2"
+
+    震源情報が存在しない場合（-200）等、変換できない入力の場合は
+    空文字列を返す。
+    """
+    def _to_dms(value: float) -> str:
+        deg = int(abs(value))
+        minutes_full = (abs(value) - deg) * 60
+        minutes = int(minutes_full)
+        seconds = (minutes_full - minutes) * 60
+        return f"{deg}°{minutes:02d}′{seconds:.1f}"
+
+    try:
+        if latitude is None or longitude is None:
+            return ""
+        if latitude == -200 or longitude == -200:
+            return ""
+        return f"{_to_dms(latitude)}、{_to_dms(longitude)}"
+    except Exception:
+        return ""
