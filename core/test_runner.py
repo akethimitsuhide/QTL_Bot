@@ -46,6 +46,11 @@ import sys
 
 logger = logging.getLogger("QTLBot")
 
+# CLIテストモードで起動しているかどうかを、他モジュール（cogs/system.py の
+# Web Dashboard起動判定など）から参照できるようにするフラグ。
+# bot.py のモジュールロード時に parse_test_args() の結果に応じてセットされる。
+CLI_TEST_MODE = False
+
 
 def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     """
@@ -61,9 +66,11 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     # 未知の引数（Botの他オプション等）があってもエラーにしない
     known_args, _ = parser.parse_known_args(argv)
 
+    global CLI_TEST_MODE
     for cog_key in TEST_TARGETS:
         json_path = getattr(known_args, f"test_{cog_key}", None)
         if json_path:
+            CLI_TEST_MODE = True
             return cog_key, json_path
 
     return None
@@ -102,24 +109,30 @@ TEST_TARGETS = {
     "eew": {
         "cog_name": "EewCog",
         "method": "notify_eew",
+        "extra_kwargs": {"start_monitor": False},
+        "expected_fields": ["EventID", "Hypocenter", "MaxIntensity"],
     },
     "quake": {
         "cog_name": "QuakeInfoCog",
         "method": "notify_quake",
+        "expected_fields": ["Hypocenter", "MaxIntensity"],
     },
     "tsunami": {
         "cog_name": "TsunamiCog",
         "method": "notify_tsunami",
+        "expected_fields": ["areas", "issue"],
     },
     "tsunami_observation": {
         "cog_name": "TsunamiCog",
         "method": "notify_tsunami_observation",
         "data_kwarg": "detail",
+        "expected_fields": ["areas"],
     },
     "tsunami_forecast": {
         "cog_name": "TsunamiCog",
         "method": "notify_tsunami_forecast",
         "data_kwarg": "detail",
+        "expected_fields": ["areas"],
     },
     "volcano": {
         "cog_name": "VolcanoCog",
@@ -128,6 +141,7 @@ TEST_TARGETS = {
         "supports_is_test": False,
         "extra_kwargs": {"event_id": "TEST-0000000000"},
         "test_marker_field": "headTitle",
+        "expected_fields": ["headTitle"],
     },
     "volcano_eruption": {
         "cog_name": "VolcanoCog",
@@ -136,6 +150,7 @@ TEST_TARGETS = {
         "supports_is_test": False,
         "extra_kwargs": {"event_id": "TEST-0000000000"},
         "test_marker_field": "headTitle",
+        "expected_fields": ["headTitle"],
     },
     "volcano_warning": {
         "cog_name": "VolcanoCog",
@@ -144,6 +159,7 @@ TEST_TARGETS = {
         "supports_is_test": False,
         "extra_kwargs": {"event_id": "TEST-0000000000"},
         "test_marker_field": "headTitle",
+        "expected_fields": ["headTitle"],
     },
     "usgs": {
         "cog_name": "UsgsCog",
@@ -151,18 +167,51 @@ TEST_TARGETS = {
         "data_kwarg": "feature",
         "supports_is_test": False,
         "extra_kwargs": {"extra_note": "【テスト】これはテスト通知です"},
+        "expected_fields": ["properties", "geometry"],
     },
     "other_long_period": {
         "cog_name": "OtherInfoCog",
         "method": "notify_long_period",
         "data_kwarg": "list_item",
+        "expected_fields": [],
     },
     "other_quake_advisory": {
         "cog_name": "OtherInfoCog",
         "method": "notify_quake_advisory",
         "data_kwarg": "list_item",
+        "expected_fields": [],
     },
 }
+
+
+def validate_expected_fields(cog_key: str, data: dict) -> None:
+    """
+    指定した cog_key の TEST_TARGETS エントリに定義された expected_fields が
+    data 内に存在するか検証する。欠けているフィールドがあれば、コマンド指定
+    ミス（例: --test_eew のつもりが quake 用 JSON を渡してしまった等）の
+    可能性が高いため、警告のみ出して処理は継続する（テスト用途のため中断は
+    しない）。
+    """
+    target = TEST_TARGETS.get(cog_key)
+    if not target:
+        return
+    expected_fields = target.get("expected_fields", [])
+    if not expected_fields:
+        return
+    missing = [f for f in expected_fields if f not in data]
+    if missing:
+        print(
+            f"[TEST] 警告: --test_{cog_key} に指定したJSONに想定フィールドが"
+            f"見つかりません: {missing}"
+        )
+        print(
+            f"[TEST]       (対象JSONファイルを取り違えている可能性があります。"
+            f" {cog_key} が期待するフィールド: {expected_fields})"
+        )
+        logger.warning(
+            f"CLIテスト: --test_{cog_key} の入力JSONに想定フィールド不足 "
+            f"missing={missing} expected={expected_fields}"
+        )
 
 
 def _inject_test_marker(data, test_marker_field: str | None):
@@ -205,6 +254,7 @@ async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
     )
 
     data = load_test_json(json_path)
+    validate_expected_fields(cog_key, data)
 
     cog = bot.get_cog(target["cog_name"])
     if cog is None:

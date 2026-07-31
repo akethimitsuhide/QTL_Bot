@@ -55,6 +55,7 @@ from core.config import (
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
+from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
 
@@ -162,7 +163,16 @@ class SystemCog(commands.Cog):
             self.resource_monitor_task = self.bot.loop.create_task(self.resource_monitor())
             logger.info("リソース監視タスクを開始しました")
 
-        if os.getenv("WEB_DASHBOARD_ENABLED", "true").lower() == "true":
+        if _test_runner_module.CLI_TEST_MODE:
+            # CLIテストモード（python3 bot.py --test_xxx ...）では、
+            # systemd の本番プロセス（discord-bot.service）が既に同じ
+            # WEB_DASHBOARD_PORT を使用中の可能性が高いため、Web Dashboard
+            # の起動自体をスキップする（ポート衝突エラーの発生源を断つ）。
+            logger.info(
+                "CLIテストモードのため Web ダッシュボードの起動をスキップします"
+                "（本番プロセスとのポート衝突を回避）"
+            )
+        elif os.getenv("WEB_DASHBOARD_ENABLED", "true").lower() == "true":
             self.bot.loop.create_task(self.start_web_dashboard())
 
         # スラッシュコマンドを同期
@@ -710,6 +720,13 @@ class SystemCog(commands.Cog):
                     "ネットワーク環境によっては外部から誰でもアクセスできる状態です。"
                     "必要に応じて WEB_DASHBOARD_ALLOWED_IPS の設定を推奨します。"
                 )
+        except OSError as e:
+            # [Errno 98] Address already in use 等。ポートが既に使用中の
+            # ケースが大半で、多くは他プロセス（本番のsystemdサービスや
+            # 前回終了しきれなかったプロセス）との衝突が原因。
+            logger.error(
+                f"Web ダッシュボード起動失敗（ポート {port} が使用中の可能性）: {e}"
+            )
         except Exception as e:
             logger.error(f"Web ダッシュボード起動失敗: {e}")
 

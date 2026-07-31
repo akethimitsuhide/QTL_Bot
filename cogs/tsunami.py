@@ -56,6 +56,13 @@ from core.p2p_image import P2PImageMixin
 
 logger = logging.getLogger("QTLBot")
 
+# 津波警報等級の重要度順（高い順）。notify_tsunami の Embed本文組み立てと
+# 読み上げ文言の両方から参照するため、モジュールレベルに定義する
+# （以前は notify_tsunami 内の cancelled=False 分岐だけのローカル変数
+# だったため、cancelled=True 側の読み上げロジックから参照すると
+# NameError になっていた）
+GRADE_ORDER = ["MajorWarning", "Warning", "Watch", "Unknown"]
+
 
 class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
     """津波情報（P2P・JMA）を扱う Cog。"""
@@ -412,6 +419,11 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             source = data.get("issue", {}).get("source", "P2P地震情報")
 
+            # cancelled=True のときも読み上げブロックから安全に参照できるよう、
+            # cancelled 分岐の外（try直下）で初期化しておく
+            grade_height_map: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+            max_grade = "Unknown"
+
             title = "津波情報"
             if cancelled:
                 title = "津波警報解除"
@@ -424,8 +436,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 description += "すべての津波予報が解除されました。"
             else:
                 # {grade: {height_desc: [area_name]}} の2段階グループ化
-                grade_height_map: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-                max_grade = "Unknown"
                 for area in areas:
                     name  = area.get("name", "不明")
                     grade = area.get("grade", "Unknown")
@@ -446,7 +456,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 if alert_msg:
                     description += alert_msg
 
-                GRADE_ORDER = ["MajorWarning", "Warning", "Watch", "Unknown"]
                 for grade in sorted(
                     grade_height_map.keys(),
                     key=lambda g: GRADE_ORDER.index(g) if g in GRADE_ORDER else 99
@@ -509,9 +518,35 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             sent_msg = await channel.send(embed=embed)
             if tsunami_id:
                 self.bot.loop.create_task(self._attach_p2p_image(sent_msg, tsunami_id))
-            speak_text = f"{title} が発表されました"
+
+            # ── 読み上げ文言 ──
+            # 以前は「{title} が発表されました」の固定文言のみで、Embed本文には
+            # 含まれている対象地域名・警報種別・予想される高さが読み上げには
+            # 一切反映されていなかった。ここでは grade_height_map を使って
+            # 「{地域名}に{警報種別}が発表されました」の形で組み立てる。
             if cancelled:
                 speak_text = "津波情報が解除されました"
+            elif grade_height_map:
+                # 最も重要度の高い grade を一つ選び、その地域名を読み上げる
+                top_grade = min(
+                    grade_height_map.keys(),
+                    key=lambda g: GRADE_ORDER.index(g) if g in GRADE_ORDER else 99
+                )
+                grade_label = TSUNAMI_MAP.get(top_grade, top_grade)
+                # top_grade に属する地域名を height_desc をまたいで集約
+                area_names = []
+                for names in grade_height_map[top_grade].values():
+                    area_names.extend(names)
+                if len(area_names) == 1:
+                    area_text = area_names[0]
+                elif len(area_names) <= 3:
+                    area_text = "、".join(area_names)
+                else:
+                    area_text = "、".join(area_names[:3]) + "等"
+                speak_text = f"{area_text}に{grade_label}が発表されました"
+            else:
+                speak_text = f"{title} が発表されました"
+
             await self.speak_local(speak_text)
             if not cancelled:
                 if any(a.get("grade") == "MajorWarning" for a in areas):
