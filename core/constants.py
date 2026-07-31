@@ -16,6 +16,7 @@ core/constants.py
 import os
 import json
 import logging
+from collections import defaultdict
 
 logger = logging.getLogger("QTLBot")
 
@@ -42,6 +43,36 @@ def load_region_map() -> dict:
 
 
 REGION_MAP = load_region_map()
+
+
+def load_prefecture_map() -> dict:
+    """
+    prefecture_map.json を読み込む（緊急地震速報や震度情報で用いる区域名 →
+    都道府県名 マッピング）。
+
+    震度速報（ScalePrompt）は points[].addr に区域名（例: "熊本県天草・芦北"）
+    ではなく気象庁の「緊急地震速報や震度情報で用いる区域の名称」が入るため、
+    このマップで都道府県名に変換したうえで表示・読み上げに用いる。
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "..", "prefecture_map.json")
+
+    if not os.path.exists(path):
+        logger.warning("prefecture_map.json が存在しません")
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logger.error(f"prefecture_map.json 読み込みエラー: {e}")
+
+    return {}
+
+
+PREFECTURE_MAP = load_prefecture_map()
 
 # 震度コード → 表示文字列
 INT_MAP = {
@@ -128,3 +159,50 @@ def _tsunami_height_key(height_str: str) -> float:
     elif "未満" in s:
         v -= 0.001
     return v
+
+
+# 震度コード（scale値）の降順リスト。
+# 「最大震度から1階級下まで」を抽出する処理や、
+# 各地の震度リストを震度の高い順に表示する処理で使用する。
+# 46（推定5弱以上）は45（5弱）と70（7）の間の特殊値のため、
+# 表示上は45と同じ「階級」として扱う。
+SCALE_ORDER = [70, 60, 55, 50, 46, 45, 40, 30, 20, 10]
+
+
+def scale_one_level_down(scale_val: int) -> int | None:
+    """
+    SCALE_ORDER 上で scale_val の「1つ下の震度階級」を返す。
+    46（推定5弱以上）は45（5弱）と同階級として扱うため、
+    46の1つ下は45ではなく40（震度4）を返す。
+    見つからない場合は None を返す。
+    """
+    order_for_step = [70, 60, 55, 50, 45, 40, 30, 20, 10]
+    normalized = 45 if scale_val == 46 else scale_val
+    if normalized not in order_for_step:
+        return None
+    idx = order_for_step.index(normalized)
+    if idx + 1 >= len(order_for_step):
+        return None
+    return order_for_step[idx + 1]
+
+
+def group_points_by_scale(points: list[dict]) -> dict[int, list[str]]:
+    """
+    P2P地震情報 API の points 配列（震度観測点情報）を、
+    scale（震度コード）ごとに addr（観測点名・区域名）のリストへ
+    グルーピングする。同一 scale 内での重複addrは排除する。
+
+    戻り値は {scale値: [addr, ...]} の辞書（挿入順は元データ順）。
+    """
+    grouped: dict[int, list[str]] = defaultdict(list)
+    seen: dict[int, set] = defaultdict(set)
+    for p in points or []:
+        scale_val = p.get("scale")
+        addr = p.get("addr")
+        if scale_val is None or not addr:
+            continue
+        if addr in seen[scale_val]:
+            continue
+        seen[scale_val].add(addr)
+        grouped[scale_val].append(addr)
+    return grouped
