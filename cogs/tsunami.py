@@ -31,7 +31,9 @@ WebSocketとは無関係の別経路（気象庁HPのXML/JSON）のため、今�
 - core.helpers      : safe_int, safe_float, safe_bool,
                        truncate_embed_description, format_jma_time
 - core.audio.AudioMixin       : speak_local, play_mp3（多重継承で利用）
-- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用）
+- core.p2p_image.P2PImageMixin : build_p2p_image_url_text（多重継承で利用。
+  2026-08-02 より _attach_p2p_image のCDNリトライ埋め込み方式は廃止し、
+  URLをテキストとして本文に含める方式に統一）
 
 【Step2 時点の設計メモ】
 - Circuit Breaker（_fetch_backoff_is_active 等）は現時点では
@@ -490,6 +492,19 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 suffix="\n\n（地域が多いため一部省略）"
             )
 
+            # ── 地図画像 ──
+            # 【2026-08-02 変更: _attach_p2p_image への依存を撤廃】
+            # quake.py と同様の理由（CDNが200を返す時点ではまだ画像本体の
+            # 生成が完了しておらず、Discord側の初回フェッチが失敗して
+            # 壊れた画像リンクとして固定表示されてしまう不具合）により、
+            # CDN反映を待って embed に画像を差し込む方式をやめ、
+            # 画像URLをテキストとして本文に含める方式に統一した。
+            # truncate 後に追記することで、画像URL自体が文字数超過で
+            # 途中で切られて壊れたリンクになるのを防ぐ。
+            image_url = self.build_p2p_image_url_text(tsunami_id) if tsunami_id else ""
+            if image_url:
+                description += f"\n\n{image_url}"
+
             color_map = {
                 "MajorWarning": 0xD344FC,
                 "Warning":      0xF93022,
@@ -511,10 +526,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             if footer_parts:
                 embed.set_footer(text=" | ".join(footer_parts))
 
-            # CDN の画像生成遅延があるため、先にメッセージを送信してから非同期で追加
             sent_msg = await channel.send(embed=embed)
-            if tsunami_id:
-                self.bot.loop.create_task(self._attach_p2p_image(sent_msg, tsunami_id))
 
             # ── 読み上げ文言 ──
             # 以前は「{title} が発表されました」の固定文言のみで、Embed本文には

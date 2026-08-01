@@ -33,7 +33,9 @@ code=551 のメッセージを受け取る方式に移行した（handle_p2p_qua
 - core.constants   : INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP
 - core.helpers     : format_jma_time
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
-- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用）
+- core.p2p_image.P2PImageMixin : build_p2p_image_url_text（多重継承で利用。
+  2026-08-02 より _attach_p2p_image のCDNリトライ埋め込み方式は廃止し、
+  URLをテキストとして本文に含める方式に統一）
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
 """
 import discord
@@ -41,7 +43,6 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import traceback
-import functools
 from datetime import datetime
 import logging
 
@@ -252,17 +253,23 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         occur_time = format_jma_time(eq.get("time", "不明"))
 
         name_display = "調査中" if issue_type == "ScalePrompt" else name
-        # 「震源に関する情報」（Destination）で地図画像が表示できなかった場合、
-        # 震源地の横に緯度経度を付記する（要件2）。他のissue_typeでは付記しない。
+        # 「震源に関する情報」（Destination）の場合、震源地の横に緯度経度を
+        # 付記する（要件2）。以前は「地図画像の取得に失敗した場合のみ」
+        # 付記していたが、CDN反映待ちのリトライ処理自体を廃止したため、
+        # 常に付記する（build_p2p_image_url_text で本文に画像リンクを
+        # 含める方式に統一したことに伴う変更）。
         show_latlon_in_name = (
             issue_type == "Destination"
             and latitude != -200 and longitude != -200
         )
+        latlon_text = format_latlon(latitude, longitude) if show_latlon_in_name else ""
+        name_field = f"{name_display}（{latlon_text}）" if latlon_text else name_display
+
         show_intensity = issue_type != "Destination"
         desc_lines = [
             f"**発表機関： {source}**",
             f"**発生時刻： {occur_time}**",
-            f"**震源地： {name_display}**",
+            f"**震源地： {name_field}**",
         ]
         if show_intensity:
             desc_lines.append(f"**最大震度： {max_scale_str}**")
@@ -289,9 +296,47 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         if comments:
             description += f"\n\n{comments}"
 
+        # ── 地図画像 ──
+        # 【2026-08-02 変更: _attach_p2p_image への依存を撤廃】
+        # 以前は channel.send() 後に最大2分間CDNをポーリングし、画像が
+        # 反映された時点で message.edit() により embed に画像を追加する
+        # 方式だった。しかし実運用で「Bot側のCDN確認（HTTP 200）は
+        # attempt=1で成功しているのに、Discord側でその画像を実際に
+        # フェッチした瞬間にはまだ本物の画像が生成し切っておらず、
+        # 壊れた画像リンクとして恒久的に表示されてしまう」不具合が
+        # 継続的に発生した。
+        #
+        # 根本原因はCDN側の「200は返すが実体はまだ完成していない」
+        # タイミング問題であり、Bot側のリトライ回数や待機時間を
+        # 増やしても解決を保証できない。そのため、CDN反映を待って
+        # embedへ画像を差し込む方式自体をやめ、通知本文にリンクの
+        # テキストをそのまま含める方式に統一した。Discord自身が
+        # メッセージ送信時にリンクプレビューとして画像を展開するため、
+        # 実質的な見た目はほぼ変わらない上、CDN反映タイミングに
+        # 依存しない（Discordが自分のタイミングでリトライ・再展開する）。
+        quake_id = data.get("id")
+        image_url = self.build_p2p_image_url_text(quake_id) if quake_id else ""
+        if image_url:
+            if issue_type == "ScalePrompt":
+                # 震度速報は要件1の仕様通り、震度一覧を先に表示し、
+                # その下に画像リンクを添える
+                intensity_text = self._build_intensity_list_text(points_by_scale)
+                if intensity_text:
+                    description += f"\n\n{intensity_text}"
+                description += f"\n\n{image_url}"
+            elif issue_type in ("ScaleAndDestination", "DetailScale") and max_scale_val >= 30:
+                min_scale = scale_one_level_down(max_scale_val)
+                intensity_text = self._build_intensity_list_text(
+                    points_by_scale, min_scale=min_scale
+                )
+                description += f"\n\n{image_url}"
+                if intensity_text:
+                    description += f"\n\n{intensity_text}"
+            else:
+                description += f"\n\n{image_url}"
+
         embed.description = description
 
-        quake_id = data.get("id")
         footer_parts = [extra_note] if extra_note else []
         if is_test:
             footer_parts.append("※これはテスト通知です。")
@@ -299,27 +344,6 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             embed.set_footer(text=" | ".join(footer_parts))
 
         sent_msg = await channel.send(embed=embed)
-        if quake_id:
-            on_failure = None
-            if issue_type == "ScalePrompt":
-                on_failure = functools.partial(
-                    self._on_quake_image_failure_scale_prompt,
-                    points_by_scale=points_by_scale,
-                )
-            elif issue_type == "Destination":
-                latlon_text = format_latlon(latitude, longitude) if show_latlon_in_name else ""
-                on_failure = functools.partial(
-                    self._on_quake_image_failure_destination,
-                    name=name, latlon_text=latlon_text,
-                )
-            elif issue_type in ("ScaleAndDestination", "DetailScale") and max_scale_val >= 30:
-                on_failure = functools.partial(
-                    self._on_quake_image_failure_detail_scale,
-                    points_by_scale=points_by_scale, max_scale_val=max_scale_val,
-                )
-            self.bot.loop.create_task(
-                self._attach_p2p_image(sent_msg, quake_id, on_failure=on_failure)
-            )
 
         if issue_type == "ScalePrompt" and max_scale_val >= 55:
             now_dt = datetime.now()
@@ -488,62 +512,3 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             lines += [f"　{addr}" for addr in addrs]
             blocks.append("\n".join(lines))
         return "\n".join(blocks)
-
-    async def _on_quake_image_failure_scale_prompt(self, message: discord.Message,
-                                                     url: str, points_by_scale: dict) -> None:
-        """
-        震度速報（ScalePrompt）で地図画像が表示できなかった場合のフォールバック。
-        津波の有無の記述の下に、各地の震度一覧を追記する（要件1）。
-        """
-        try:
-            embed = message.embeds[0].copy()
-            intensity_text = self._build_intensity_list_text(points_by_scale)
-            if intensity_text:
-                embed.description = f"{embed.description}\n\n{intensity_text}"
-            await message.edit(embed=embed)
-            logger.info("震度速報: 地図画像取得失敗のため、震度一覧をEmbedに追記しました")
-        except Exception as e:
-            logger.warning(f"震度速報: 画像失敗時フォールバック処理エラー: {e}")
-
-    async def _on_quake_image_failure_destination(self, message: discord.Message,
-                                                    url: str, name: str,
-                                                    latlon_text: str) -> None:
-        """
-        震源に関する情報（Destination）で地図画像が表示できなかった場合の
-        フォールバック。リンクのみ貼付し、震源地の横に緯度経度を付記する（要件2）。
-        """
-        try:
-            embed = message.embeds[0].copy()
-            if latlon_text:
-                embed.description = embed.description.replace(
-                    f"**震源地： {name}**",
-                    f"**震源地： {name}（{latlon_text}）**",
-                )
-            embed.description = f"{embed.description}\n\n[地図画像を見る]({url})"
-            await message.edit(embed=embed)
-            logger.info("震源に関する情報: 地図画像取得失敗のため、リンク＋緯度経度を追記しました")
-        except Exception as e:
-            logger.warning(f"震源に関する情報: 画像失敗時フォールバック処理エラー: {e}")
-
-    async def _on_quake_image_failure_detail_scale(self, message: discord.Message,
-                                                     url: str, points_by_scale: dict,
-                                                     max_scale_val: int) -> None:
-        """
-        各地の震度に関する情報（ScaleAndDestination/DetailScale）で
-        地図画像が表示できなかった場合のフォールバック。
-        リンクのみ貼付し、最大震度〜1階級下までの観測点一覧を追記する（要件3）。
-        """
-        try:
-            embed = message.embeds[0].copy()
-            min_scale = scale_one_level_down(max_scale_val)
-            intensity_text = self._build_intensity_list_text(
-                points_by_scale, min_scale=min_scale
-            )
-            appendix = f"[地図画像を見る]({url})"
-            if intensity_text:
-                appendix += f"\n\n{intensity_text}"
-            embed.description = f"{embed.description}\n\n{appendix}"
-            await message.edit(embed=embed)
-            logger.info("各地の震度に関する情報: 地図画像取得失敗のため、リンク＋震度一覧を追記しました")
-        except Exception as e:
-            logger.warning(f"各地の震度に関する情報: 画像失敗時フォールバック処理エラー: {e}")

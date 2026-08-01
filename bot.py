@@ -31,6 +31,13 @@ AudioCog は EewCog・QuakeInfoCog より前に登録する必要がある
 この新構成に切り替えること。両方を同時に動かすと全ての情報が
 二重通知される。
 
+【二重起動検知（2026-08-02 追加, core/pid_guard.py）】
+実際に「前のプロセスが完全終了しないまま新プロセスを起動してしまい、
+同一のEEW/地震情報が2重に通知される」事故が発生したことを受けて、
+起動時に PID ファイル（bot.pid、CLIテストモード時は bot.test.pid）を
+確認・作成する仕組みを追加した。既存のPIDファイルが生きている
+プロセスを指している場合は警告ログを出す（強制停止はしない）。
+
 【既知の設計事項】
 南海トラフ地震臨時情報・顕著な地震の震源要素更新のお知らせは、
 tsunami API経由（TsunamiCog）と quake API経由（OtherInfoCog）の
@@ -108,6 +115,10 @@ if _test_target is not None:
 
 async def main():
     setup_logging()
+
+    from core.pid_guard import check_and_write_pid
+    is_test_mode = _test_target is not None
+    check_and_write_pid(is_test_mode=is_test_mode)
 
     if _test_target is not None:
         cog_key, json_path = _test_target
@@ -216,6 +227,9 @@ async def main():
             # close_scratchtts_session() は何もせず即座に返る。
             from core.tts_engines import close_scratchtts_session
             await close_scratchtts_session()
+
+            from core.pid_guard import remove_pid_file
+            remove_pid_file(is_test_mode=is_test_mode)
 
 
 if __name__ == "__main__":
