@@ -16,8 +16,17 @@ MP3再生のみを扱う。EEW（緊急地震速報）は cogs/eew.py の EewCog
 優先度に基づいた一貫した順序で再生されるようにする。
 
 【この Cog が担当する機能】
-- P2P地震情報 API のポーリング（3秒間隔）・地震情報通知
+- P2P地震情報 WebSocket（code=551, core.p2p_ws_hub 経由）からの地震情報通知
 - P2P CDN画像のリトライ添付
+
+【WebSocket移行について（2026-08 feature/p2p-websocket-migration）】
+従来は本Cog自身が /v2/history を3秒間隔でポーリングしていたが、
+core.p2p_ws_hub.P2PWebSocketHub が保持する単一WebSocket接続から
+code=551 のメッセージを受け取る方式に移行した（handle_p2p_quake）。
+ポーリングは廃止したが、Bot起動直後は「起動前から存在していた最新の
+地震情報を誤って新着として通知してしまう」のを防ぐため、on_ready 時に
+一度だけ /v2/history を参照して last_quake_id を初期化する
+（_init_last_quake_id）。
 
 【他モジュールとの依存関係】
 - core.config      : 環境変数由来の設定値（チャンネルID・フィルター等）
@@ -28,7 +37,7 @@ MP3再生のみを扱う。EEW（緊急地震速報）は cogs/eew.py の EewCog
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
 """
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import aiohttp
 import asyncio
 import traceback
@@ -38,7 +47,6 @@ import logging
 
 from core.config import (
     CHANNEL_ID, QUAKE_CHANNEL_ID,
-    FETCH_FAILURE_THRESHOLD, FETCH_BACKOFF_SECONDS,
     QUAKE_MIN_SCALE, QUAKE_MIN_MAG, QUAKE_MIN_DEPTH, QUAKE_MAX_DEPTH,
     QUAKE_ENABLE_SCALE_PROMPT, QUAKE_ENABLE_DESTINATION,
     QUAKE_ENABLE_SCALE_AND_DEST, QUAKE_ENABLE_DETAIL_SCALE,
@@ -51,7 +59,6 @@ from core.constants import (
 from core.helpers import format_jma_time, format_latlon
 from core.audio import AudioClientMixin
 from core.p2p_image import P2PImageMixin
-from core.fetch_backoff import FetchBackoff
 
 logger = logging.getLogger("QTLBot")
 
@@ -75,9 +82,6 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self._last_recv: dict[str, datetime | None] = {"quake": None}
         self._recv_count: dict[str, int] = {"quake": 0}
 
-        self._fetch_backoff = FetchBackoff(FETCH_FAILURE_THRESHOLD, FETCH_BACKOFF_SECONDS)
-        self._fetch_quake_lock = asyncio.Lock()
-
     async def cog_load(self):
         self.session = aiohttp.ClientSession(
             headers=self.headers,
@@ -87,8 +91,6 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         logger.info("QuakeInfoCog: aiohttp セッションを作成しました")
 
     async def cog_unload(self):
-        if self.fetch_quake.is_running():
-            self.fetch_quake.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
             logger.info("QuakeInfoCog: aiohttp セッションを閉じました")
@@ -98,83 +100,79 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self.channel       = self.bot.get_channel(CHANNEL_ID)
         self.quake_channel = self.bot.get_channel(QUAKE_CHANNEL_ID) or self.channel
 
-        if not self.fetch_quake.is_running():
-            self.fetch_quake.start()
+        # P2P地震情報（code=551）の受信は core.p2p_ws_hub.P2PWebSocketHub が
+        # 一元管理する接続から配信される（bot.py 側で
+        # hub.register("quake", self.handle_p2p_quake) により登録される）。
+        # ここでは起動前から存在していた最新情報を誤って新着扱いしないよう、
+        # last_quake_id のみ一度初期化しておく。
+        if self.last_quake_id is None:
+            await self._init_last_quake_id()
 
         logger.info("QuakeInfoCog: on_ready 完了")
 
-    @tasks.loop(seconds=3)
-    async def fetch_quake(self):
-        if self._fetch_backoff.is_active("quake"):
-            return
+    async def _init_last_quake_id(self):
+        """
+        Bot起動直後、/v2/history を一度だけ参照して last_quake_id を
+        初期化する。WebSocket移行前はポーリングループの初回実行時に
+        これを行っていたが、ポーリング自体を廃止したため on_ready から
+        明示的に1回だけ呼び出す。
 
-        if self._fetch_quake_lock.locked():
-            return
+        ここで初期化しておかないと、起動前から存在していた最新の地震情報を
+        「起動後に届いた新着メッセージ」と誤認して重複通知してしまう
+        （WebSocketは接続後、直近の履歴を送ってくることがあるため）。
 
-        async with self._fetch_quake_lock:
-            try:
-                retry_delays = [1, 2, 4]
-                last_error = None
+        失敗しても致命的ではない（次にWebSocket経由で新しい地震情報が
+        来た時点で last_quake_id が更新されるだけ）ため、例外はログのみ
+        で握りつぶす。
+        """
+        try:
+            async with self.session.get(
+                "https://api.p2pquake.net/v2/history?codes=551&limit=1",
+            ) as resp:
+                if resp.status == 200:
+                    data_list = await resp.json()
+                    if data_list:
+                        self.last_quake_id = data_list[0].get("id")
+                        logger.info(
+                            f"_init_last_quake_id: 起動時の既存最新情報を記録"
+                            f"（通知はしない） id={self.last_quake_id}"
+                        )
+        except Exception as e:
+            logger.warning(f"_init_last_quake_id: 初期化に失敗しました（続行します）: {e}")
 
-                for attempt in range(len(retry_delays) + 1):
-                    try:
-                        async with self.session.get(
-                            "https://api.p2pquake.net/v2/history?codes=551&limit=1",
-                            ) as resp:
-                            if resp.status == 200:
-                                data_list = await resp.json()
-                                if not data_list:
-                                    return
+    async def handle_p2p_quake(self, data: dict) -> None:
+        """
+        core.p2p_ws_hub.P2PWebSocketHub から code=551（地震情報）の
+        メッセージを受け取るハンドラ。
 
-                                data = data_list[0]
-                                data_id = data.get("id")
+        【移行前との違い】
+        以前は /v2/history を3秒間隔でポーリングしていた（fetch_quake）。
+        WebSocket移行により、接続・code フィルタリング・重複排除
+        （id ベース）は core.p2p_ws_hub.P2PWebSocketHub が一元的に
+        行うようになったため、このメソッドは「551のデータを受け取った
+        後の通知処理」のみを担当する。
+        """
+        try:
+            data_id = data.get("id")
 
-                                if self.last_quake_id is None:
-                                    self.last_quake_id = data_id
-                                    self._fetch_backoff.reset("quake")
-                                    logger.info(f"fetch_quake: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
-                                    return
+            if self.last_quake_id is None:
+                self.last_quake_id = data_id
+                logger.info(f"handle_p2p_quake: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                return
 
-                                if data_id == self.last_quake_id:
-                                    self._fetch_backoff.reset("quake")
-                                    return
+            if data_id == self.last_quake_id:
+                # ハブ側で既にid単位の重複排除は行われているはずだが、
+                # 念のためこの階層でも同一IDの連続処理を防ぐ
+                return
 
-                                self.last_quake_id = data_id
-                                self._last_recv["quake"] = datetime.now()
-                                self._recv_count["quake"] += 1
-                                logger.info(f"P2P地震情報取得: id={data_id}")
-                                self._fetch_backoff.reset("quake")
-                                await self.notify_quake(data)
-                                return
+            self.last_quake_id = data_id
+            self._last_recv["quake"] = datetime.now()
+            self._recv_count["quake"] += 1
+            logger.info(f"P2P地震情報取得: id={data_id}")
+            await self.notify_quake(data)
 
-                            elif resp.status >= 500:
-                                last_error = f"HTTP {resp.status}"
-                                if attempt < len(retry_delays):
-                                    delay = retry_delays[attempt]
-                                    logger.debug(f"fetch_quake: {delay}秒後に再試行 (HTTP {resp.status})")
-                                    await asyncio.sleep(delay)
-                                    continue
-                            else:
-                                self._fetch_backoff.record_failure("quake", f"HTTP {resp.status}")
-                                return
-
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                        last_error = str(e)
-                        if attempt < len(retry_delays):
-                            delay = retry_delays[attempt]
-                            logger.debug(f"fetch_quake: {delay}秒後に再試行 ({type(e).__name__})")
-                            await asyncio.sleep(delay)
-                            continue
-
-                self._fetch_backoff.record_failure("quake", f"retry exhausted: {last_error}")
-
-            except Exception:
-                self._fetch_backoff.record_failure("quake", "exception")
-                logger.error(f"Fetch Quake エラー:\n{traceback.format_exc()}")
-
-    @fetch_quake.before_loop
-    async def before_fetch_quake(self):
-        await self.bot.wait_until_ready()
+        except Exception:
+            logger.error(f"handle_p2p_quake エラー:\n{traceback.format_exc()}")
 
     async def notify_quake(self, data, is_test=False, extra_note=None, skip_speech=False):
         channel = self.quake_channel or self.channel

@@ -45,7 +45,7 @@ import logging
 from core.config import (
     CHANNEL_ID, EEW_CHANNEL_ID, P2P_EEW_CHANNEL_ID,
     KYOSHIN_CHANNEL_ID, OTHER_CHANNEL_ID,
-    WOLFX_WSS, P2P_WSS,
+    WOLFX_WSS,
     ENABLE_KYOSHIN,
 )
 from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP
@@ -110,9 +110,6 @@ class EewCog(commands.Cog, AudioClientMixin):
         }
         self._recv_count: dict[str, int] = {k: 0 for k in self._last_recv}
 
-        # ── P2P EEW タスク（緊急地震速報（警報）専用・常時稼働） ──
-        self.p2p_eew_task: asyncio.Task | None = None
-
         # ── Wolfx 接続状態管理 ──
         self._wolfx_last_recv: datetime | None = None
         self._wolfx_last_eew_recv: datetime | None = None
@@ -133,7 +130,7 @@ class EewCog(commands.Cog, AudioClientMixin):
         logger.info("EewCog: aiohttp セッションを作成しました")
 
     async def cog_unload(self):
-        for bg_task in (self.vibration_monitor_task, self.p2p_eew_task):
+        for bg_task in (self.vibration_monitor_task,):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
 
@@ -151,9 +148,10 @@ class EewCog(commands.Cog, AudioClientMixin):
 
         self.bot.loop.create_task(self.connect_eew_ws())
 
-        if self.p2p_eew_task is None or self.p2p_eew_task.done():
-            self.p2p_eew_task = self.bot.loop.create_task(self.connect_p2p_eew_ws())
-            logger.info("P2P EEW WebSocket 接続開始（緊急地震速報（警報）専用）")
+        # P2P地震情報（code=556, EEW）の受信は core.p2p_ws_hub.P2PWebSocketHub
+        # が一元管理する接続から配信される（bot.py 側で hub.register("eew", ...)
+        # により self.handle_p2p_eew が登録される）。このCog自身では
+        # WebSocket接続を保持しない。
 
         logger.info("EewCog: on_ready 完了")
 
@@ -216,35 +214,40 @@ class EewCog(commands.Cog, AudioClientMixin):
         )
 
     # ===============================
-    # WebSocket（P2P EEW code=556）
+    # WebSocket（P2P地震情報 code=556, ハブ経由）
     # ===============================
-    async def connect_p2p_eew_ws(self):
-        async def _handle(ws):
-            async for raw in ws:
-                try:
-                    data = json.loads(raw)
-                    if data.get("code") != 556:
-                        continue
-                    wolfx_data = self._convert_p2p_eew_to_wolfx(data)
-                    if not wolfx_data:
-                        continue
-                    event_id = wolfx_data.get("EventID")
-                    serial   = wolfx_data.get("Serial", 1)
-                    self._last_recv["p2p_eew"] = datetime.now()
-                    self._recv_count["p2p_eew"] += 1
-                    logger.info(f"P2P EEW 検知: EventID={event_id} Serial={serial}")
-                    if serial > self.eew_max_serial_seen.get(event_id, 0):
-                        self.eew_max_serial_seen[event_id] = serial
-                        await self.notify_eew(wolfx_data, source="p2p_eew")
-                    else:
-                        logger.debug(
-                            f"P2P EEW 重複/逆行のためスキップ: EventID={event_id} "
-                            f"Serial={serial} (既知の最大Serial={self.eew_max_serial_seen.get(event_id, 0)})"
-                        )
-                except Exception:
-                    logger.error(f"P2P EEW メッセージ処理エラー:\n{traceback.format_exc()}")
+    async def handle_p2p_eew(self, data: dict) -> None:
+        """
+        core.p2p_ws_hub.P2PWebSocketHub から code=556（緊急地震速報（警報））
+        のメッセージを受け取るハンドラ。
 
-        await ws_connect_loop(self.bot.is_closed, P2P_WSS, "P2P地震情報 EEW", _handle)
+        【移行前との違い】
+        以前はこのCog自身が P2P_WSS への WebSocket 接続を保持し
+        （connect_p2p_eew_ws）、受信ループの中で code フィルタリングも
+        行っていた。WebSocket移行により、接続・code フィルタリング・
+        重複排除（id/_idベース）は core.p2p_ws_hub.P2PWebSocketHub が
+        一元的に行うようになったため、このメソッドは「556のデータを
+        受け取った後の処理」のみを担当する。
+        """
+        try:
+            wolfx_data = self._convert_p2p_eew_to_wolfx(data)
+            if not wolfx_data:
+                return
+            event_id = wolfx_data.get("EventID")
+            serial   = wolfx_data.get("Serial", 1)
+            self._last_recv["p2p_eew"] = datetime.now()
+            self._recv_count["p2p_eew"] += 1
+            logger.info(f"P2P EEW 検知: EventID={event_id} Serial={serial}")
+            if serial > self.eew_max_serial_seen.get(event_id, 0):
+                self.eew_max_serial_seen[event_id] = serial
+                await self.notify_eew(wolfx_data, source="p2p_eew")
+            else:
+                logger.debug(
+                    f"P2P EEW 重複/逆行のためスキップ: EventID={event_id} "
+                    f"Serial={serial} (既知の最大Serial={self.eew_max_serial_seen.get(event_id, 0)})"
+                )
+        except Exception:
+            logger.error(f"P2P EEW メッセージ処理エラー:\n{traceback.format_exc()}")
 
     def _convert_p2p_eew_to_wolfx(self, p2p_data: dict) -> dict | None:
         """

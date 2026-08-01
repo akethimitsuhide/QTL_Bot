@@ -38,6 +38,16 @@ tsunami API経由（TsunamiCog）と quake API経由（OtherInfoCog）の
 存在した設計であり、Cog分割による新規バグではない
 （詳細は cogs/other.py の docstring 参照）。
 
+【P2P地震情報 WebSocket移行（2026-08 feature/p2p-websocket-migration）】
+従来、EewCog（code=556専用）は自前でWebSocket接続を保持し、
+QuakeInfoCog（code=551）・TsunamiCog（code=552）はそれぞれ独立して
+/v2/history をポーリングしていた。IPアドレスあたり最大2接続という
+レート制限を確実に守るため、P2P地震情報 WebSocket API
+（wss://api.p2pquake.net/v2/ws）への接続を core.p2p_ws_hub.P2PWebSocketHub
+が1本だけ保持し、受信したメッセージを code（551/552/556）に応じて
+各Cogのハンドラ（handle_p2p_quake / handle_p2p_tsunami / handle_p2p_eew）
+へディスパッチする構成に統一した。ハブ自体が id ベースの重複排除も行う。
+
 【CLIテスト実行モード】
 自動テストが存在しなかった問題への対応として、以下のようにサンプルJSON
 データを使って特定Cogの通知ロジックだけを動かす簡易テスト実行に対応した：
@@ -139,8 +149,33 @@ async def main():
 
             # ── Step2: 津波 Cog ──
             from cogs.tsunami import TsunamiCog
-            await bot.add_cog(TsunamiCog(bot))
+            tsunami_cog = TsunamiCog(bot)
+            await bot.add_cog(tsunami_cog)
             logger.info("TsunamiCog を登録しました")
+
+            # ── P2P地震情報 WebSocket ハブ（2026-08 feature/p2p-websocket-migration） ──
+            # EewCog（code=556）・QuakeInfoCog（code=551）・TsunamiCog（code=552）が
+            # それぞれ個別に wss://api.p2pquake.net/v2/ws へ接続すると、
+            # IPアドレスあたり最大2接続というレート制限に抵触する恐れがある。
+            # そのため、接続はこのハブが1つだけ保持し、受信メッセージを
+            # code に応じて各Cogのハンドラへディスパッチする構成にしている。
+            # EewCog / QuakeInfoCog / TsunamiCog の登録が全て完了した直後
+            # （＝各Cogの handle_p2p_* メソッドが確実に参照できる状態）で
+            # ハブを構築・起動する。
+            from core.p2p_ws_hub import P2PWebSocketHub
+            p2p_hub = P2PWebSocketHub(bot.is_closed)
+            eew_cog = bot.get_cog("EewCog")
+            quake_cog = bot.get_cog("QuakeInfoCog")
+            p2p_hub.register("eew", eew_cog.handle_p2p_eew)
+            p2p_hub.register("quake", quake_cog.handle_p2p_quake)
+            p2p_hub.register("tsunami", tsunami_cog.handle_p2p_tsunami)
+            # 他Cogから !status 等で参照できるよう bot にぶら下げておく
+            bot.p2p_hub = p2p_hub
+            bot.loop.create_task(p2p_hub.run())
+            logger.info(
+                "P2PWebSocketHub を起動しました "
+                "(code=551→quake, 552→tsunami, 556→eew, 接続は1本のみ)"
+            )
 
             # ── Step3: 火山 Cog ──
             from cogs.volcano import VolcanoCog
