@@ -348,17 +348,37 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         try:
             data_id = data.get("id")
 
+            if data_id is None:
+                logger.warning(
+                    f"handle_p2p_tsunami: 受信データに id が含まれていません。"
+                    f"原因調査用の生データ: {data!r}"
+                )
+
             if self.last_tsunami_id is None:
-                self.last_tsunami_id = data_id
-                logger.info(f"handle_p2p_tsunami: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                if data_id is not None:
+                    self.last_tsunami_id = data_id
+                    logger.info(f"handle_p2p_tsunami: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                else:
+                    # 起動直後の最初のメッセージがidなしだった場合、
+                    # last_tsunami_idをNoneのままにしておく。次に来る
+                    # 有効なid付きメッセージから通常運用を開始する。
+                    logger.warning(
+                        "handle_p2p_tsunami: 起動時最初の受信メッセージにidが"
+                        "ありません。次の有効なメッセージまで初期化を待機します"
+                    )
                 return
 
-            if data_id == self.last_tsunami_id:
+            if data_id is not None and data_id == self.last_tsunami_id:
                 # ハブ側で既にid単位の重複排除は行われているはずだが、
-                # 念のためこの階層でも同一IDの連続処理を防ぐ
+                # 念のためこの階層でも同一IDの連続処理を防ぐ。
+                # data_id が None の場合はこの等値比較で誤ってスキップ
+                # されないよう明示的に除外する（None == None による
+                # 「idが無い通知が繰り返し来た場合に2件目以降が
+                # 誤って握りつぶされる」事故を防ぐ）。
                 return
 
-            self.last_tsunami_id = data_id
+            if data_id is not None:
+                self.last_tsunami_id = data_id
             self._last_recv["tsunami"] = datetime.now()
             self._recv_count["tsunami"] += 1
             logger.info(f"P2P津波情報取得: id={data_id}")

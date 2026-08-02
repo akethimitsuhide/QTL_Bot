@@ -49,6 +49,7 @@ P2P地震情報の仕様上、同一内容のメッセージが複数回配信�
 import json
 import logging
 import traceback
+import hashlib
 from collections import OrderedDict
 
 from core.ws_helpers import ws_connect_loop
@@ -107,15 +108,30 @@ class P2PWebSocketHub:
         self._dispatchers[key].append(handler)
         logger.info(f"P2PWebSocketHub: '{key}' ディスパッチャを登録しました")
 
-    def _is_duplicate(self, code: int, data_id) -> bool:
+    def _is_duplicate(self, code: int, data_id, raw: str | None = None) -> bool:
         """
         code・data_id の組み合わせが既知（重複）かどうかを判定し、
-        未知であればキャッシュに記録する。data_id が取得できない
-        メッセージ（None）は重複判定できないため常に False を返す
-        （フィルタリングせず素通しする）。
+        未知であればキャッシュに記録する。
+
+        【2026-08-01/02 修正: id=None フォールバック】
+        当初は data_id が None（P2P地震情報のメッセージから id/_id を
+        取得できないケース）の場合、重複判定不能として常に False
+        （＝重複ではない）を返し、フィルタリングせず素通しさせていた。
+        しかし実運用で、同一またはid欠落のcode=551（地震情報）メッセージが
+        WebSocketから複数回配信されるケースが実際に発生し、素通し設計の
+        せいで同一内容が繰り返しディスパッチされるリスクがあった。
+
+        そのため、data_id が None の場合は raw（メッセージの生JSON文字列）
+        のハッシュ値をフォールバックの重複判定キーとして使う。これにより
+        「id が取得できない」ケースでも、内容が完全に同一のメッセージが
+        短時間に繰り返し届いた場合は確実に弾ける。
+        raw も渡されない（呼び出し側の実装漏れ等）場合のみ、従来通り
+        判定不能として False を返す。
         """
         if data_id is None:
-            return False
+            if raw is None:
+                return False
+            data_id = ("_hash_", hashlib.sha256(raw.encode("utf-8")).hexdigest())
 
         cache = self._seen_ids.get(code)
         if cache is None:
@@ -161,7 +177,19 @@ class P2PWebSocketHub:
             return
 
         data_id = data.get("id") or data.get("_id")
-        if self._is_duplicate(code, data_id):
+        if data_id is None:
+            # 本来 P2P地震情報 API の JMAQuake（551）/JMATsunami（552）は
+            # id が必須項目のはずだが、実運用で id が取得できない
+            # メッセージが実際に届いたことがある
+            # （2026-08-01/02, 地図画像非表示・二重通知インシデント）。
+            # 原因調査のため、生データ全体を警告ログに残す
+            # （info/debugではローテーションで消えやすく、原因調査の
+            # ためには warning レベルで確実に残すほうが望ましい）。
+            logger.warning(
+                f"P2PWebSocketHub: code={code} のメッセージに id/_id が"
+                f"見つかりません。生データ: {raw!r}"
+            )
+        if self._is_duplicate(code, data_id, raw=raw):
             logger.debug(
                 f"P2PWebSocketHub: 重複メッセージのためスキップ code={code} id={data_id}"
             )

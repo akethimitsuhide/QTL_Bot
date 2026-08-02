@@ -156,17 +156,52 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         try:
             data_id = data.get("id")
 
+            if data_id is None:
+                # 本来 P2P地震情報 API の JMAQuake（551）は id が必須項目のはず
+                # だが、実運用で id が取得できないメッセージが実際に届いた
+                # （2026-08-02, 地図画像が表示されないインシデント）。
+                # 原因調査のため、受信した生データ全体をログに残す。
+                # なお、この時点で最終防衛ラインとして通知自体は継続する
+                # （id が無くても data 自体は有効な地震情報である可能性が
+                # 高く、通知を止めるとユーザーへの情報提供が遅れるため）。
+                # ただし重複排除ができないリスクがあるため、疑わしい
+                # メッセージとして必ず警告を残す。
+                logger.warning(
+                    f"handle_p2p_quake: 受信データに id が含まれていません。"
+                    f"原因調査用の生データ: {data!r}"
+                )
+
             if self.last_quake_id is None:
-                self.last_quake_id = data_id
-                logger.info(f"handle_p2p_quake: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                if data_id is not None:
+                    self.last_quake_id = data_id
+                    logger.info(f"handle_p2p_quake: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                else:
+                    # 起動直後の最初のメッセージがidなしだった場合、
+                    # last_quake_idをNoneのままにしておく。ここでNone以外の
+                    # 値（例えば固定のダミー文字列等）を入れてしまうと、
+                    # 次に来る正常なid付きメッセージ（＝実際の新着情報）が
+                    # 「id != last_quake_id」の判定を通過して通知される。
+                    # つまり実質的には「起動直後にidなしメッセージが来た場合、
+                    # 次に来る有効なid付きメッセージから通常運用を開始する」
+                    # 挙動になる。
+                    logger.warning(
+                        "handle_p2p_quake: 起動時最初の受信メッセージにidが"
+                        "ありません。次の有効なメッセージまで初期化を待機します"
+                    )
                 return
 
-            if data_id == self.last_quake_id:
+            if data_id is not None and data_id == self.last_quake_id:
                 # ハブ側で既にid単位の重複排除は行われているはずだが、
-                # 念のためこの階層でも同一IDの連続処理を防ぐ
+                # 念のためこの階層でも同一IDの連続処理を防ぐ。
+                # data_id が None の場合はこの等値比較で誤って
+                # スキップされないよう明示的に除外する
+                # （None == None は常に真になってしまうため、
+                # 「idが無い通知が繰り返し来た場合に2件目以降が
+                # 誤って握りつぶされる」事故を防ぐ）。
                 return
 
-            self.last_quake_id = data_id
+            if data_id is not None:
+                self.last_quake_id = data_id
             self._last_recv["quake"] = datetime.now()
             self._recv_count["quake"] += 1
             logger.info(f"P2P地震情報取得: id={data_id}")
