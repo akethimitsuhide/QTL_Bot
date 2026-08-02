@@ -4,12 +4,25 @@ cogs/tsunami.py
 津波情報関連の通知を扱う Cog。
 
 【この Cog が担当する機能】
-- P2P地震情報 API の津波情報ポーリング（10秒間隔）・通知
+- P2P地震情報 WebSocket（code=552, core.p2p_ws_hub 経由）からの津波情報通知
 - JMA tsunami API のポーリング（60秒間隔）・種別振り分け
   - 津波観測情報（VTSE41/51/52）
   - 津波予報・警報・注意報（VTSE41系のForecast）
   - 顕著な地震の震源要素更新のお知らせ（VXSE61）
   - 南海トラフ地震臨時情報・関連解説情報（VYSE50）
+
+【WebSocket移行について（2026-08 feature/p2p-websocket-migration）】
+従来は本Cog自身が /v2/history?codes=552 を10秒間隔でポーリングしていたが
+（fetch_tsunami）、core.p2p_ws_hub.P2PWebSocketHub が保持する単一WebSocket
+接続から code=552 のメッセージを受け取る方式に移行した
+（handle_p2p_tsunami）。ポーリングは廃止したが、Bot起動直後に既存の最新
+津波情報を誤って新着として通知しないよう、on_ready 時に一度だけ
+/v2/history を参照して last_tsunami_id を初期化する
+（_init_last_tsunami_id）。
+
+なお、JMA tsunami API（fetch_tsunami_observation, 60秒間隔）は P2P
+WebSocketとは無関係の別経路（気象庁HPのXML/JSON）のため、今回の移行対象
+外とし、従来通りポーリングを継続する。
 
 【他モジュールとの依存関係】
 - core.config       : TSUNAMI_ENABLE, CHANNEL_ID, TSUNAMI_CHANNEL_ID,
@@ -18,7 +31,8 @@ cogs/tsunami.py
 - core.helpers      : safe_int, safe_float, safe_bool,
                        truncate_embed_description, format_jma_time
 - core.audio.AudioMixin       : speak_local, play_mp3（多重継承で利用）
-- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用）
+- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用。
+  2026-08-02: 内容検証を強化した安定版としてembed埋め込み方式を再度採用）
 
 【Step2 時点の設計メモ】
 - Circuit Breaker（_fetch_backoff_is_active 等）は現時点では
@@ -89,9 +103,12 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         self._recv_count = {"tsunami": 0}
 
         # -- fetch_tsunami の Circuit Breaker --
+        # （P2P津波情報 code=552 のWebSocket移行によりポーリング専用の
+        #   fetch_tsunami は廃止したが、_fetch_backoff_is_active 等の
+        #   汎用メソッド自体は他のポーリング処理と共通化されているため
+        #   辞書の初期化は残す。専用ロックのみ不要になったため削除）
         self._fetch_failures = {"tsunami": 0}
         self._fetch_backoff_until = {"tsunami": 0.0}
-        self._fetch_tsunami_lock = asyncio.Lock()
 
         # -- 音声再生（AudioMixin が要求する属性） --
         self.speech_queue = asyncio.PriorityQueue(maxsize=SPEECH_QUEUE_MAXSIZE)
@@ -144,9 +161,8 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         logger.info("TsunamiCog: aiohttp セッションを作成しました")
 
     async def cog_unload(self):
-        for loop_task in (self.fetch_tsunami, self.fetch_tsunami_observation):
-            if loop_task.is_running():
-                loop_task.cancel()
+        if self.fetch_tsunami_observation.is_running():
+            self.fetch_tsunami_observation.cancel()
 
         for bg_task in (self.speech_task, self.mp3_task):
             if bg_task and not bg_task.done():
@@ -166,8 +182,13 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         else:
             logger.warning("津波情報機能: 無効（TSUNAMI_ENABLE=false）")
 
-        if not self.fetch_tsunami.is_running():
-            self.fetch_tsunami.start()
+        # P2P津波情報（code=552）の受信は core.p2p_ws_hub.P2PWebSocketHub が
+        # 一元管理する接続から配信される（bot.py 側で
+        # hub.register("tsunami", self.handle_p2p_tsunami) により登録される）。
+        # ここでは起動前から存在していた最新情報を誤って新着扱いしないよう、
+        # last_tsunami_id のみ一度初期化しておく。
+        if self.last_tsunami_id is None:
+            await self._init_last_tsunami_id()
 
         if not self.fetch_tsunami_observation.is_running():
             self.fetch_tsunami_observation.start()
@@ -282,92 +303,92 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         await self.bot.wait_until_ready()
 
 
-    @tasks.loop(seconds=10)
-    async def fetch_tsunami(self):
-        # デバッグログ
-        if self._fetch_backoff_is_active("tsunami"):
-            logger.debug("fetch_tsunami: バックオフ中でスキップ")
-            return
+    async def _init_last_tsunami_id(self):
+        """
+        Bot起動直後、/v2/history を一度だけ参照して last_tsunami_id を
+        初期化する。WebSocket移行前はポーリングループの初回実行時に
+        これを行っていたが、ポーリング自体を廃止したため on_ready から
+        明示的に1回だけ呼び出す。
 
-        # Lock を使った排他制御
-        if self._fetch_tsunami_lock.locked():
-            logger.debug("fetch_tsunami: ロック中でスキップ")
-            return
-        
-        async with self._fetch_tsunami_lock:
-            try:
-                # 再試行ロジック: exponential backoff (1s, 2s, 4s)
-                retry_delays = [1, 2, 4]
-                last_error = None
-                
-                for attempt in range(len(retry_delays) + 1):
-                    try:
-                        if attempt > 0:
-                            logger.debug(f"fetch_tsunami: API 呼び出し (試行 {attempt+1}/{len(retry_delays)+1})")
-                        async with self.session.get(
-                            "https://api.p2pquake.net/v2/history?codes=552&limit=1",
-                            ) as resp:
-                            if resp.status == 200:
-                                data_list = await resp.json()
-                                if not data_list:
-                                    return
+        失敗しても致命的ではない（次にWebSocket経由で新しい津波情報が
+        来た時点で last_tsunami_id が更新されるだけ）ため、例外はログのみ
+        で握りつぶす。
+        """
+        try:
+            async with self.session.get(
+                "https://api.p2pquake.net/v2/history?codes=552&limit=1",
+            ) as resp:
+                if resp.status == 200:
+                    data_list = await resp.json()
+                    if data_list:
+                        self.last_tsunami_id = data_list[0].get("id")
+                        logger.info(
+                            f"_init_last_tsunami_id: 起動時の既存最新情報を記録"
+                            f"（通知はしない） id={self.last_tsunami_id}"
+                        )
+        except Exception as e:
+            logger.warning(f"_init_last_tsunami_id: 初期化に失敗しました（続行します）: {e}")
 
-                                data = data_list[0]
-                                data_id = data.get("id")
+    async def handle_p2p_tsunami(self, data: dict) -> None:
+        """
+        core.p2p_ws_hub.P2PWebSocketHub から code=552（津波予報・警報・
+        注意報）のメッセージを受け取るハンドラ。
 
-                                if self.last_tsunami_id is None:
-                                    self.last_tsunami_id = data_id
-                                    self._reset_fetch_backoff("tsunami")
-                                    return
+        【移行前との違い】
+        以前は /v2/history?codes=552 を10秒間隔でポーリングしていた
+        （fetch_tsunami）。WebSocket移行により、接続・code フィルタリング・
+        重複排除（id ベース）は core.p2p_ws_hub.P2PWebSocketHub が
+        一元的に行うようになったため、このメソッドは「552のデータを
+        受け取った後の通知処理」のみを担当する。
 
-                                if data_id == self.last_tsunami_id:
-                                    self._reset_fetch_backoff("tsunami")
-                                    return
+        なお、JMA tsunami API 由来の津波観測情報（VTSE41/51/52等、
+        fetch_tsunami_observation が処理するもの）はこのハンドラの対象外。
+        """
+        try:
+            # 【2026-08-02 修正】P2P地震情報WebSocket APIはメッセージに
+            # よって "id" ではなく "_id" を使うことがある（quake.py側の
+            # handle_p2p_quakeと同じ理由）。両対応する。
+            data_id = data.get("id") or data.get("_id")
 
-                                self.last_tsunami_id = data_id
-                                self._last_recv["tsunami"] = datetime.now()
-                                self._recv_count["tsunami"] += 1
-                                logger.info(f"P2P津波情報取得: id={data_id}")
-                                self._reset_fetch_backoff("tsunami")
-                                await self.notify_tsunami(data)
-                                return
-                            
-                            elif resp.status >= 500:
-                                # 5xx: 再試行対象
-                                last_error = f"HTTP {resp.status}"
-                                if attempt < len(retry_delays):
-                                    delay = retry_delays[attempt]
-                                    logger.debug(f"fetch_tsunami: {delay}秒後に再試行 (HTTP {resp.status})")
-                                    await asyncio.sleep(delay)
-                                    continue
-                            else:
-                                # 4xx など: 再試行しない
-                                self._record_fetch_failure("tsunami", f"HTTP {resp.status}")
-                                return
-                    
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                        # 接続エラーやタイムアウト: 再試行対象
-                        last_error = str(e)
-                        if attempt < len(retry_delays):
-                            delay = retry_delays[attempt]
-                            logger.debug(f"fetch_tsunami: {delay}秒後に再試行 ({type(e).__name__})")
-                            await asyncio.sleep(delay)
-                            continue
-                
-                # 全再試行失敗
-                self._record_fetch_failure("tsunami", f"retry exhausted: {last_error}")
+            if data_id is None:
+                logger.warning(
+                    f"handle_p2p_tsunami: 受信データに id が含まれていません。"
+                    f"原因調査用の生データ: {data!r}"
+                )
 
-            except Exception:
-                self._record_fetch_failure("tsunami", "exception")
-                logger.error(f"Fetch Tsunami エラー:\n{traceback.format_exc()}")
+            if self.last_tsunami_id is None:
+                if data_id is not None:
+                    self.last_tsunami_id = data_id
+                    logger.info(f"handle_p2p_tsunami: 起動時の既存最新情報を記録（通知はしない） id={data_id}")
+                else:
+                    # 起動直後の最初のメッセージがidなしだった場合、
+                    # last_tsunami_idをNoneのままにしておく。次に来る
+                    # 有効なid付きメッセージから通常運用を開始する。
+                    logger.warning(
+                        "handle_p2p_tsunami: 起動時最初の受信メッセージにidが"
+                        "ありません。次の有効なメッセージまで初期化を待機します"
+                    )
+                return
 
+            if data_id is not None and data_id == self.last_tsunami_id:
+                # ハブ側で既にid単位の重複排除は行われているはずだが、
+                # 念のためこの階層でも同一IDの連続処理を防ぐ。
+                # data_id が None の場合はこの等値比較で誤ってスキップ
+                # されないよう明示的に除外する（None == None による
+                # 「idが無い通知が繰り返し来た場合に2件目以降が
+                # 誤って握りつぶされる」事故を防ぐ）。
+                return
 
-    @fetch_tsunami.before_loop
-    async def before_fetch_tsunami(self):
-        """セッション初期化完了まで待機"""
-        logger.info("fetch_tsunami: wait_until_ready() を実行中...")
-        await self.bot.wait_until_ready()
-        logger.info("fetch_tsunami: Bot の準備完了")
+            if data_id is not None:
+                self.last_tsunami_id = data_id
+            self._last_recv["tsunami"] = datetime.now()
+            self._recv_count["tsunami"] += 1
+            logger.info(f"P2P津波情報取得: id={data_id}")
+            await self.notify_tsunami(data)
+
+        except Exception:
+            logger.error(f"handle_p2p_tsunami エラー:\n{traceback.format_exc()}")
+
 
     # ===============================
     # 津波予想高さ文字列フォーマット
@@ -415,7 +436,10 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             cancelled = data.get("cancelled", False)
             areas = data.get("areas", [])
             time_str = format_jma_time(data.get("issue", {}).get("time", "不明"))
-            tsunami_id = data.get("id")
+            # 画像URL生成・重複判定用のID。P2P地震情報WebSocket APIは
+            # メッセージによって "id" ではなく "_id" を使うことがあるため
+            # 両対応する（quake.py側と同じ理由）。
+            tsunami_id = data.get("id") or data.get("_id")
 
             source = data.get("issue", {}).get("source", "P2P地震情報")
 
@@ -514,8 +538,12 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             if footer_parts:
                 embed.set_footer(text=" | ".join(footer_parts))
 
-            # CDN の画像生成遅延があるため、先にメッセージを送信してから非同期で追加
             sent_msg = await channel.send(embed=embed)
+
+            # ── 地図画像（embed埋め込み） ──
+            # 2026-08-02: CDN反映のリトライ埋め込み方式を、内容検証を
+            # 強化した上で再度採用する（core/p2p_image.py の
+            # _attach_p2p_image docstring参照）。
             if tsunami_id:
                 self.bot.loop.create_task(self._attach_p2p_image(sent_msg, tsunami_id))
 

@@ -355,6 +355,14 @@ WOLFX_WSS = "wss://ws-api.wolfx.jp/jma_eew"
 P2P_WSS   = "wss://api.p2pquake.net/v2/ws"
 P2P_API   = "https://api.p2pquake.net/v2/history"
 
+# P2P地震情報の地図画像埋め込み（CDNへのリトライポーリング）を一時的に
+# 無効化するフラグ。原因切り分けのため画像埋め込み処理自体をオフに
+# できるようにする。無効化時は core.p2p_image.P2PImageMixin
+# .build_p2p_image_url_text() が生成する画像URLを通知本文に含めることで、
+# Discord自体のリンクプレビュー機能により画像が自動展開される
+# （Bot側でのリトライ・embed編集は行わない）。
+P2P_IMAGE_ATTACH_ENABLED = _env_bool("P2P_IMAGE_ATTACH_ENABLED", True)
+
 # ===============================
 # APM (Application Performance Monitoring) 設定
 # ===============================

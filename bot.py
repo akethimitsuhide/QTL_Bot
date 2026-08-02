@@ -31,12 +31,29 @@ AudioCog は EewCog・QuakeInfoCog より前に登録する必要がある
 この新構成に切り替えること。両方を同時に動かすと全ての情報が
 二重通知される。
 
+【二重起動検知（2026-08-02 追加, core/pid_guard.py）】
+実際に「前のプロセスが完全終了しないまま新プロセスを起動してしまい、
+同一のEEW/地震情報が2重に通知される」事故が発生したことを受けて、
+起動時に PID ファイル（bot.pid、CLIテストモード時は bot.test.pid）を
+確認・作成する仕組みを追加した。既存のPIDファイルが生きている
+プロセスを指している場合は警告ログを出す（強制停止はしない）。
+
 【既知の設計事項】
 南海トラフ地震臨時情報・顕著な地震の震源要素更新のお知らせは、
 tsunami API経由（TsunamiCog）と quake API経由（OtherInfoCog）の
 2つの独立した経路で検知される。これは元のbot.py（分割前）から
 存在した設計であり、Cog分割による新規バグではない
 （詳細は cogs/other.py の docstring 参照）。
+
+【P2P地震情報 WebSocket移行（2026-08 feature/p2p-websocket-migration）】
+従来、EewCog（code=556専用）は自前でWebSocket接続を保持し、
+QuakeInfoCog（code=551）・TsunamiCog（code=552）はそれぞれ独立して
+/v2/history をポーリングしていた。IPアドレスあたり最大2接続という
+レート制限を確実に守るため、P2P地震情報 WebSocket API
+（wss://api.p2pquake.net/v2/ws）への接続を core.p2p_ws_hub.P2PWebSocketHub
+が1本だけ保持し、受信したメッセージを code（551/552/556）に応じて
+各Cogのハンドラ（handle_p2p_quake / handle_p2p_tsunami / handle_p2p_eew）
+へディスパッチする構成に統一した。ハブ自体が id ベースの重複排除も行う。
 
 【CLIテスト実行モード】
 自動テストが存在しなかった問題への対応として、以下のようにサンプルJSON
@@ -99,6 +116,10 @@ if _test_target is not None:
 async def main():
     setup_logging()
 
+    from core.pid_guard import check_and_write_pid
+    is_test_mode = _test_target is not None
+    check_and_write_pid(is_test_mode=is_test_mode)
+
     if _test_target is not None:
         cog_key, json_path = _test_target
         logger.warning(
@@ -139,8 +160,33 @@ async def main():
 
             # ── Step2: 津波 Cog ──
             from cogs.tsunami import TsunamiCog
-            await bot.add_cog(TsunamiCog(bot))
+            tsunami_cog = TsunamiCog(bot)
+            await bot.add_cog(tsunami_cog)
             logger.info("TsunamiCog を登録しました")
+
+            # ── P2P地震情報 WebSocket ハブ（2026-08 feature/p2p-websocket-migration） ──
+            # EewCog（code=556）・QuakeInfoCog（code=551）・TsunamiCog（code=552）が
+            # それぞれ個別に wss://api.p2pquake.net/v2/ws へ接続すると、
+            # IPアドレスあたり最大2接続というレート制限に抵触する恐れがある。
+            # そのため、接続はこのハブが1つだけ保持し、受信メッセージを
+            # code に応じて各Cogのハンドラへディスパッチする構成にしている。
+            # EewCog / QuakeInfoCog / TsunamiCog の登録が全て完了した直後
+            # （＝各Cogの handle_p2p_* メソッドが確実に参照できる状態）で
+            # ハブを構築・起動する。
+            from core.p2p_ws_hub import P2PWebSocketHub
+            p2p_hub = P2PWebSocketHub(bot.is_closed)
+            eew_cog = bot.get_cog("EewCog")
+            quake_cog = bot.get_cog("QuakeInfoCog")
+            p2p_hub.register("eew", eew_cog.handle_p2p_eew)
+            p2p_hub.register("quake", quake_cog.handle_p2p_quake)
+            p2p_hub.register("tsunami", tsunami_cog.handle_p2p_tsunami)
+            # 他Cogから !status 等で参照できるよう bot にぶら下げておく
+            bot.p2p_hub = p2p_hub
+            bot.loop.create_task(p2p_hub.run())
+            logger.info(
+                "P2PWebSocketHub を起動しました "
+                "(code=551→quake, 552→tsunami, 556→eew, 接続は1本のみ)"
+            )
 
             # ── Step3: 火山 Cog ──
             from cogs.volcano import VolcanoCog
@@ -181,6 +227,9 @@ async def main():
             # close_scratchtts_session() は何もせず即座に返る。
             from core.tts_engines import close_scratchtts_session
             await close_scratchtts_session()
+
+            from core.pid_guard import remove_pid_file
+            remove_pid_file(is_test_mode=is_test_mode)
 
 
 if __name__ == "__main__":

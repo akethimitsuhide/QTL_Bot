@@ -232,6 +232,20 @@ class SystemCog(commands.Cog):
     def _tsunami_attr(self, name, default=None):
         return get_cog_attr(self.bot, "TsunamiCog", name, default)
 
+    def _p2p_hub_stats(self) -> dict | None:
+        """
+        core.p2p_ws_hub.P2PWebSocketHub の統計情報を安全に取得する。
+        bot.py で bot.p2p_hub にハブがぶら下げられている前提だが、
+        CLIテストモード等でハブが未起動の場合も想定し None を許容する。
+        """
+        hub = getattr(self.bot, "p2p_hub", None)
+        if hub is None:
+            return None
+        try:
+            return hub.get_stats()
+        except Exception:
+            return None
+
     def _volcano_attr(self, name, default=None):
         return get_cog_attr(self.bot, "VolcanoCog", name, default)
 
@@ -399,9 +413,18 @@ class SystemCog(commands.Cog):
         embed.add_field(name="API 受信状況", value="\n".join(api_lines), inline=False)
 
         # -- タスク稼働状態 --
+        p2p_hub_stats = self._p2p_hub_stats()
+        if p2p_hub_stats is None:
+            p2p_hub_line = "[ - ] 未起動 **P2PWebSocketHub (統合, 551/552/556)**"
+        else:
+            recv = p2p_hub_stats.get("recv_count", {})
+            p2p_hub_line = (
+                f"[OK] 稼働中 **P2PWebSocketHub (統合, 551/552/556)** "
+                f"quake={recv.get('quake', 0)} tsunami={recv.get('tsunami', 0)} "
+                f"eew={recv.get('eew', 0)}"
+            )
         task_lines = [
-            f"{task_status(self._quake_info_attr('fetch_quake'))} **fetch_quake**",
-            f"{task_status(self._tsunami_attr('fetch_tsunami'))} **fetch_tsunami**",
+            p2p_hub_line,
             f"{task_status(self._tsunami_attr('fetch_tsunami_observation'))} **fetch_tsunami_observation**",
             f"{task_status(self._usgs_attr('fetch_usgs_quake')) if USGS_ENABLED else '[ - ] 無効'} **fetch_usgs_quake**",
             f"{asyncio_task_status(self._audio_attr('speech_task'))} **speech_worker (audio)**",
@@ -586,9 +609,9 @@ class SystemCog(commands.Cog):
                         return "error"
                     return "done"
 
+                p2p_hub_stats = self._p2p_hub_stats()
                 tasks_info = {
-                    "fetch_quake": _loop_status(self._quake_info_attr("fetch_quake")),
-                    "fetch_tsunami": _loop_status(self._tsunami_attr("fetch_tsunami")),
+                    "p2p_ws_hub": "running" if p2p_hub_stats is not None else "not_started",
                     "fetch_tsunami_observation": _loop_status(self._tsunami_attr("fetch_tsunami_observation")),
                     "fetch_usgs_quake": _loop_status(self._usgs_attr("fetch_usgs_quake")) if USGS_ENABLED else "disabled",
                     "speech_worker_audio": _task_status(self._audio_attr("speech_task")),
@@ -599,6 +622,8 @@ class SystemCog(commands.Cog):
                     "fetch_long_period": _loop_status(self._other_attr("fetch_long_period")),
                     "fetch_quake_advisory": _loop_status(self._other_attr("fetch_quake_advisory")),
                 }
+                if p2p_hub_stats is not None:
+                    tasks_info["p2p_ws_hub_recv_count"] = p2p_hub_stats.get("recv_count", {})
 
                 usgs_info: dict = {"enabled": USGS_ENABLED}
                 if USGS_ENABLED:
