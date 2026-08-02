@@ -346,7 +346,10 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         fetch_tsunami_observation が処理するもの）はこのハンドラの対象外。
         """
         try:
-            data_id = data.get("id")
+            # 【2026-08-02 修正】P2P地震情報WebSocket APIはメッセージに
+            # よって "id" ではなく "_id" を使うことがある（quake.py側の
+            # handle_p2p_quakeと同じ理由）。両対応する。
+            data_id = data.get("id") or data.get("_id")
 
             if data_id is None:
                 logger.warning(
@@ -434,7 +437,10 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             cancelled = data.get("cancelled", False)
             areas = data.get("areas", [])
             time_str = format_jma_time(data.get("issue", {}).get("time", "不明"))
-            tsunami_id = data.get("id")
+            # 画像URL生成・重複判定用のID。P2P地震情報WebSocket APIは
+            # メッセージによって "id" ではなく "_id" を使うことがあるため
+            # 両対応する（quake.py側と同じ理由）。
+            tsunami_id = data.get("id") or data.get("_id")
 
             source = data.get("issue", {}).get("source", "P2P地震情報")
 

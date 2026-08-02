@@ -154,7 +154,15 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         後の通知処理」のみを担当する。
         """
         try:
-            data_id = data.get("id")
+            # 【2026-08-02 修正】P2P地震情報WebSocket APIは、メッセージに
+            # よって "id" ではなく "_id"（MongoDBのObjectID形式）を
+            # 使うことが実際に確認された（jmaxml-seis-parser-go経由の
+            # DetailScale等）。core.p2p_ws_hub 側は元々 id/_id 両対応
+            # だったが、このメソッドは "id" のみを見ていたため、
+            # "_id" しか持たないメッセージで id=None と誤認識し、
+            # 地図画像URLの生成（notify_quake内のquake_id取得）や
+            # 重複判定に失敗していた。
+            data_id = data.get("id") or data.get("_id")
 
             if data_id is None:
                 # 本来 P2P地震情報 API の JMAQuake（551）は id が必須項目のはず
@@ -349,7 +357,10 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         # メッセージ送信時にリンクプレビューとして画像を展開するため、
         # 実質的な見た目はほぼ変わらない上、CDN反映タイミングに
         # 依存しない（Discordが自分のタイミングでリトライ・再展開する）。
-        quake_id = data.get("id")
+        # 画像URL生成用のID。P2P地震情報WebSocket APIはメッセージによって
+        # "id" ではなく "_id"（MongoDBのObjectID形式）を使うことがある
+        # ため、両対応する（handle_p2p_quakeのdata_id取得と同じ理由）。
+        quake_id = data.get("id") or data.get("_id")
         image_url = self.build_p2p_image_url_text(quake_id) if quake_id else ""
         if image_url:
             if issue_type == "ScalePrompt":
