@@ -212,6 +212,24 @@ ENABLE_TSUNAMI_OBS = _env_bool("ENABLE_TSUNAMI_OBS", True)
 ENABLE_KYOSHIN     = _env_bool("ENABLE_KYOSHIN", True)
 
 # ===============================
+# EWS（緊急警報放送）信号音
+# ===============================
+# 津波警報・大津波警報（津波注意報・津波予報は対象外）が発表・更新された際に、
+# 昭和60年郵政省告示第405号に準拠したAFSK緊急警報信号音を生成・再生する機能。
+# 外部WAVファイルへは出力せず、メモリ上で生成したPCMデータを直接再生する
+# （詳細は core/ews_signal.py 参照）。
+EWS_ENABLE        = _env_bool("EWS_ENABLE", False)
+# 告示別表第1号の地域符号キー（例: "全国共通", "東京都", "熊本県" 等）。
+# core/ews_signal.py の REGION_CODES に定義されていないキーを指定した場合は
+# "全国共通" にフォールバックする。
+EWS_REGION        = _getenv_nonempty("EWS_REGION", "全国共通")
+# 信号送信ブロック数（1ブロック=58bit、約0.9秒）。値が大きいほど信号音が長くなる。
+EWS_BLOCKS        = _env_int("EWS_BLOCKS", 6)
+# 前置・後置固定音（1024Hz単一正弦波）の長さ（秒）。
+EWS_PRETONE_SEC    = float(os.getenv("EWS_PRETONE_SEC", "0.2"))
+EWS_POSTTONE_SEC   = float(os.getenv("EWS_POSTTONE_SEC", "0.2"))
+
+# ===============================
 # 強震モニタ画像解析（Kyoshin）詳細設定
 # ===============================
 # 画像取得・解析パイプラインの各段階（グリッド分割 → 全セル震度化 →

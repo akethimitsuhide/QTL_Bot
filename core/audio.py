@@ -100,6 +100,11 @@ class AudioClientMixin:
         if audio_cog is not None:
             await audio_cog.play_mp3(key)
 
+    async def play_ews_pcm(self, pcm_bytes: bytes, label: str = "ews"):
+        audio_cog = self._get_audio_cog()
+        if audio_cog is not None:
+            await audio_cog.play_ews_pcm(pcm_bytes, label)
+
 
 class AudioMixin:
     """
@@ -233,3 +238,43 @@ class AudioMixin:
             logger.warning(
                 f"play_mp3: MP3キューが満杯です (深さ: {self.mp3_queue.qsize()}) → キー '{key}' はスキップされました"
             )
+
+    def _play_pcm_blocking(self, pcm_bytes: bytes, label: str = "ews"):
+        """
+        16bit/モノラル/44100Hz の生PCMバイト列を、外部ファイルへ書き出さずに
+        直接再生する（pygame.mixer.Sound の buffer 引数を使用）。
+        _play_mp3_blocking と同様、pygame自体がブロッキングAPIのため
+        run_in_executor から呼ばれる想定。
+        """
+        try:
+            sound = pygame.mixer.Sound(buffer=pcm_bytes)
+            channel = sound.play()
+            while channel is not None and channel.get_busy():
+                time.sleep(0.1)
+        except Exception as e:
+            logger.error(f"play_ews_pcm: 再生エラー label={label}: {e}")
+
+    async def play_ews_pcm(self, pcm_bytes: bytes, label: str = "ews") -> None:
+        """
+        EWS（緊急警報放送）信号音等、core.ews_signal で生成した生PCM
+        バイト列を、外部ファイルへ一切出力せずに再生する。
+
+        既存の mp3_queue（ファイルパスベース）とは異なる経路のため、
+        専用のキューは持たずその場で再生する。津波警報・大津波警報の
+        発表・更新という緊急性の高い通知であり、他の音声キューの順番を
+        待たせず即座に鳴らすことを優先する設計とした。
+        pygame.mixer.Sound.play() 自体はブロッキングしないが、
+        再生完了を待つ処理（get_busy() ポーリング）はブロッキングする
+        ため、_play_mp3_blocking と同様 run_in_executor 経由で呼ぶ。
+        """
+        if not _PYGAME_AVAILABLE:
+            logger.warning("play_ews_pcm: pygame.mixer が利用できないため再生をスキップします")
+            return
+        if not pcm_bytes:
+            logger.warning(f"play_ews_pcm: PCMデータが空のため再生をスキップします label={label}")
+            return
+
+        logger.info(f"play_ews_pcm: 再生開始 label={label} ({len(pcm_bytes)} bytes)")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._play_pcm_blocking, pcm_bytes, label)
+        logger.info(f"play_ews_pcm: 再生完了 label={label}")

@@ -53,6 +53,7 @@ from core.config import (
     QUAKE_ENABLE_SCALE_PROMPT, QUAKE_ENABLE_DESTINATION,
     QUAKE_ENABLE_SCALE_AND_DEST, QUAKE_ENABLE_DETAIL_SCALE,
     QUAKE_ENABLE_FOREIGN, QUAKE_ENABLE_OTHER,
+    EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
 )
 from core.constants import (
     INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP,
@@ -61,6 +62,7 @@ from core.constants import (
 from core.helpers import format_jma_time, format_latlon
 from core.audio import AudioClientMixin
 from core.p2p_image import P2PImageMixin
+from core.ews_signal import generate_ews_pcm
 
 logger = logging.getLogger("QTLBot")
 
@@ -325,7 +327,17 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         description = "\n".join(desc_lines)
 
         dom_tsunami = eq.get("domesticTsunami", "None")
-        description += f"\n\n{TSUNAMI_MAP.get(dom_tsunami, '情報なし')}"
+        # 【2026-08-03 追加】P2P地震情報の domesticTsunami は速報段階の
+        # 推定値であり、Warning が返っても実際に気象庁から「津波警報」が
+        # 正式発表されているとは限らない。TSUNAMI_MAP をそのまま使うと
+        # 「津波警報」と断定的に表記してしまうため、Watch/Warning は
+        # まとめて「津波警報・注意報を発表中」という控えめな表現に
+        # 差し替える（NonEffective 等、他の値は TSUNAMI_MAP のまま）。
+        if dom_tsunami in ("Watch", "Warning"):
+            tsunami_display = "津波警報・注意報を発表中"
+        else:
+            tsunami_display = TSUNAMI_MAP.get(dom_tsunami, '情報なし')
+        description += f"\n\n{tsunami_display}"
 
         # ── 震度一覧 ──
         # 要件1（震度速報）・要件3（各地の震度に関する情報、最大震度3以上）で
@@ -401,8 +413,12 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         tsunami_speak = ""
         tsunami_speak_map = {
             "MajorWarning": "現在、大津波警報を発表中です。",
-            "Warning":      "現在、津波警報を発表中です。",
-            "Watch":        "現在、津波注意報を発表中です。",
+            # 【2026-08-03 追加】Watch/Warning はまとめて「津波予報等を
+            # 発表中」という控えめな表現にする（通知本文の変更と同じ理由）。
+            "Warning":      "現在、津波予報等を発表中です。",
+            "Watch":        "現在、津波予報等を発表中です。",
+            "NonEffective": "この地震で、若干の海面変動があるかもしれませんが、被害の心配はありません。",
+            "None":         "この地震による津波の心配はありません。",
         }
         if dom_tsunami in tsunami_speak_map:
             tsunami_speak = " " + tsunami_speak_map[dom_tsunami]
@@ -491,6 +507,33 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
         if not skip_speech:
             await self.play_quake_sound(data)
+
+        # ── EWS（緊急警報放送）信号音 ──
+        # 津波警報・大津波警報（津波注意報・津波予報は対象外）が発表・
+        # 更新された際に、AFSK緊急警報信号音を鳴らす。CLIテスト実行時
+        # (is_test=True) は実際の警報ではないため対象外とする。
+        if EWS_ENABLE and not is_test and dom_tsunami in ("Warning", "MajorWarning"):
+            await self._play_ews_signal(dom_tsunami)
+
+    async def _play_ews_signal(self, dom_tsunami: str) -> None:
+        """
+        core.ews_signal.generate_ews_pcm でメモリ上にPCMを生成し、
+        外部ファイルへ一切出力せずそのまま再生する。
+        PCM生成・再生とも重い処理ではないが、万一失敗しても
+        notify_quake 本体の通知・読み上げ自体は既に完了しているため、
+        例外はログに留め呼び出し元へは伝播させない。
+        """
+        try:
+            pcm_bytes = generate_ews_pcm(
+                region_key=EWS_REGION,
+                blocks=EWS_BLOCKS,
+                pre_tone_sec=EWS_PRETONE_SEC,
+                post_tone_sec=EWS_POSTTONE_SEC,
+            )
+            logger.info(f"EWS信号音を再生します（domesticTsunami={dom_tsunami}, region={EWS_REGION}）")
+            await self.play_ews_pcm(pcm_bytes, label=f"ews_{dom_tsunami}")
+        except Exception:
+            logger.error(f"EWS信号音の生成・再生でエラー:\n{traceback.format_exc()}")
 
     def _convert_jma_quake_to_p2p(self, data: dict) -> dict:
         """
