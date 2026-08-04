@@ -56,12 +56,33 @@ from core.config import (
     TTS_ENGINE, SCRATCHTTS_LOCALE, SCRATCHTTS_GENDER,
 )
 from core.tts_engines import synthesize, SCRATCHTTS_PITCH_SEMITONES
+from core.ews_signal import SAMPLE_RATE as EWS_PCM_SAMPLE_RATE
 
 logger = logging.getLogger("QTLBot")
 
 try:
     import pygame
-    pygame.mixer.init()
+    # 【2026-08-04 修正】frequency未指定だとpygame.mixerはデフォルトの
+    # 22050Hzでミキサーを初期化する。pygame.mixer.music（MP3再生）は
+    # ファイルを都度デコードして再生するため、ミキサー周波数と実ファイルの
+    # サンプルレートが異なっていてもSDL_mixerが自動リサンプリングして
+    # 正しいピッチで再生されるが、pygame.mixer.Sound(buffer=...)
+    # （core.ews_signal で生成する生PCMバッファの再生に使用）は
+    # 自動リサンプリングされず、バッファの中身をミキサー周波数・
+    # チャンネル数のデータとしてそのまま解釈してしまう。
+    #
+    # 実機検証で以下2点のズレが同時に起きていたことを確認した:
+    #   1. サンプルレート: ews_signal.SAMPLE_RATE=44100Hz に対し、
+    #      ミキサーはデフォルトの22050Hzで初期化されていた
+    #   2. チャンネル数: ews_signal が生成するPCMはモノラル(1ch)だが、
+    #      ミキサーはデフォルトのステレオ(2ch)で初期化されていた
+    #      （モノラルデータをステレオのインターリーブとして誤読し、
+    #      実際のサンプル数が半分に解釈されてしまう）
+    # どちらも「実際より短い時間で再生し切ってしまう＝ピッチが上がる」
+    # 方向にズレるため、両方が重なると影響が増幅する。
+    # ews_signal.SAMPLE_RATE・生成PCMのチャンネル数（モノラル）と
+    # 一致させるため、frequency・channels を明示的に指定する。
+    pygame.mixer.init(frequency=44100, channels=1)
     _PYGAME_AVAILABLE = True
 except Exception as e:
     _PYGAME_AVAILABLE = False
@@ -273,6 +294,32 @@ class AudioMixin:
         if not pcm_bytes:
             logger.warning(f"play_ews_pcm: PCMデータが空のため再生をスキップします label={label}")
             return
+
+        # 【2026-08-04 追加】ミキサーの実際の初期化周波数と、
+        # core.ews_signal が生成したPCMのサンプルレート（44100Hz固定）が
+        # 一致しているかを検証する。一致していない場合、
+        # pygame.mixer.Sound(buffer=...) はリサンプリングせずバッファを
+        # そのまま解釈するため、意図しないピッチ・再生速度で鳴ってしまう
+        # （実機で「音が高くなる」不具合として発現した根本原因）。
+        # ここでは強制的に補正はせず、設定不一致に気づけるよう警告のみ
+        # 出す（pygame.mixer.init の呼び出し側=モジュールロード時点で
+        # frequency=44100 を明示指定することを主対策としている）。
+        try:
+            mixer_freq, _fmt, mixer_channels = pygame.mixer.get_init()
+            if mixer_freq != EWS_PCM_SAMPLE_RATE:
+                logger.warning(
+                    f"play_ews_pcm: pygame.mixer の初期化周波数（{mixer_freq}Hz）が "
+                    f"EWS PCMのサンプルレート（{EWS_PCM_SAMPLE_RATE}Hz）と一致していません。"
+                    f"再生速度・ピッチが意図しない値になる可能性があります。"
+                )
+            if mixer_channels != 1:
+                logger.warning(
+                    f"play_ews_pcm: pygame.mixer のチャンネル数（{mixer_channels}ch）が "
+                    f"EWS PCMのチャンネル数（1ch, モノラル）と一致していません。"
+                    f"再生速度・ピッチが意図しない値になる可能性があります。"
+                )
+        except Exception:
+            pass  # get_init() 自体の失敗は再生継続を優先し無視する
 
         logger.info(f"play_ews_pcm: 再生開始 label={label} ({len(pcm_bytes)} bytes)")
         loop = asyncio.get_running_loop()

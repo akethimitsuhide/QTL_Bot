@@ -22,6 +22,7 @@
 ### EWS（緊急警報放送）信号音
 - 津波警報・大津波警報（`domesticTsunami` が `Warning` または `MajorWarning`。津波注意報・津波予報は対象外）が発表・更新された P2P 地震情報を受信した際に、昭和60年郵政省告示第405号に準拠した AFSK 方式の緊急警報信号音（第二種開始信号）を生成・再生する
 - 信号音は `core/ews_signal.py` でビット列組み立て・PCM波形合成を行い、外部 WAV ファイルへは一切出力しない。生成した PCM バイト列はメモリ上のまま `core/audio.py` の `play_ews_pcm`（`pygame.mixer.Sound(buffer=...)`）に渡して直接再生する
+- `pygame.mixer.Sound(buffer=...)` はリサンプリングを行わず、ミキサー初期化時のサンプルレート・チャンネル数をそのままバッファの解釈に使うため、`core/audio.py` の `pygame.mixer.init()` は `core/ews_signal.py` の生成条件（44100Hz・モノラル）に明示的に合わせて初期化している（不一致のまま再生するとピッチ・再生速度が変わってしまう。既存の `pygame.mixer.music`（MP3再生）はファイル再生時に自動リサンプリングされるためこの制約を受けない）
 - `EWS_ENABLE=true` で有効化（デフォルト `false`。オプトイン機能）。地域符号・送信ブロック数・前置後置固定音の長さは環境変数で設定可能（下記「EWS 設定」参照）
 - CLI テスト実行時（`is_test=True`）は実際の警報ではないため対象外
 
