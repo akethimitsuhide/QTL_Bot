@@ -127,6 +127,15 @@ AQUESTALK_PATH  = _raw_aquestalk or None
 AQUESTALK_SPEED = int(os.getenv("AQUESTALK_SPEED", "150"))
 AUDIO_PLAYER    = os.getenv("AUDIO_PLAYER", "aplay")
 
+# ScratchTTS のピッチシフト（core/tts_engines.py._pitch_shift_ffmpeg）で
+# 使用する ffmpeg / ffprobe の実行コマンド（またはフルパス）。
+# デフォルトはコマンド名のみとし、OSのPATHから解決させる
+# （Raspberry Pi OS 等、`apt install ffmpeg` で標準的にPATHへ入る
+# 環境を主に想定）。PATHが通っていない・別名でインストールされている
+# 等の環境では、ここに絶対パスを指定することで対応できる。
+FFMPEG_PATH  = os.getenv("FFMPEG_PATH", "ffmpeg")
+FFPROBE_PATH = os.getenv("FFPROBE_PATH", "ffprobe")
+
 if TTS_ENGINE == "aquestalk" and not AQUESTALK_PATH:
     logger.info("AQUESTALK_PATH 未設定のため音声読み上げ機能は無効です（TTS_ENGINE=aquestalk）")
 

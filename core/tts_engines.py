@@ -33,6 +33,7 @@ import aiohttp
 from core.config import (
     AQUESTALK_PATH, AQUESTALK_SPEED,
     SCRATCHTTS_URL, SCRATCHTTS_LOCALE, SCRATCHTTS_GENDER, SCRATCHTTS_TIMEOUT_SEC,
+    FFMPEG_PATH, FFPROBE_PATH,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -145,7 +146,7 @@ async def _probe_sample_rate(audio_bytes: bytes) -> int | None:
     """ffprobe で音声データの実サンプルレート(Hz)を取得する。"""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffprobe",
+            FFPROBE_PATH,
             "-v", "error",
             "-select_streams", "a:0",
             "-show_entries", "stream=sample_rate",
@@ -161,7 +162,10 @@ async def _probe_sample_rate(audio_bytes: bytes) -> int | None:
             return None
         return int(out.decode().strip())
     except FileNotFoundError:
-        logger.warning("ffprobe が見つかりません")
+        logger.warning(
+            f"ffprobe が見つかりません（FFPROBE_PATH={FFPROBE_PATH!r}）。"
+            f"環境変数 FFPROBE_PATH で実行パスを指定できます。"
+        )
         return None
     except (ValueError, Exception) as e:
         logger.warning(f"ffprobe 実行エラー: {e}")
@@ -194,7 +198,7 @@ async def _pitch_shift_ffmpeg(audio_bytes: bytes, ratio: float) -> bytes | None:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg",
+            FFMPEG_PATH,
             "-y",
             "-i", "pipe:0",
             "-filter:a", filter_chain,
@@ -213,7 +217,11 @@ async def _pitch_shift_ffmpeg(audio_bytes: bytes, ratio: float) -> bytes | None:
             return None
         return out
     except FileNotFoundError:
-        logger.warning("ffmpeg が見つかりません。ScratchTTS のピッチシフトをスキップします")
+        logger.warning(
+            f"ffmpeg が見つかりません（FFMPEG_PATH={FFMPEG_PATH!r}）。"
+            f"環境変数 FFMPEG_PATH で実行パスを指定できます。"
+            f"ScratchTTS のピッチシフトをスキップします"
+        )
         return None
     except Exception as e:
         logger.error(f"ffmpeg ピッチシフト実行エラー: {e}")

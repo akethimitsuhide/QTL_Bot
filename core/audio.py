@@ -178,16 +178,23 @@ class AudioMixin:
                 audio_out = await synthesize(TTS_ENGINE, text)
 
                 if audio_out:
-                    play_proc = await asyncio.create_subprocess_exec(
-                        AUDIO_PLAYER, "-",
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    _, play_err = await play_proc.communicate(input=audio_out)
-                    logger.info(f"{AUDIO_PLAYER} 終了コード={play_proc.returncode}")
-                    if play_err and play_proc.returncode != 0:
-                        logger.warning(f"{AUDIO_PLAYER} stderr: {play_err.decode(errors='replace')[:200]}")
+                    try:
+                        play_proc = await asyncio.create_subprocess_exec(
+                            AUDIO_PLAYER, "-",
+                            stdin=asyncio.subprocess.PIPE,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        _, play_err = await play_proc.communicate(input=audio_out)
+                        logger.info(f"{AUDIO_PLAYER} 終了コード={play_proc.returncode}")
+                        if play_err and play_proc.returncode != 0:
+                            logger.warning(f"{AUDIO_PLAYER} stderr: {play_err.decode(errors='replace')[:200]}")
+                    except FileNotFoundError:
+                        logger.error(
+                            f"音声プレイヤー '{AUDIO_PLAYER}' が見つかりません。"
+                            f"環境変数 AUDIO_PLAYER で実行パスを指定できます"
+                            f"（例: AUDIO_PLAYER=/usr/bin/aplay）。"
+                        )
                 else:
                     logger.warning(f"音声生成失敗（出力なし, engine={TTS_ENGINE}）: {text[:60]}")
 

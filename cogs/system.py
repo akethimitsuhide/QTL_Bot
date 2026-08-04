@@ -52,6 +52,7 @@ from core.config import (
     RESOURCE_MONITORING_ENABLED, RESOURCE_CHECK_INTERVAL,
     DISK_WARNING_THRESHOLD, DISK_ERROR_THRESHOLD,
     HEALTH_CHECK_TIMEOUT, HEALTH_CHECK_CACHE_TTL, ERROR_NOTIFICATION_TTL,
+    ENABLE_KYOSHIN,
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
@@ -255,6 +256,49 @@ class SystemCog(commands.Cog):
     def _other_attr(self, name, default=None):
         return get_cog_attr(self.bot, "OtherInfoCog", name, default)
 
+    def _kyoshin_attr(self, name, default=None):
+        return get_cog_attr(self.bot, "KyoshinMonitorCog", name, default)
+
+    def _kyoshin_active_events_suffix(self) -> str:
+        """
+        KyoshinMonitorCog.monitor.event_manager.events の件数
+        （現在検知中の揺れイベント数）を " (検知中: N件)" の形式で返す。
+        取得できない場合（Cog未登録・属性未初期化等）は空文字列を返す。
+        """
+        monitor = self._kyoshin_attr("monitor")
+        if monitor is None:
+            return ""
+        try:
+            event_manager = getattr(monitor, "event_manager", None)
+            if event_manager is None:
+                return ""
+            count = len(getattr(event_manager, "events", {}))
+            if count > 0:
+                return f" (検知中: {count}件)"
+            return ""
+        except Exception:
+            return ""
+
+    def _kyoshin_status_dict(self) -> dict:
+        """
+        Web Dashboard JSON API (/status) 向けに、強震モニタ画像解析検知の
+        稼働状態・現在検知中のイベント数を辞書で返す。
+        """
+        monitor = self._kyoshin_attr("monitor")
+        active_event_ids: list[str] = []
+        if monitor is not None:
+            try:
+                event_manager = getattr(monitor, "event_manager", None)
+                if event_manager is not None:
+                    active_event_ids = list(getattr(event_manager, "events", {}).keys())
+            except Exception:
+                pass
+        return {
+            "enabled": ENABLE_KYOSHIN,
+            "active_event_count": len(active_event_ids),
+            "active_event_ids": active_event_ids,
+        }
+
     def _merged_last_recv(self) -> dict:
         """全Cogの _last_recv を1つの dict にマージして返す。"""
         merged: dict = {}
@@ -434,6 +478,8 @@ class SystemCog(commands.Cog):
             f"{asyncio_task_status(self._volcano_attr('warning_task'))} **warning_poller**",
             f"{task_status(self._other_attr('fetch_long_period'))} **fetch_long_period**",
             f"{task_status(self._other_attr('fetch_quake_advisory'))} **fetch_quake_advisory**",
+            f"{asyncio_task_status(self._kyoshin_attr('_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
+            f"**kyoshin_monitor**{self._kyoshin_active_events_suffix()}",
         ]
         embed.add_field(name="タスク稼働状態", value="\n".join(task_lines), inline=False)
 
@@ -621,6 +667,7 @@ class SystemCog(commands.Cog):
                     "warning_poller": _task_status(self._volcano_attr("warning_task")),
                     "fetch_long_period": _loop_status(self._other_attr("fetch_long_period")),
                     "fetch_quake_advisory": _loop_status(self._other_attr("fetch_quake_advisory")),
+                    "kyoshin_monitor": _task_status(self._kyoshin_attr("_monitor_task")) if ENABLE_KYOSHIN else "disabled",
                 }
                 if p2p_hub_stats is not None:
                     tasks_info["p2p_ws_hub_recv_count"] = p2p_hub_stats.get("recv_count", {})
@@ -684,6 +731,7 @@ class SystemCog(commands.Cog):
                             "total_recv_count": volcano_recv_count,
                         },
                         "usgs": usgs_info,
+                        "kyoshin": self._kyoshin_status_dict(),
                     },
                     "tasks": tasks_info,
                     # 後方互換フィールド

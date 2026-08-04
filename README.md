@@ -268,6 +268,8 @@ python bot.py
 | `SCRATCHTTS_LOCALE` | ja-JP | ScratchTTS の言語ロケール |
 | `SCRATCHTTS_GENDER` | female | ScratchTTS の声の性別（`female` / `male`） |
 | `SCRATCHTTS_TIMEOUT_SEC` | 10 | ScratchTTS APIリクエストのタイムアウト秒数 |
+| `FFMPEG_PATH` | ffmpeg | ScratchTTSのピッチシフト（`core/tts_engines.py`）で使用する ffmpeg の実行コマンド／パス。デフォルトはOSのPATHから解決。PATHが通っていない環境では絶対パスを指定 |
+| `FFPROBE_PATH` | ffprobe | 同上、ffprobe（入力音声のサンプルレート取得に使用）のパス |
 | `AUDIO_PLAYER` | aplay | 音声再生コマンド（`aplay` / `mpg123` 等） |
 | `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ |
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
@@ -340,7 +342,7 @@ curl http://localhost:8080/status | jq
 ```json
 {
   "status": "online",
-  "timestamp": "2026-06-26T12:00:00.000000",
+  "timestamp": "2026-08-04T12:00:00.000000",
   "bot_user": "QTL_Bot#1234",
   "uptime": "1日 05時間 30分 00秒",
   "uptime_seconds": 106200,
@@ -358,8 +360,8 @@ curl http://localhost:8080/status | jq
       "ws_status": "online",
       "heartbeat_elapsed_sec": 12.4,
       "heartbeat_timeout_sec": 90,
-      "last_eew_id": "20260626120000",
-      "last_recv_time": "2026-06-26T11:59:00.000000",
+      "last_eew_id": "20260804120000",
+      "last_recv_time": "2026-08-04T11:59:00.000000",
       "recv_count": 3
     },
     "p2p_eew": { "last_recv_time": null, "recv_count": 0 }
@@ -371,7 +373,7 @@ curl http://localhost:8080/status | jq
     "tsunami_obs":    { "last_recv_time": null,  "recv_count": 0  },
     "quake_advisory": { "last_recv_time": "...", "recv_count": 5  },
     "volcano": {
-      "last_event_id": "20260626_volcano_XX.json",
+      "last_event_id": "20260804_volcano_XX.json",
       "polling_status": "running",
       "last_recv_time": "...",
       "recv_count": 1,
@@ -385,23 +387,34 @@ curl http://localhost:8080/status | jq
       "last_event_ids": ["us1000abcd"],
       "last_recv_time": "...",
       "recv_count": 2
+    },
+    "kyoshin": {
+      "enabled": true,
+      "active_event_count": 0,
+      "active_event_ids": []
     }
   },
   "tasks": {
-    "fetch_quake": "running",
-    "fetch_tsunami": "running",
-    "fetch_long_period": "running",
+    "p2p_ws_hub": "running",
+    "p2p_ws_hub_recv_count": { "eew": 0, "quake": 12, "tsunami": 0 },
     "fetch_tsunami_observation": "running",
     "fetch_quake_advisory": "running",
     "fetch_usgs_quake": "running",
-    "speech_worker": "running",
-    "mp3_worker": "running",
+    "speech_worker_audio": "running",
+    "mp3_worker_audio": "running",
     "volcano_poller": "running",
     "eruption_poller": "running",
-    "warning_poller": "running"
+    "warning_poller": "running",
+    "fetch_long_period": "running",
+    "kyoshin_monitor": "running"
   }
 }
 ```
+
+> `quake`（地震情報）・`tsunami`（津波情報）・`eew`（緊急地震速報）は、`core/p2p_ws_hub.py` の
+> `P2PWebSocketHub` が単一の WebSocket 接続から一元的に受信・振り分けを行う
+> （2026-08 の REST ポーリング → WebSocket 移行以降。`tasks.p2p_ws_hub` の稼働状態と
+> `tasks.p2p_ws_hub_recv_count` の各種別ごとの受信件数を参照）。
 
 ### GET /health/full（API 疎通確認）
 
@@ -739,5 +752,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-03
+**最終更新**: 2026-08-04
 **対応 Python**: 3.11+
