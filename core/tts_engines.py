@@ -27,6 +27,8 @@ import asyncio
 import logging
 import math
 import urllib.parse
+import wave
+import io
 
 import aiohttp
 
@@ -142,7 +144,42 @@ async def synthesize_scratchtts(text: str) -> bytes | None:
     return pitched
 
 
+def _probe_sample_rate_via_wave(audio_bytes: bytes) -> int | None:
+    """
+    Python標準ライブラリの wave モジュールで、WAVファイルのヘッダーから
+    直接サンプルレートを読み取る。ffprobe（外部コマンド）を使わずに
+    完結するため、ffmpegパッケージ自体はあるがffprobeだけが見つからない
+    環境や、PATHの都合でffprobeだけ動かない環境でもピッチシフト機能を
+    維持できる（2026-08-04 追加、ffprobe未検出時のフォールバック強化）。
+
+    ScratchTTS APIのレスポンスがWAV形式でない場合（MP3等）はここでは
+    解析できず None を返す。その場合は呼び出し元が ffprobe による
+    解析にフォールバックする。
+    """
+    try:
+        with io.BytesIO(audio_bytes) as buf:
+            with wave.open(buf, "rb") as wf:
+                return wf.getframerate()
+    except (wave.Error, EOFError, Exception):
+        return None
+
+
 async def _probe_sample_rate(audio_bytes: bytes) -> int | None:
+    """
+    音声データの実サンプルレート(Hz)を取得する。
+
+    まず ffprobe を使わずに完結する wave モジュールでの直接パースを
+    試み（WAV形式の場合のみ成功する）、それで取得できない場合のみ
+    ffprobe にフォールバックする。両方失敗した場合は None を返す。
+    """
+    rate = _probe_sample_rate_via_wave(audio_bytes)
+    if rate is not None:
+        return rate
+
+    return await _probe_sample_rate_via_ffprobe(audio_bytes)
+
+
+async def _probe_sample_rate_via_ffprobe(audio_bytes: bytes) -> int | None:
     """ffprobe で音声データの実サンプルレート(Hz)を取得する。"""
     try:
         proc = await asyncio.create_subprocess_exec(

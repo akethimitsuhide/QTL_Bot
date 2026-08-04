@@ -348,9 +348,52 @@ class SystemCog(commands.Cog):
         last_recv = self._merged_last_recv()
         recv_count = self._merged_recv_count()
 
-        def api_status(key: str, warn_sec: int = 300, err_sec: int = 600) -> tuple[str, str]:
+        def api_status(key: str, warn_sec: int = 300, err_sec: int = 600,
+                       connection_alive: bool | None = None) -> tuple[str, str]:
+            """
+            API/データソースごとの受信状況を (アイコン, 詳細文字列) で返す。
+
+            【2026-08-04 修正: イベント駆動系の誤NG表示】
+            当初はこの関数を「最後の受信からの経過時間」のみで判定していた。
+            これはUSGS（10分間隔で必ずポーリングされる）のような定期
+            ポーリング系には正しい判定方法だが、P2P地震情報・津波情報・
+            長周期地震動等のイベント駆動系（地震や津波が実際に発生
+            しない限り何も受信されない）には適用できない。実際に
+            「2時間地震が発生していないだけで接続自体は正常」なのに
+            [NG]（エラー）と誤表示される事象が実機で確認された。
+
+            connection_alive を指定した場合はイベント駆動系向けの判定
+            ロジックに切り替わる: 受信自体がまだ無くても接続/タスクが
+            生存していれば正常（[OK] または [ - ]）とし、経過時間による
+            [NG]化は行わない。接続/タスクが死んでいる場合のみ [NG] とする。
+            connection_alive を省略した場合は従来通りの経過時間ベース
+            判定を行う（USGS等の定期ポーリング系向け）。
+            """
             t = last_recv.get(key)
             count = recv_count.get(key, 0)
+
+            if connection_alive is not None:
+                # イベント駆動系: 接続/タスクの生存状態を優先して判定する。
+                # 受信済みなら受信時刻を表示し、未受信でも接続が生きて
+                # いれば「[OK] 未受信（正常）」として扱う。
+                if t is None:
+                    if connection_alive:
+                        return "[OK]", "未受信（接続は正常）"
+                    else:
+                        return "[NG]", "未受信（接続断）"
+                diff = int((now - t).total_seconds())
+                time_str = t.strftime("%H:%M:%S")
+                count_str = f"(計{count}件)"
+                if diff < 60:
+                    ago = f"{diff}秒前"
+                elif diff < 3600:
+                    ago = f"{diff // 60}分{diff % 60}秒前"
+                else:
+                    ago = f"{diff // 3600}時間前"
+                icon = "[OK]" if connection_alive else "[NG]"
+                return icon, f"{time_str} ({ago}) {count_str}"
+
+            # 従来ロジック（経過時間ベース、USGS等の定期ポーリング系向け）
             if t is None:
                 return "[ - ]", "未受信"
             diff = int((now - t).total_seconds())
@@ -441,18 +484,44 @@ class SystemCog(commands.Cog):
         embed.add_field(name="EEW", value="\n".join(eew_lines), inline=False)
 
         # -- API 受信状況 --
+        # 【2026-08-04 修正】quake/tsunami/long_period/tsunami_obs/
+        # quake_advisory/volcano はイベント駆動系（実際に地震・津波・
+        # 噴火等が発生しない限り受信されない）のため、経過時間ではなく
+        # 接続/タスクの生存状態で判定する。usgsのみ定期ポーリング系
+        # （10分間隔で必ず実行される）のため従来通り経過時間で判定する。
+        def _loop_is_running(task_obj) -> bool:
+            """
+            core.config.tasks.loop（is_running()を持つ）と
+            asyncio.Task（done()を持つ）の両方に対応した生存判定。
+            volcano_task 等は asyncio.Task、fetch_long_period 等は
+            tasks.loop でラップされているため、両対応にしている。
+            """
+            if task_obj is None:
+                return False
+            try:
+                if hasattr(task_obj, "is_running"):
+                    return bool(task_obj.is_running())
+                if hasattr(task_obj, "done"):
+                    return not task_obj.done()
+            except Exception:
+                pass
+            return False
+
+        p2p_hub_alive = self._p2p_hub_stats() is not None
+
         api_rows = [
-            ("地震情報 (P2P)",   "quake",           120, 600),
-            ("津波情報 (P2P)",   "tsunami",          60, 300),
-            ("長周期地震動",     "long_period",      120, 600),
-            ("津波観測情報",     "tsunami_obs",      120, 600),
-            ("気象庁その他",     "quake_advisory",   120, 600),
-            ("火山情報",         "volcano",         120, 600),
-            ("USGS 地震情報",    "usgs",            600, 1200),
+            # (label, key, warn_sec, err_sec, connection_alive)
+            ("地震情報 (P2P)",   "quake",           120, 600, p2p_hub_alive),
+            ("津波情報 (P2P)",   "tsunami",          60, 300, p2p_hub_alive),
+            ("長周期地震動",     "long_period",      120, 600, _loop_is_running(self._other_attr("fetch_long_period"))),
+            ("津波観測情報",     "tsunami_obs",      120, 600, _loop_is_running(self._tsunami_attr("fetch_tsunami_observation"))),
+            ("気象庁その他",     "quake_advisory",   120, 600, _loop_is_running(self._other_attr("fetch_quake_advisory"))),
+            ("火山情報",         "volcano",         120, 600, _loop_is_running(self._volcano_attr("volcano_task"))),
+            ("USGS 地震情報",    "usgs",            600, 1200, None),
         ]
         api_lines = []
-        for label, key, warn, err in api_rows:
-            icon, detail = api_status(key, warn, err)
+        for label, key, warn, err, connection_alive in api_rows:
+            icon, detail = api_status(key, warn, err, connection_alive=connection_alive)
             api_lines.append(f"{icon} **{label}**: {detail}")
         embed.add_field(name="API 受信状況", value="\n".join(api_lines), inline=False)
 

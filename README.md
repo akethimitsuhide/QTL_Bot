@@ -269,7 +269,7 @@ python bot.py
 | `SCRATCHTTS_GENDER` | female | ScratchTTS の声の性別（`female` / `male`） |
 | `SCRATCHTTS_TIMEOUT_SEC` | 10 | ScratchTTS APIリクエストのタイムアウト秒数 |
 | `FFMPEG_PATH` | ffmpeg | ScratchTTSのピッチシフト（`core/tts_engines.py`）で使用する ffmpeg の実行コマンド／パス。デフォルトはOSのPATHから解決。PATHが通っていない環境では絶対パスを指定 |
-| `FFPROBE_PATH` | ffprobe | 同上、ffprobe（入力音声のサンプルレート取得に使用）のパス |
+| `FFPROBE_PATH` | ffprobe | 同上、ffprobe（入力音声のサンプルレート取得に使用。まずPython標準の`wave`モジュールでWAVヘッダーを直接解析し、失敗した場合のみffprobeにフォールバックする）のパス |
 | `AUDIO_PLAYER` | aplay | 音声再生コマンド（`aplay` / `mpg123` 等） |
 | `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ |
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
