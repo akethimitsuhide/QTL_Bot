@@ -62,6 +62,8 @@ QuakeInfoCog（code=551）・TsunamiCog（code=552）はそれぞれ独立して
     python3 bot.py --test_eew tests/fixtures/eew_sample.json
     python3 bot.py --test_quake tests/fixtures/quake_sample.json
     python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
+    python3 bot.py --test_ews                  # EWS信号音（MajorWarning相当）を再生
+    python3 bot.py --test_ews Warning           # EWS信号音（Warning相当）を再生
     （その他の対応Cogは core/test_runner.py の TEST_TARGETS を参照）
 
 実際にDiscordへ接続し、対象Cogの notify_* 関数を is_test=True で呼び出す

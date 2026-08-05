@@ -58,20 +58,36 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
 
     通常起動（テスト引数なし）の場合は None を返す。
     見つかった場合は (cog_key, json_path) のタプルを返す。
+
+    TEST_TARGETS[cog_key].get("requires_json", True) が False の対象
+    （例: ews）は、JSONファイルを必要としないテストのため、
+    `--test_ews` のように値を省略しても検出できるよう
+    nargs="?" を指定する（省略時は json_path として空文字列を返す）。
     """
     parser = argparse.ArgumentParser(add_help=False)
-    for cog_key in TEST_TARGETS:
-        parser.add_argument(f"--test_{cog_key}", metavar="JSON_PATH", default=None)
+    for cog_key, target in TEST_TARGETS.items():
+        if target.get("requires_json", True):
+            parser.add_argument(f"--test_{cog_key}", metavar="JSON_PATH", default=None)
+        else:
+            parser.add_argument(
+                f"--test_{cog_key}", metavar="JSON_PATH", nargs="?",
+                const="", default=None,
+            )
 
     # 未知の引数（Botの他オプション等）があってもエラーにしない
     known_args, _ = parser.parse_known_args(argv)
 
     global CLI_TEST_MODE
-    for cog_key in TEST_TARGETS:
+    for cog_key, target in TEST_TARGETS.items():
         json_path = getattr(known_args, f"test_{cog_key}", None)
-        if json_path:
+        requires_json = target.get("requires_json", True)
+        # requires_json=True: json_path が非空文字列なら検出（従来通り）
+        # requires_json=False: json_path が None でなければ検出
+        #   （空文字列 "" も「フラグだけ指定された」という有効な検出結果）
+        detected = (json_path is not None) if not requires_json else bool(json_path)
+        if detected:
             CLI_TEST_MODE = True
-            return cog_key, json_path
+            return cog_key, json_path or ""
 
     return None
 
@@ -181,6 +197,21 @@ TEST_TARGETS = {
         "data_kwarg": "list_item",
         "expected_fields": [],
     },
+    "ews": {
+        "cog_name": "QuakeInfoCog",
+        "method": "_play_ews_signal",
+        # EWS信号音の生成・再生自体は地震データ(JSON)を必要としない
+        # （domesticTsunami の値だけをトリガーとして使う）ため、
+        # 他のテスト対象と異なりJSONファイルの指定を必須としない。
+        "requires_json": False,
+        # --test_ews に続けて "Warning" または "MajorWarning" を指定
+        # できる（例: --test_ews MajorWarning）。省略時は MajorWarning
+        # （最も緊急性の高い信号）を使う。
+        "cli_arg_builder": lambda arg: {
+            "dom_tsunami": arg if arg in ("Warning", "MajorWarning") else "MajorWarning"
+        },
+        "expected_fields": [],
+    },
 }
 
 
@@ -243,18 +274,19 @@ async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
         await bot.close()
         sys.exit(1)
 
+    requires_json = target.get("requires_json", True)
+
     banner = "=" * 60
     print(banner)
     print(f"[TEST] これはテスト実行です — 対象: {cog_key} ({target['cog_name']}.{target['method']})")
-    print(f"[TEST] 入力ファイル: {json_path}")
+    if requires_json:
+        print(f"[TEST] 入力ファイル: {json_path}")
     print(banner)
     logger.warning(
         f"★★★ CLIテストモードで実行中 ★★★ "
-        f"対象: {cog_key} ({target['cog_name']}.{target['method']}) / 入力: {json_path}"
+        f"対象: {cog_key} ({target['cog_name']}.{target['method']})"
+        + (f" / 入力: {json_path}" if requires_json else "")
     )
-
-    data = load_test_json(json_path)
-    validate_expected_fields(cog_key, data)
 
     cog = bot.get_cog(target["cog_name"])
     if cog is None:
@@ -269,6 +301,34 @@ async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
         logger.error(f"CLIテスト失敗: メソッド '{target['method']}' が見つかりません")
         await bot.close()
         sys.exit(1)
+
+    if not requires_json:
+        # 【EWS等、JSONファイルを必要としないテスト対象】
+        # ews_arg_builder が定義されていればそれを使って呼び出し引数を
+        # 組み立てる（現状は ews のみ、domesticTsunami の値を組み立てる）。
+        try:
+            arg_builder = target.get("cli_arg_builder")
+            if arg_builder is not None:
+                kwargs = arg_builder(json_path)
+            else:
+                kwargs = {}
+            await method(**kwargs)
+            print(banner)
+            print(f"[TEST] 完了しました（{cog_key}）。実際の音声・信号音が再生されたか確認してください。")
+            print(banner)
+            logger.warning(f"★★★ CLIテスト完了 ★★★ 対象: {cog_key}")
+        except Exception as e:
+            print(banner)
+            print(f"[TEST] 実行中にエラーが発生しました: {type(e).__name__}: {e}")
+            print(banner)
+            logger.error(f"CLIテスト実行エラー: {e}", exc_info=True)
+        finally:
+            await asyncio.sleep(3)
+            await bot.close()
+        return
+
+    data = load_test_json(json_path)
+    validate_expected_fields(cog_key, data)
 
     data_kwarg = target.get("data_kwarg", "data")
     supports_is_test = target.get("supports_is_test", True)

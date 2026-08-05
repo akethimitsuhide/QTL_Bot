@@ -35,7 +35,7 @@ import aiohttp
 from core.config import (
     AQUESTALK_PATH, AQUESTALK_SPEED,
     SCRATCHTTS_URL, SCRATCHTTS_LOCALE, SCRATCHTTS_GENDER, SCRATCHTTS_TIMEOUT_SEC,
-    FFMPEG_PATH, FFPROBE_PATH,
+    FFMPEG_PATH,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -147,14 +147,17 @@ async def synthesize_scratchtts(text: str) -> bytes | None:
 def _probe_sample_rate_via_wave(audio_bytes: bytes) -> int | None:
     """
     Python標準ライブラリの wave モジュールで、WAVファイルのヘッダーから
-    直接サンプルレートを読み取る。ffprobe（外部コマンド）を使わずに
-    完結するため、ffmpegパッケージ自体はあるがffprobeだけが見つからない
-    環境や、PATHの都合でffprobeだけ動かない環境でもピッチシフト機能を
-    維持できる（2026-08-04 追加、ffprobe未検出時のフォールバック強化）。
+    直接サンプルレートを読み取る。
 
+    【2026-08-04: ffprobe依存の完全撤廃】
+    当初は wave モジュールでの解析に失敗した場合、外部コマンド
+    ffprobe にフォールバックしていたが、ffprobe自体への依存を無くす
+    方針としたため、フォールバック先を廃止しこの関数のみで完結させる。
     ScratchTTS APIのレスポンスがWAV形式でない場合（MP3等）はここでは
-    解析できず None を返す。その場合は呼び出し元が ffprobe による
-    解析にフォールバックする。
+    解析できず None を返す。呼び出し元（_pitch_shift_ffmpeg）はこれを
+    「サンプルレート不明のためピッチシフト不可」として扱い、
+    synthesize_scratchtts側で元音声をそのまま再生するフォールバックに
+    委ねる（ピッチアップされないだけで、音声そのものは再生される）。
     """
     try:
         with io.BytesIO(audio_bytes) as buf:
@@ -164,49 +167,15 @@ def _probe_sample_rate_via_wave(audio_bytes: bytes) -> int | None:
         return None
 
 
-async def _probe_sample_rate(audio_bytes: bytes) -> int | None:
+def _probe_sample_rate(audio_bytes: bytes) -> int | None:
     """
     音声データの実サンプルレート(Hz)を取得する。
 
-    まず ffprobe を使わずに完結する wave モジュールでの直接パースを
-    試み（WAV形式の場合のみ成功する）、それで取得できない場合のみ
-    ffprobe にフォールバックする。両方失敗した場合は None を返す。
+    wave モジュールでのWAVヘッダー直接解析のみで完結する
+    （外部コマンドへの依存なし）。WAV形式でないデータの場合は
+    None を返す。
     """
-    rate = _probe_sample_rate_via_wave(audio_bytes)
-    if rate is not None:
-        return rate
-
-    return await _probe_sample_rate_via_ffprobe(audio_bytes)
-
-
-async def _probe_sample_rate_via_ffprobe(audio_bytes: bytes) -> int | None:
-    """ffprobe で音声データの実サンプルレート(Hz)を取得する。"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            FFPROBE_PATH,
-            "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=sample_rate",
-            "-of", "csv=p=0",
-            "pipe:0",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate(input=audio_bytes)
-        if proc.returncode != 0 or not out:
-            logger.warning(f"ffprobe サンプルレート取得失敗: {err.decode(errors='replace')[:200]}")
-            return None
-        return int(out.decode().strip())
-    except FileNotFoundError:
-        logger.warning(
-            f"ffprobe が見つかりません（FFPROBE_PATH={FFPROBE_PATH!r}）。"
-            f"環境変数 FFPROBE_PATH で実行パスを指定できます。"
-        )
-        return None
-    except (ValueError, Exception) as e:
-        logger.warning(f"ffprobe 実行エラー: {e}")
-        return None
+    return _probe_sample_rate_via_wave(audio_bytes)
 
 
 async def _pitch_shift_ffmpeg(audio_bytes: bytes, ratio: float) -> bytes | None:
@@ -222,11 +191,14 @@ async def _pitch_shift_ffmpeg(audio_bytes: bytes, ratio: float) -> bytes | None:
     """
     # asetrate は「出力サンプルレートをこの値にする」フィルタで、これにより
     # ピッチも再生速度も変化する。ffmpeg のフィルタ式内では入力の実際の
-    # サンプルレートを参照する変数は使えないため、事前に ffprobe で
-    # 入力音声の実サンプルレートを取得し、それに ratio を掛けた具体的な
-    # 数値を asetrate に渡す。その後 atempo で速度を 1/ratio 倍に戻し、
-    # テンポ（再生時間）を元に戻す。
-    input_sample_rate = await _probe_sample_rate(audio_bytes)
+    # サンプルレートを参照する変数は使えないため、事前に wave モジュール
+    # （Python標準ライブラリ、外部コマンド不要）で入力音声の実サンプル
+    # レートを取得し、それに ratio を掛けた具体的な数値を asetrate に
+    # 渡す。その後 atempo で速度を 1/ratio 倍に戻し、テンポ（再生時間）
+    # を元に戻す。入力がWAV形式でない場合はサンプルレートを取得できず
+    # ピッチシフト自体を諦める（呼び出し元が元音声そのままの再生に
+    # フォールバックする）。
+    input_sample_rate = _probe_sample_rate(audio_bytes)
     if input_sample_rate is None:
         logger.warning("ffmpeg: 入力音声のサンプルレート取得に失敗しました")
         return None

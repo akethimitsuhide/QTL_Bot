@@ -36,6 +36,7 @@ import logging
 import asyncio
 import traceback
 from datetime import datetime, timedelta
+from collections import deque
 
 import discord
 from discord.ext import commands, tasks
@@ -50,6 +51,7 @@ from core.config import (
     QUAKE_MIN_SCALE, QUAKE_MIN_MAG, QUAKE_MIN_DEPTH, QUAKE_MAX_DEPTH,
     STATUS_SHOW_CPU, STATUS_SHOW_MEM, STATUS_SHOW_DISK, STATUS_SHOW_UPTIME,
     RESOURCE_MONITORING_ENABLED, RESOURCE_CHECK_INTERVAL,
+    STATUS_HISTORY_INTERVAL, STATUS_HISTORY_MAXLEN,
     DISK_WARNING_THRESHOLD, DISK_ERROR_THRESHOLD,
     HEALTH_CHECK_TIMEOUT, HEALTH_CHECK_CACHE_TTL, ERROR_NOTIFICATION_TTL,
     ENABLE_KYOSHIN,
@@ -75,6 +77,120 @@ _raw_allowed_ips = os.getenv("WEB_DASHBOARD_ALLOWED_IPS", "").strip()
 WEB_DASHBOARD_ALLOWED_IPS = [
     ip.strip() for ip in _raw_allowed_ips.split(",") if ip.strip()
 ] if _raw_allowed_ips else []
+
+# GET /dashboard で返すグラフ表示用HTML。
+# Chart.js は CDN から読み込み、グラフの計算・描画処理はすべて
+# ブラウザ側（クライアント）で行う。Bot側（Raspberry Pi）は
+# /status/history のスナップショット履歴を返すだけで、追加の
+# 計算負荷は発生しない設計。
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QTL_Bot ダッシュボード</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 4px; }
+  .subtitle { color: #7f849c; font-size: 0.85em; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+          gap: 20px; }
+  .card { background: #292c3c; border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 1em; margin: 0 0 12px 0; color: #a6adc8; }
+  canvas { max-height: 280px; }
+  .status-line { color: #7f849c; font-size: 0.8em; margin-top: 8px; }
+  .error { color: #f38ba8; padding: 20px; }
+</style>
+</head>
+<body>
+  <h1>QTL_Bot ダッシュボード</h1>
+  <div class="subtitle">システムリソース・受信件数の推移（メモリ上のリングバッファ、Bot再起動でリセットされます）</div>
+  <div id="content" class="grid">
+    <div class="card"><h2>CPU 使用率 (%)</h2><canvas id="cpuChart"></canvas></div>
+    <div class="card"><h2>メモリ使用量 (MB)</h2><canvas id="memChart"></canvas></div>
+    <div class="card"><h2>ディスク使用率 (%)</h2><canvas id="diskChart"></canvas></div>
+    <div class="card"><h2>受信件数（累積）</h2><canvas id="recvChart"></canvas></div>
+  </div>
+  <div class="status-line" id="statusLine">読み込み中...</div>
+
+<script>
+const COLORS = {
+  cpu: '#89b4fa', mem: '#a6e3a1', disk: '#f9e2af',
+  wolfx: '#f38ba8', p2p_eew: '#fab387', quake: '#94e2d5',
+  tsunami: '#89dceb', usgs: '#cba6f7', volcano: '#eba0ac',
+};
+
+function makeLineChart(ctx, labels, datasets, yLabel) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels: labels, datasets: datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: { ticks: { color: '#7f849c', maxTicksLimit: 8 }, grid: { color: '#313244' } },
+        y: { ticks: { color: '#7f849c' }, grid: { color: '#313244' }, title: { display: true, text: yLabel, color: '#7f849c' } },
+      },
+      plugins: { legend: { labels: { color: '#cdd6f4' } } },
+    },
+  });
+}
+
+async function loadAndRender() {
+  try {
+    const res = await fetch('/status/history');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const history = data.history || [];
+
+    if (history.length === 0) {
+      document.getElementById('statusLine').textContent =
+        'まだ履歴データがありません（記録間隔: ' + data.interval_sec + '秒。しばらく待ってから再読み込みしてください）';
+      return;
+    }
+
+    const labels = history.map(h => {
+      const d = new Date(h.timestamp);
+      return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+    });
+
+    makeLineChart(document.getElementById('cpuChart'), labels, [
+      { label: 'CPU %', data: history.map(h => h.cpu_percent), borderColor: COLORS.cpu, tension: 0.2, pointRadius: 0 },
+    ], '%');
+
+    makeLineChart(document.getElementById('memChart'), labels, [
+      { label: 'メモリ MB', data: history.map(h => h.memory_mb), borderColor: COLORS.mem, tension: 0.2, pointRadius: 0 },
+    ], 'MB');
+
+    makeLineChart(document.getElementById('diskChart'), labels, [
+      { label: 'ディスク %', data: history.map(h => h.disk_percent), borderColor: COLORS.disk, tension: 0.2, pointRadius: 0 },
+    ], '%');
+
+    const recvKeys = ['wolfx', 'p2p_eew', 'quake', 'tsunami', 'usgs', 'volcano'];
+    const recvDatasets = recvKeys.map(k => ({
+      label: k,
+      data: history.map(h => (h.recv_count || {})[k] || 0),
+      borderColor: COLORS[k],
+      tension: 0.2,
+      pointRadius: 0,
+    }));
+    makeLineChart(document.getElementById('recvChart'), labels, recvDatasets, '件数（累積）');
+
+    document.getElementById('statusLine').textContent =
+      data.count + '件のスナップショット（記録間隔: ' + data.interval_sec + '秒、最大保持: ' + data.max_points + '件）';
+  } catch (e) {
+    document.getElementById('content').innerHTML = '<div class="error">履歴データの取得に失敗しました: ' + e.message + '</div>';
+  }
+}
+
+loadAndRender();
+setInterval(loadAndRender, 60000);
+</script>
+</body>
+</html>
+"""
 
 
 class SystemCog(commands.Cog):
@@ -114,6 +230,16 @@ class SystemCog(commands.Cog):
 
         # -- リソース監視 --
         self.resource_monitor_task: asyncio.Task | None = None
+        self.status_history_task: asyncio.Task | None = None
+
+        # -- Web Dashboard グラフ・履歴表示用データ（2026-08-04 追加） --
+        # resource_monitor が RESOURCE_CHECK_INTERVAL 秒ごとに1件ずつ
+        # 追記する。deque(maxlen=...) により、上限を超えると自動的に
+        # 古いものから破棄される（メモリを圧迫しない設計。Raspberry Pi
+        # 上での軽量運用を維持するため、外部DB等は導入しない）。
+        # STATUS_HISTORY_MAXLEN 分の履歴を保持する（デフォルト288件 ×
+        # 300秒間隔 = 24時間分）。
+        self.status_history: deque = deque(maxlen=STATUS_HISTORY_MAXLEN)
 
         # -- Web Dashboard --
         self._web_app = None
@@ -137,6 +263,10 @@ class SystemCog(commands.Cog):
         if self.resource_monitor_task and not self.resource_monitor_task.done():
             self.resource_monitor_task.cancel()
             logger.info("resource_monitor タスクをキャンセルしました")
+
+        if self.status_history_task and not self.status_history_task.done():
+            self.status_history_task.cancel()
+            logger.info("status_history_recorder タスクをキャンセルしました")
 
         if self._web_runner:
             await self._web_runner.cleanup()
@@ -163,6 +293,10 @@ class SystemCog(commands.Cog):
         if not self.resource_monitor_task:
             self.resource_monitor_task = self.bot.loop.create_task(self.resource_monitor())
             logger.info("リソース監視タスクを開始しました")
+
+        if not self.status_history_task:
+            self.status_history_task = self.bot.loop.create_task(self.status_history_recorder())
+            logger.info("Web Dashboard 履歴記録タスクを開始しました")
 
         if _test_runner_module.CLI_TEST_MODE:
             # CLIテストモード（python3 bot.py --test_xxx ...）では、
@@ -837,9 +971,36 @@ class SystemCog(commands.Cog):
                     status=500
                 )
 
+        async def history_handler(request):
+            """
+            GET /status/history - グラフ・履歴表示用のスナップショット履歴。
+            status_history_recorder が STATUS_HISTORY_INTERVAL 秒ごとに
+            記録したデータ（メモリ上のリングバッファ、Bot再起動でリセット）
+            をそのままJSON配列として返す。
+            """
+            return web.json_response({
+                "interval_sec": STATUS_HISTORY_INTERVAL,
+                "max_points": STATUS_HISTORY_MAXLEN,
+                "count": len(self.status_history),
+                "history": list(self.status_history),
+            })
+
+        async def dashboard_handler(request):
+            """
+            GET /dashboard - システムリソース・受信件数の推移をグラフ表示
+            するHTMLページ。外部ライブラリ（Chart.js等）はCDNから読み込み、
+            Bot側は /status/history のデータをそのまま描画するのみで、
+            グラフ計算処理自体はブラウザ側で行う（Raspberry Pi側の
+            負荷を増やさない設計）。
+            """
+            html = _DASHBOARD_HTML
+            return web.Response(text=html, content_type="text/html")
+
         try:
             self._web_app = web.Application(middlewares=[ip_allowlist_middleware])
             self._web_app.router.add_get("/status", status_handler)
+            self._web_app.router.add_get("/status/history", history_handler)
+            self._web_app.router.add_get("/dashboard", dashboard_handler)
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
 
@@ -929,6 +1090,62 @@ class SystemCog(commands.Cog):
                 break
             except Exception as e:
                 logger.error(f"resource_monitor エラー: {e}")
+                await asyncio.sleep(60)
+
+    async def status_history_recorder(self) -> None:
+        """
+        Web Dashboard のグラフ・履歴表示（/status/history）用に、
+        STATUS_HISTORY_INTERVAL 秒ごとにシステムリソース・各種受信件数の
+        スナップショットを self.status_history（リングバッファ）へ記録する。
+
+        resource_monitor（ログ出力専用、デフォルト1時間間隔）とは独立した
+        別タスクとして動かす。記録内容はメモリ上にのみ保持し、Bot再起動で
+        リセットされる（外部DB等は使用しない軽量設計）。
+        """
+        try:
+            import psutil
+        except ImportError:
+            logger.warning("psutil がインストールされていません。履歴記録は無効です。")
+            return
+
+        while not self.bot.is_closed():
+            try:
+                await asyncio.sleep(STATUS_HISTORY_INTERVAL)
+
+                try:
+                    proc = self._status_psutil_proc or psutil.Process()
+                    cpu_percent = proc.cpu_percent(interval=None)
+                    mem_mb = proc.memory_info().rss / 1024 / 1024
+                    disk_info = psutil.disk_usage('/')
+
+                    last_recv = self._eew_attr("_last_recv", {}) or {}
+                    recv_count = self._merged_recv_count()
+                    p2p_hub_stats = self._p2p_hub_stats()
+                    p2p_recv = p2p_hub_stats.get("recv_count", {}) if p2p_hub_stats else {}
+
+                    snapshot = {
+                        "timestamp": datetime.now().isoformat(),
+                        "cpu_percent": round(cpu_percent, 1),
+                        "memory_mb": round(mem_mb, 1),
+                        "disk_percent": disk_info.percent,
+                        "recv_count": {
+                            "wolfx": recv_count.get("wolfx", 0),
+                            "p2p_eew": p2p_recv.get("eew", recv_count.get("p2p_eew", 0)),
+                            "quake": p2p_recv.get("quake", recv_count.get("quake", 0)),
+                            "tsunami": p2p_recv.get("tsunami", recv_count.get("tsunami", 0)),
+                            "usgs": recv_count.get("usgs", 0),
+                            "volcano": recv_count.get("volcano", 0),
+                        },
+                    }
+                    self.status_history.append(snapshot)
+                except Exception as e:
+                    logger.debug(f"status_history_recorder: スナップショット記録エラー: {e}")
+
+            except asyncio.CancelledError:
+                logger.info("status_history_recorder が停止しました")
+                break
+            except Exception as e:
+                logger.error(f"status_history_recorder エラー: {e}")
                 await asyncio.sleep(60)
 
     # ===============================

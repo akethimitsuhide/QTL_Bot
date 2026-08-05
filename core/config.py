@@ -128,13 +128,16 @@ AQUESTALK_SPEED = int(os.getenv("AQUESTALK_SPEED", "150"))
 AUDIO_PLAYER    = os.getenv("AUDIO_PLAYER", "aplay")
 
 # ScratchTTS のピッチシフト（core/tts_engines.py._pitch_shift_ffmpeg）で
-# 使用する ffmpeg / ffprobe の実行コマンド（またはフルパス）。
+# 使用する ffmpeg の実行コマンド（またはフルパス）。
 # デフォルトはコマンド名のみとし、OSのPATHから解決させる
 # （Raspberry Pi OS 等、`apt install ffmpeg` で標準的にPATHへ入る
 # 環境を主に想定）。PATHが通っていない・別名でインストールされている
 # 等の環境では、ここに絶対パスを指定することで対応できる。
+# 【2026-08-04】入力音声のサンプルレート取得は ffprobe ではなく
+# Python標準の wave モジュールで完結させる方針としたため、
+# ffprobe（FFPROBE_PATH）への依存は撤廃した。ScratchTTSのレスポンスが
+# WAV形式でない場合はピッチシフト自体を諦める（元音声のまま再生する）。
 FFMPEG_PATH  = os.getenv("FFMPEG_PATH", "ffmpeg")
-FFPROBE_PATH = os.getenv("FFPROBE_PATH", "ffprobe")
 
 if TTS_ENGINE == "aquestalk" and not AQUESTALK_PATH:
     logger.info("AQUESTALK_PATH 未設定のため音声読み上げ機能は無効です（TTS_ENGINE=aquestalk）")
@@ -182,6 +185,15 @@ USGS_NOTIFICATION_COOLDOWN = int(os.getenv("USGS_NOTIFICATION_COOLDOWN", "300"))
 # ===============================
 RESOURCE_MONITORING_ENABLED = _env_bool("RESOURCE_MONITORING_ENABLED", True)
 RESOURCE_CHECK_INTERVAL     = _env_int("RESOURCE_CHECK_INTERVAL", 3600)
+
+# Web Dashboard のグラフ・履歴表示（/status/history）用のスナップショット
+# 記録間隔・保持件数。RESOURCE_CHECK_INTERVAL（ログ出力用、デフォルト
+# 1時間）とは別に、グラフとして見るには細かい間隔での記録が望ましい
+# ため、専用の設定値を用意した。デフォルトは300秒（5分）間隔 ×
+# 288件 = 24時間分。メモリ上のリングバッファ（deque）にのみ保持し、
+# 外部DB等は使用しない（Bot再起動でリセットされる）。
+STATUS_HISTORY_INTERVAL = _env_int("STATUS_HISTORY_INTERVAL", 300)
+STATUS_HISTORY_MAXLEN   = _env_int("STATUS_HISTORY_MAXLEN", 288)
 DISK_WARNING_THRESHOLD      = _env_int("DISK_WARNING_THRESHOLD", 80)
 DISK_ERROR_THRESHOLD        = _env_int("DISK_ERROR_THRESHOLD", 90)
 

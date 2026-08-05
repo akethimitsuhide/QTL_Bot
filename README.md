@@ -101,6 +101,8 @@
 
 ### Web Dashboard / コマンド
 - `GET /status` で詳細な稼働状況を JSON で取得
+- `GET /status/history` でシステムリソース・受信件数の推移スナップショット履歴を JSON で取得（`STATUS_HISTORY_INTERVAL` 秒ごとに記録、メモリ上のリングバッファのみで保持しBot再起動でリセットされる）
+- `GET /dashboard` で上記履歴を Chart.js によるグラフとして表示する HTML ページ（CPU/メモリ/ディスク使用率・各種受信件数の推移）
 - `!status` コマンド（管理者専用）
 - `/qtl_status` スラッシュコマンド（管理者専用）
 
@@ -268,8 +270,7 @@ python bot.py
 | `SCRATCHTTS_LOCALE` | ja-JP | ScratchTTS の言語ロケール |
 | `SCRATCHTTS_GENDER` | female | ScratchTTS の声の性別（`female` / `male`） |
 | `SCRATCHTTS_TIMEOUT_SEC` | 10 | ScratchTTS APIリクエストのタイムアウト秒数 |
-| `FFMPEG_PATH` | ffmpeg | ScratchTTSのピッチシフト（`core/tts_engines.py`）で使用する ffmpeg の実行コマンド／パス。デフォルトはOSのPATHから解決。PATHが通っていない環境では絶対パスを指定 |
-| `FFPROBE_PATH` | ffprobe | 同上、ffprobe（入力音声のサンプルレート取得に使用。まずPython標準の`wave`モジュールでWAVヘッダーを直接解析し、失敗した場合のみffprobeにフォールバックする）のパス |
+| `FFMPEG_PATH` | ffmpeg | ScratchTTSのピッチシフト（`core/tts_engines.py`）で使用する ffmpeg の実行コマンド／パス。デフォルトはOSのPATHから解決。PATHが通っていない環境では絶対パスを指定。入力音声のサンプルレート取得はPython標準の`wave`モジュールで完結し、外部コマンド（ffprobe等）には依存しない。WAV形式でないレスポンスの場合はピッチシフト自体を行わず元音声のまま再生する |
 | `AUDIO_PLAYER` | aplay | 音声再生コマンド（`aplay` / `mpg123` 等） |
 | `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ |
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
@@ -294,6 +295,8 @@ python bot.py
 | `WEB_DASHBOARD_PORT` | 8080 | Web Dashboard のポート番号 |
 | `WEB_DASHBOARD_HOST` | 127.0.0.1 | Web Dashboard がバインドするアドレス。このマシン以外からアクセスさせたい場合のみ `0.0.0.0` 等を指定する |
 | `WEB_DASHBOARD_ALLOWED_IPS` | （空） | アクセスを許可するクライアントIPのカンマ区切りリスト（CIDR表記可）。空の場合はIP制限なし |
+| `STATUS_HISTORY_INTERVAL` | 300 | `GET /dashboard`・`GET /status/history` 用のスナップショット記録間隔（秒） |
+| `STATUS_HISTORY_MAXLEN` | 288 | 保持するスナップショットの最大件数（古いものから自動破棄。デフォルトは300秒間隔で24時間分） |
 
 `WEB_DASHBOARD_HOST=0.0.0.0` にする場合は、`WEB_DASHBOARD_ALLOWED_IPS` で許可するIPを明示的に絞ることを強く推奨する（未設定のまま `0.0.0.0` にすると、ネットワーク環境によっては外部から誰でも `/status` 等にアクセスできる状態になる）。
 
@@ -457,6 +460,20 @@ python3 bot.py --test_<対象> <JSONファイルパス>
 
 Botは通常通り起動し、全Cogの `on_ready` が完了した後に指定したテストを1回実行し、
 完了後に自動的にプロセスを終了する。
+
+### EWS（緊急警報放送）信号音の単体テスト
+
+`--test_ews` はJSONファイルの指定を必要としない特殊なテスト対象で、
+`core/ews_signal.py` によるAFSK信号音の生成・再生のみを単体で確認できる。
+
+```bash
+python3 bot.py --test_ews                # MajorWarning相当の信号音を再生
+python3 bot.py --test_ews Warning         # Warning相当の信号音を再生
+python3 bot.py --test_ews MajorWarning    # 明示的にMajorWarning相当を指定
+```
+
+`EWS_ENABLE` の設定値に関わらず、CLIテスト実行時は常に信号音が再生される
+（動作確認自体が目的のため）。
 
 ### 入力JSONの検証（誤指定の検知）
 
