@@ -74,6 +74,76 @@ def load_prefecture_map() -> dict:
 
 PREFECTURE_MAP = load_prefecture_map()
 
+
+def load_pref_region_map() -> dict:
+    """
+    pref_region_map.json を読み込む（府県予報区名 → 地方予報区名 マッピング）。
+
+    緊急地震速報の警報対象地域は REGION_MAP で府県予報区名（例:
+    「北海道道南」「青森」）に変換されるが、対象地域が広範囲（多くの
+    都道府県）にわたる大規模なEEWでは、府県予報区名を全て列挙すると
+    通知・読み上げの文言が過度に長くなる。そのため、対象の府県予報区数が
+    一定件数以上の場合、このマップでさらに地方予報区名（例:「北海道」
+    「東北」）へ集約する（詳細は cogs/eew.py の該当ロジック参照）。
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "..", "pref_region_map.json")
+
+    if not os.path.exists(path):
+        logger.warning("pref_region_map.json が存在しません")
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logger.error(f"pref_region_map.json 読み込みエラー: {e}")
+
+    return {}
+
+
+PREF_REGION_MAP = load_pref_region_map()
+
+# 地方予報区の表示順序（北から南）。
+# collapse_regions_if_needed() で複数の地方予報区を表示する際、
+# 単純な文字列ソートではなく地理的に自然な順序で並べるために使う。
+REGION_DISPLAY_ORDER = [
+    "北海道", "東北", "関東", "伊豆諸島", "小笠原",
+    "北陸", "甲信", "東海", "近畿", "中国", "四国", "九州",
+    "奄美群島", "沖縄",
+]
+
+
+def collapse_regions_if_needed(pref_regions: set, threshold: int) -> list:
+    """
+    府県予報区名の集合（REGION_MAP 変換後、例:「北海道道南」「青森」）を
+    受け取り、件数が threshold 件以上の場合は PREF_REGION_MAP でさらに
+    地方予報区名（例:「北海道」「東北」）へ集約して返す。
+    threshold 未満の場合は、元の府県予報区名を地理的に自然な順序
+    （北から南）で返す（変換自体は行わない）。
+
+    戻り値は表示用に整列済みのリスト。
+    """
+    if not pref_regions:
+        return []
+
+    if len(pref_regions) < threshold:
+        # 集約せず、元の府県予報区名をそのまま使う。
+        # REGION_DISPLAY_ORDER に無い名称（想定外の府県予報区名）は
+        # 末尾にアルファベット順で追加する。
+        known = [r for r in REGION_DISPLAY_ORDER if r in pref_regions]
+        unknown = sorted(pref_regions - set(REGION_DISPLAY_ORDER))
+        return known + unknown
+
+    # 地方予報区へ集約する。PREF_REGION_MAP に無いキーは
+    # 元の名前をそのまま使う（変換漏れで情報が消えるのを防ぐ）。
+    collapsed = {PREF_REGION_MAP.get(r, r) for r in pref_regions}
+    known = [r for r in REGION_DISPLAY_ORDER if r in collapsed]
+    unknown = sorted(collapsed - set(REGION_DISPLAY_ORDER))
+    return known + unknown
+
 # 震度コード → 表示文字列
 INT_MAP = {
     -1: "不明",

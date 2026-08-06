@@ -4,6 +4,7 @@
 *.json
 !region_map.json
 !prefecture_map.json
+!pref_region_map.json
 *.mp3
 
 

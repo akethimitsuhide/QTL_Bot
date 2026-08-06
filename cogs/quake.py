@@ -54,6 +54,7 @@ from core.config import (
     QUAKE_ENABLE_SCALE_AND_DEST, QUAKE_ENABLE_DETAIL_SCALE,
     QUAKE_ENABLE_FOREIGN, QUAKE_ENABLE_OTHER,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
+    QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
 )
 from core.constants import (
     INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP,
@@ -351,7 +352,9 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         elif issue_type in ("ScaleAndDestination", "DetailScale") and max_scale_val >= 30:
             min_scale = scale_one_level_down(max_scale_val)
             intensity_text = self._build_intensity_list_text(
-                points_by_scale, min_scale=min_scale
+                points_by_scale, min_scale=min_scale,
+                points=points, collapse_scale=min_scale,
+                collapse_threshold=QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
             )
         if intensity_text:
             description += f"\n\n{intensity_text}"
@@ -560,7 +563,10 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
     @staticmethod
     def _build_intensity_list_text(points_by_scale: dict[int, list[str]],
-                                    min_scale: int | None = None) -> str:
+                                    min_scale: int | None = None,
+                                    points: list[dict] | None = None,
+                                    collapse_scale: int | None = None,
+                                    collapse_threshold: int = 10) -> str:
         """
         points_by_scale（{scale: [addr,...]}）から、
         「■ 震度○\n　地点1\n　地点2」形式のテキストブロックを、
@@ -568,12 +574,48 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
         min_scale を指定すると、その震度未満の階級は出力しない
         （各地の震度に関する情報で「最大震度〜1階級下まで」に絞る用途）。
+
+        collapse_scale で指定した震度階級（通常は「最大震度より1階級
+        小さい震度」）の観測点数が collapse_threshold 件以上ある場合、
+        通知文が過度に長くなるのを防ぐため、都道府県ごとに1地点だけを
+        代表として選び、末尾に「（以下略）」を付けて省略する。
+        この省略には points（P2P地震情報APIの生points配列、
+        pref フィールドを含む）が必要なため、points が渡されない場合は
+        省略処理を行わず全件表示する（安全側のフォールバック）。
         """
         from core.constants import SCALE_ORDER, INT_MAP
 
+        # collapse_scale の観測点数が閾値以上の場合、都道府県ごとに
+        # 1地点へ集約した addr リストを作る。それ以外の階級は
+        # points_by_scale の値をそのまま使う。
+        collapsed_addrs: dict[int, list[str]] = {}
+        collapsed_note: dict[int, bool] = {}
+        if (
+            collapse_scale is not None
+            and points
+            and len(points_by_scale.get(collapse_scale, [])) >= collapse_threshold
+        ):
+            # pref（都道府県名）ごとに、最初に出現した1地点のaddrのみを残す。
+            # 元データの順序を維持するため、辞書の挿入順をそのまま使う。
+            pref_to_addr: dict[str, str] = {}
+            for p in points:
+                if p.get("scale") != collapse_scale:
+                    continue
+                pref = p.get("pref")
+                addr = p.get("addr")
+                if not pref or not addr:
+                    continue
+                if pref not in pref_to_addr:
+                    pref_to_addr[pref] = addr
+            collapsed_addrs[collapse_scale] = list(pref_to_addr.values())
+            collapsed_note[collapse_scale] = True
+
         blocks = []
         for scale_val in SCALE_ORDER:
-            addrs = points_by_scale.get(scale_val)
+            if scale_val in collapsed_addrs:
+                addrs = collapsed_addrs[scale_val]
+            else:
+                addrs = points_by_scale.get(scale_val)
             if not addrs:
                 continue
             if min_scale is not None and scale_val < min_scale:
@@ -581,5 +623,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             label = INT_MAP.get(scale_val, str(scale_val))
             lines = [f"■ 震度{label}"]
             lines += [f"　{addr}" for addr in addrs]
+            if collapsed_note.get(scale_val):
+                lines.append("（以下略）")
             blocks.append("\n".join(lines))
         return "\n".join(blocks)

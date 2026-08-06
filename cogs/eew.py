@@ -47,8 +47,9 @@ from core.config import (
     KYOSHIN_CHANNEL_ID, OTHER_CHANNEL_ID,
     WOLFX_WSS,
     ENABLE_KYOSHIN,
+    EEW_REGION_COLLAPSE_THRESHOLD,
 )
-from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP
+from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP, collapse_regions_if_needed
 from core.helpers import (
     safe_int, safe_float, safe_bool, truncate_embed_description,
 )
@@ -621,8 +622,11 @@ class EewCog(commands.Cog, AudioClientMixin):
 
             warn_areas = data.get("WarnArea", [])
             if cumulative_warn_areas:
+                display_regions = collapse_regions_if_needed(
+                    cumulative_warn_areas, EEW_REGION_COLLAPSE_THRESHOLD
+                )
                 description += "\n\n**【強い揺れが予想される地域】**\n"
-                for region in sorted(cumulative_warn_areas):
+                for region in display_regions:
                     description += f"■ {region}　"
 
             if warn_areas:
@@ -721,7 +725,10 @@ class EewCog(commands.Cog, AudioClientMixin):
         prev_warn_areas = state.get("last_warn_areas", set()) if state else set()
 
         area_increased = bool(current_warn_areas - prev_warn_areas)
-        warn_area_text = "、".join(sorted(current_warn_areas)) + "では" if current_warn_areas else ""
+        warn_area_display = collapse_regions_if_needed(
+            current_warn_areas, EEW_REGION_COLLAPSE_THRESHOLD
+        )
+        warn_area_text = "、".join(warn_area_display) + "では" if warn_area_display else ""
 
         text = ""
         priority = 3

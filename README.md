@@ -10,12 +10,13 @@
 - **EEW（緊急地震速報）**: Wolfx WebSocket でリアルタイム受信
   - 予想される最大震度、各地の予想震度（震度4以上の場合）、推奨行動等を通知
   - 音声読み上げ対応（AquesTalkPi）
+  - 警報対象の府県予報区数（`region_map.json` 変換後）が `EEW_REGION_COLLAPSE_THRESHOLD`（デフォルト10）件以上の場合、`pref_region_map.json` でさらに地方予報区名へ集約して通知・読み上げる（例:「北海道道南,北海道道央,...,千葉」14件 → 「北海道,東北,関東」）
 - **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報の WebSocket から警報のみを常時受信
   - Wolfx と同時並行稼働（EventID による重複排除あり）
 - **地震情報**: P2P 地震情報の API からの確報情報
   - 震度速報（`ScalePrompt`）: 読み上げは `prefecture_map.json` で区域名を都道府県名に変換し、重複を排除して発表（例:「熊本県天草・芦北」「熊本県熊本」→「熊本県」1回のみ）。通知本文の津波記述の下に区域別の震度一覧（■ 震度○ + 区域名）を追記
   - 震源に関する情報（`Destination`）: 震源地の横に度分秒形式の緯度経度を常に付記（例:「熊本県天草・芦北地方（32°33′39.8、130°22′43.2）」）
-  - 各地の震度に関する情報（`ScaleAndDestination` / `DetailScale`）: 最大震度3以上の場合、読み上げに最大震度を観測した地点名を追加。最大震度〜1階級下までの観測点一覧を追記（震度46＝推定5弱以上は45と同階級として扱う）
+  - 各地の震度に関する情報（`ScaleAndDestination` / `DetailScale`）: 最大震度3以上の場合、読み上げに最大震度を観測した地点名を追加。最大震度〜1階級下までの観測点一覧を追記（震度46＝推定5弱以上は45と同階級として扱う）。1階級下の観測点数が `QUAKE_INTENSITY_COLLAPSE_THRESHOLD`（デフォルト10）件以上の場合、通知文の肥大化を防ぐため都道府県ごとに1地点だけを代表として表示し「（以下略）」を付ける
   - 地図画像: メッセージ送信後にバックグラウンドで P2P 地震情報 CDN をポーリングし、画像が実際に取得可能になった時点で Embed に画像を追加（詳細は下記「P2P 地図画像の添付」参照）
   - 津波の有無（`domesticTsunami`）の表記: P2P 地震情報の `domesticTsunami` は速報段階の推定値であり、`Warning` が返っても実際に気象庁から「津波警報」が正式発表されているとは限らない。誤解を招く断定的な表記を避けるため、`Watch`・`Warning` は通知本文で「津波警報・注意報を発表中」、読み上げで「現在、津波予報等を発表中です。」とまとめて表現する。`NonEffective` は通知「若干の海面変動（被害の心配なし）」、読み上げ「この地震で、若干の海面変動があるかもしれませんが、被害の心配はありません。」。`None` は読み上げで「この地震による津波の心配はありません。」を明示的に付加する（`MajorWarning` は従来通り「大津波警報」）
 
@@ -191,6 +192,8 @@ python bot.py
 | `QUAKE_MIN_DEPTH` | 0 | 地震通知の深さ下限（km） |
 | `QUAKE_MAX_DEPTH` | 9999 | 地震通知の深さ上限（km） |
 | `EEW_MIN_INTENSITY` | 0 | EEW 通知の最低震度（0=全て） |
+| `QUAKE_INTENSITY_COLLAPSE_THRESHOLD` | 10 | 各地の震度に関する情報で、最大震度より1階級小さい震度の観測点数がこの件数以上の場合、都道府県ごとに1地点だけを表示して「（以下略）」を付ける |
+| `EEW_REGION_COLLAPSE_THRESHOLD` | 10 | EEWの警報対象府県予報区数がこの件数以上の場合、`pref_region_map.json` で地方予報区へ集約して通知・読み上げる |
 | `QUAKE_ENABLE_DESTINATION` | true | 震度情報付き地震の通知 |
 | `QUAKE_ENABLE_SCALE_AND_DEST` | true | 震度・震源情報付き地震の通知 |
 | `QUAKE_ENABLE_SCALE_PROMPT` | true | 震度速報の通知 |
@@ -687,6 +690,7 @@ QTL_Bot/
 ├── bot.py                  - エントリーポイント（Cog 登録・起動のみ）
 ├── region_map.json          - 緊急地震速報の警報地域名 → 表示用地域名マッピング
 ├── prefecture_map.json      - 緊急地震速報や震度情報で用いる区域名 → 都道府県名マッピング（震度速報の読み上げ等で使用）
+├── pref_region_map.json     - 府県予報区名 → 地方予報区名マッピング（EEWの警報対象が広範囲な場合の集約表示に使用）
 ├── cogs/
 │   ├── apm.py                - ApmCog: Mackerel APM 連携（OpenTelemetry OTLP）
 │   ├── audio_shared.py       - AudioCog: 音声読み上げ・MP3再生の実体（EewCog/QuakeInfoCogが共有）

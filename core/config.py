@@ -223,6 +223,17 @@ QUAKE_ENABLE_DETAIL_SCALE    = _env_bool("QUAKE_ENABLE_DETAIL_SCALE", True)
 QUAKE_ENABLE_FOREIGN         = _env_bool("QUAKE_ENABLE_FOREIGN", True)
 QUAKE_ENABLE_OTHER           = _env_bool("QUAKE_ENABLE_OTHER", True)
 
+# 各地の震度に関する情報で、最大震度より1階級小さい震度を観測した
+# 観測点数がこの件数以上の場合、都道府県ごとに1地点だけを代表として
+# 表示し「（以下略）」を付けて省略する（通知文の肥大化防止）。
+QUAKE_INTENSITY_COLLAPSE_THRESHOLD = _env_int("QUAKE_INTENSITY_COLLAPSE_THRESHOLD", 10)
+
+# 緊急地震速報（EEW）で、警報対象の府県予報区数（region_map.json変換後）
+# がこの件数以上の場合、pref_region_map.json でさらに地方予報区へ変換して
+# 通知・読み上げる（例: 「北海道道南,北海道道央,...,千葉」10件以上
+# → 「北海道,東北,関東」）。
+EEW_REGION_COLLAPSE_THRESHOLD = _env_int("EEW_REGION_COLLAPSE_THRESHOLD", 10)
+
 # ===============================
 # 津波・その他通知フィルター
 # ===============================
