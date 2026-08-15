@@ -651,6 +651,8 @@ class SystemCog(commands.Cog):
             ("津波観測情報",     "tsunami_obs",      120, 600, _loop_is_running(self._tsunami_attr("fetch_tsunami_observation"))),
             ("気象庁その他",     "quake_advisory",   120, 600, _loop_is_running(self._other_attr("fetch_quake_advisory"))),
             ("火山情報",         "volcano",         120, 600, _loop_is_running(self._volcano_attr("volcano_task"))),
+            ("噴火速報",         "eruption",        120, 600, _loop_is_running(self._volcano_attr("eruption_task"))),
+            ("噴火警報",         "warning",         120, 600, _loop_is_running(self._volcano_attr("warning_task"))),
             ("USGS 地震情報",    "usgs",            600, 1200, None),
         ]
         api_lines = []
@@ -919,6 +921,8 @@ class SystemCog(commands.Cog):
                         "long_period": recv_count.get("long_period", 0),
                         "tsunami_obs": recv_count.get("tsunami_obs", 0),
                         "volcano": recv_count.get("volcano", 0),
+                        "eruption": recv_count.get("eruption", 0),
+                        "warning": recv_count.get("warning", 0),
                         "usgs": recv_count.get("usgs", 0),
                     },
                     "monitoring": {
@@ -932,6 +936,16 @@ class SystemCog(commands.Cog):
                             "polling_status": _task_status(volcano_task),
                             **_api_info("volcano"),
                             "total_recv_count": volcano_recv_count,
+                        },
+                        "eruption": {
+                            "last_event_id": self._volcano_attr("_last_eruption_id"),
+                            "polling_status": _task_status(self._volcano_attr("eruption_task")),
+                            **_api_info("eruption"),
+                        },
+                        "warning": {
+                            "last_event_id": self._volcano_attr("_last_warning_id"),
+                            "polling_status": _task_status(self._volcano_attr("warning_task")),
+                            **_api_info("warning"),
                         },
                         "usgs": usgs_info,
                         "kyoshin": self._kyoshin_status_dict(),

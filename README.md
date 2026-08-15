@@ -385,6 +385,18 @@ curl http://localhost:8080/status | jq
       "recv_count": 1,
       "total_recv_count": 1
     },
+    "eruption": {
+      "last_event_id": "20260804120000",
+      "polling_status": "running",
+      "last_recv_time": null,
+      "recv_count": 0
+    },
+    "warning": {
+      "last_event_id": "20260804120000",
+      "polling_status": "running",
+      "last_recv_time": null,
+      "recv_count": 0
+    },
     "usgs": {
       "enabled": true,
       "magnitude_min": 5.0,
