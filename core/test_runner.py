@@ -24,6 +24,18 @@ QTL_Botには自動テストが存在せず、EEW・地震情報・津波・火�
 
 対応する引数と、内部で呼び出す Cog / メソッドの対応は TEST_TARGETS を参照。
 
+【--test_all による一括実行】
+    python3 bot.py --test_all tests/fixtures/
+
+TEST_TARGETS 全対象を一括で実行する。個別に --test_<cog> <json> を
+指定する代わりに fixture を集めたディレクトリを1つ指定すると、
+"<fixtures_dir>/<cog_key>_sample.json" という命名規則のファイルを
+cog_key ごとに探索し、存在するものだけ順番に実行する
+（例: tests/fixtures/eew_sample.json, tests/fixtures/quake_sample.json）。
+JSON を必要としない対象（ews）はそのまま実行される。
+fixture が存在しない対象はスキップされ、最後に OK / NG / SKIP の
+サマリーが表示される。
+
 【通知内容の「テストである」明記】
 各 notify_* 関数は is_test=True を渡された場合、既存の実装で
 埋め込みタイトルの先頭に「【テスト】」を付与し、フッターに
@@ -42,6 +54,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 
 logger = logging.getLogger("QTLBot")
@@ -63,8 +76,19 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     （例: ews）は、JSONファイルを必要としないテストのため、
     `--test_ews` のように値を省略しても検出できるよう
     nargs="?" を指定する（省略時は json_path として空文字列を返す）。
+
+    【--test_all <fixtures_dir>】
+    TEST_TARGETS の全対象を一括実行する特殊モード。個別の --test_<cog> と
+    異なり、cog_key ごとに JSON パスを指定する必要はなく、fixture を
+    まとめて置いたディレクトリを1つだけ指定する。
+    検出時は特別な cog_key "__all__" を使い、
+    (「__all__」, fixtures_dir) を返す（json_path 部分には
+    ディレクトリパスが入る点に注意）。
+    実際にどの対象を実行するか（<cog_key>_sample.json の探索・
+    存在確認）は run_all_cli_tests() 側で行う。
     """
     parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--test_all", metavar="FIXTURES_DIR", default=None)
     for cog_key, target in TEST_TARGETS.items():
         if target.get("requires_json", True):
             parser.add_argument(f"--test_{cog_key}", metavar="JSON_PATH", default=None)
@@ -78,6 +102,13 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     known_args, _ = parser.parse_known_args(argv)
 
     global CLI_TEST_MODE
+
+    # --test_all が指定されていれば最優先で検出する
+    # （個別の --test_<cog> と併用された場合も一括実行を優先）
+    if known_args.test_all is not None:
+        CLI_TEST_MODE = True
+        return "__all__", known_args.test_all
+
     for cog_key, target in TEST_TARGETS.items():
         json_path = getattr(known_args, f"test_{cog_key}", None)
         requires_json = target.get("requires_json", True)
@@ -92,17 +123,32 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     return None
 
 
-def load_test_json(json_path: str):
-    """テスト用JSONファイルを読み込む。失敗時は分かりやすいエラーで終了する。"""
+def load_test_json(json_path: str, exit_on_error: bool = True):
+    """
+    テスト用JSONファイルを読み込む。
+
+    exit_on_error=True（デフォルト、単体実行 --test_<cog> 用）:
+        失敗時は分かりやすいエラーメッセージを表示してプロセスを終了する
+        （従来通りの挙動）。
+    exit_on_error=False（--test_all の一括実行用）:
+        プロセスを終了させず、例外をそのまま送出する。
+        --test_all 実行中に1つのfixtureが壊れていても他の対象の実行を
+        止めないよう、呼び出し元（run_all_cli_tests）で対象単位に
+        キャッチしてスキップ扱いにするため。
+    """
     try:
         with open(json_path, encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         print(f"[TEST] エラー: JSONファイルが見つかりません: {json_path}")
-        sys.exit(1)
+        if exit_on_error:
+            sys.exit(1)
+        raise
     except json.JSONDecodeError as e:
         print(f"[TEST] エラー: JSONの構文が不正です: {json_path}\n  {e}")
-        sys.exit(1)
+        if exit_on_error:
+            sys.exit(1)
+        raise
 
 
 # ── テスト対象の定義 ──
@@ -259,6 +305,99 @@ def _inject_test_marker(data, test_marker_field: str | None):
     return patched
 
 
+def _resolve_cog_and_method(bot, cog_key: str, target: dict):
+    """
+    テスト対象の Cog インスタンスとメソッドを解決する。
+
+    見つからない場合は (None, None) を返し、エラーメッセージの出力と
+    ログ記録のみ行う（プロセス終了・bot.close() は呼び出し元の責務とする。
+    run_cli_test は単体実行なので即終了、run_all_cli_tests は一括実行の
+    途中なので当該対象をスキップして次へ進む、という違いがあるため）。
+    """
+    cog = bot.get_cog(target["cog_name"])
+    if cog is None:
+        print(f"[TEST] エラー: Cog '{target['cog_name']}' が登録されていません")
+        logger.error(f"CLIテスト失敗（{cog_key}）: Cog '{target['cog_name']}' が見つかりません")
+        return None, None
+
+    method = getattr(cog, target["method"], None)
+    if method is None:
+        print(f"[TEST] エラー: メソッド '{target['method']}' が {target['cog_name']} に存在しません")
+        logger.error(f"CLIテスト失敗（{cog_key}）: メソッド '{target['method']}' が見つかりません")
+        return None, None
+
+    return cog, method
+
+
+async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path: str) -> bool:
+    """
+    Cog・メソッドの解決が完了しているテスト対象を実際に1回呼び出す。
+
+    戻り値は成功なら True、失敗（JSON読み込みエラー・実行時例外含む）
+    なら False。例外はここで捕捉して print / logger.error するのみで
+    再送出しない（--test_all の一括実行が1件の失敗で止まらないように
+    するため。run_cli_test / run_all_cli_tests のどちらからも呼べる
+    共通処理として設計している）。
+    """
+    requires_json = target.get("requires_json", True)
+
+    if not requires_json:
+        # 【EWS等、JSONファイルを必要としないテスト対象】
+        # cli_arg_builder が定義されていればそれを使って呼び出し引数を
+        # 組み立てる（現状は ews のみ、domesticTsunami の値を組み立てる）。
+        try:
+            arg_builder = target.get("cli_arg_builder")
+            kwargs = arg_builder(json_path) if arg_builder is not None else {}
+            await method(**kwargs)
+            print(f"[TEST] 完了しました（{cog_key}）。実際の音声・信号音が再生されたか確認してください。")
+            logger.warning(f"★★★ CLIテスト完了 ★★★ 対象: {cog_key}")
+            return True
+        except Exception as e:
+            print(f"[TEST] 実行中にエラーが発生しました（{cog_key}）: {type(e).__name__}: {e}")
+            logger.error(f"CLIテスト実行エラー（{cog_key}）: {e}", exc_info=True)
+            return False
+
+    try:
+        # --test_all からの呼び出し（exit_on_error=False）でも単体実行
+        # からの呼び出しでも、ここでは常に例外を送出させて捕捉する
+        # （単体実行時の sys.exit(1) は run_cli_test 側で別途保証する）。
+        data = load_test_json(json_path, exit_on_error=False)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+    validate_expected_fields(cog_key, data)
+
+    data_kwarg = target.get("data_kwarg", "data")
+    supports_is_test = target.get("supports_is_test", True)
+    extra_kwargs = target.get("extra_kwargs", {})
+    test_marker_field = target.get("test_marker_field")
+
+    if not supports_is_test:
+        data = _inject_test_marker(data, test_marker_field)
+        if test_marker_field:
+            print(f"[TEST] 注意: {target['method']} は is_test 引数に対応していないため、"
+                  f"フィールド '{test_marker_field}' へ手動でテスト表記を付与しています")
+        elif not extra_kwargs:
+            print(f"[TEST] 注意: {target['method']} は is_test 引数に対応しておらず、"
+                  f"テスト表記を自動付与する設定もありません。通知内容に「テスト」の"
+                  f"明記が含まれるかは入力JSON側の内容に依存します")
+
+    kwargs = {data_kwarg: data, **extra_kwargs}
+    if supports_is_test:
+        kwargs["is_test"] = True
+
+    try:
+        await method(**kwargs)
+        print(f"[TEST] 完了しました（{cog_key}）。Discordの該当チャンネルで通知内容を確認してください。")
+        print(f"[TEST]   （タイトル先頭の「【テスト】」表記・フッターの「※これはテスト通知です。」で識別できます）")
+        logger.warning(f"★★★ CLIテスト完了 ★★★ 対象: {cog_key}")
+        return True
+    except Exception as e:
+        print(f"[TEST] 実行中にエラーが発生しました（{cog_key}）: {type(e).__name__}: {e}")
+        logger.error(f"CLIテスト実行エラー（{cog_key}）: {e}", exc_info=True)
+        return False
+
+
 async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
     """
     --test_<cog> で指定されたテストを実行する。
@@ -288,80 +427,98 @@ async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
         + (f" / 入力: {json_path}" if requires_json else "")
     )
 
-    cog = bot.get_cog(target["cog_name"])
-    if cog is None:
-        print(f"[TEST] エラー: Cog '{target['cog_name']}' が登録されていません")
-        logger.error(f"CLIテスト失敗: Cog '{target['cog_name']}' が見つかりません")
+    cog, method = _resolve_cog_and_method(bot, cog_key, target)
+    if cog is None or method is None:
         await bot.close()
         sys.exit(1)
 
-    method = getattr(cog, target["method"], None)
-    if method is None:
-        print(f"[TEST] エラー: メソッド '{target['method']}' が {target['cog_name']} に存在しません")
-        logger.error(f"CLIテスト失敗: メソッド '{target['method']}' が見つかりません")
+    if requires_json and not os.path.exists(json_path):
+        # 単体実行時は従来通り即エラー終了させる
+        # （load_test_json(exit_on_error=True) と同じ挙動をここで先に保証する）
+        print(f"[TEST] エラー: JSONファイルが見つかりません: {json_path}")
         await bot.close()
         sys.exit(1)
-
-    if not requires_json:
-        # 【EWS等、JSONファイルを必要としないテスト対象】
-        # ews_arg_builder が定義されていればそれを使って呼び出し引数を
-        # 組み立てる（現状は ews のみ、domesticTsunami の値を組み立てる）。
-        try:
-            arg_builder = target.get("cli_arg_builder")
-            if arg_builder is not None:
-                kwargs = arg_builder(json_path)
-            else:
-                kwargs = {}
-            await method(**kwargs)
-            print(banner)
-            print(f"[TEST] 完了しました（{cog_key}）。実際の音声・信号音が再生されたか確認してください。")
-            print(banner)
-            logger.warning(f"★★★ CLIテスト完了 ★★★ 対象: {cog_key}")
-        except Exception as e:
-            print(banner)
-            print(f"[TEST] 実行中にエラーが発生しました: {type(e).__name__}: {e}")
-            print(banner)
-            logger.error(f"CLIテスト実行エラー: {e}", exc_info=True)
-        finally:
-            await asyncio.sleep(3)
-            await bot.close()
-        return
-
-    data = load_test_json(json_path)
-    validate_expected_fields(cog_key, data)
-
-    data_kwarg = target.get("data_kwarg", "data")
-    supports_is_test = target.get("supports_is_test", True)
-    extra_kwargs = target.get("extra_kwargs", {})
-    test_marker_field = target.get("test_marker_field")
-
-    if not supports_is_test:
-        data = _inject_test_marker(data, test_marker_field)
-        if test_marker_field:
-            print(f"[TEST] 注意: {target['method']} は is_test 引数に対応していないため、"
-                  f"フィールド '{test_marker_field}' へ手動でテスト表記を付与しています")
-        elif not extra_kwargs:
-            print(f"[TEST] 注意: {target['method']} は is_test 引数に対応しておらず、"
-                  f"テスト表記を自動付与する設定もありません。通知内容に「テスト」の"
-                  f"明記が含まれるかは入力JSON側の内容に依存します")
-
-    kwargs = {data_kwarg: data, **extra_kwargs}
-    if supports_is_test:
-        kwargs["is_test"] = True
 
     try:
-        await method(**kwargs)
-        print(banner)
-        print(f"[TEST] 完了しました。Discordの該当チャンネルで通知内容を確認してください。")
-        print(f"[TEST] （タイトル先頭の「【テスト】」表記・フッターの「※これはテスト通知です。」で識別できます）")
-        print(banner)
-        logger.warning(f"★★★ CLIテスト完了 ★★★ 対象: {cog_key}")
-    except Exception as e:
-        print(banner)
-        print(f"[TEST] 実行中にエラーが発生しました: {type(e).__name__}: {e}")
-        print(banner)
-        logger.error(f"CLIテスト実行エラー: {e}", exc_info=True)
+        await _invoke_test_target(cog_key, target, cog, method, json_path)
     finally:
+        print(banner)
         # 音声キュー等の非同期処理が積まれている場合に備え、少し待ってから終了する
         await asyncio.sleep(3)
         await bot.close()
+
+
+async def run_all_cli_tests(bot, fixtures_dir: str) -> None:
+    """
+    --test_all <fixtures_dir> で指定された一括テストを実行する。
+
+    TEST_TARGETS の全対象について、requires_json=True の対象は
+    "<fixtures_dir>/<cog_key>_sample.json" を探索し、存在するものだけ
+    実行する（存在しない対象はスキップし、一覧にまとめて表示する）。
+    requires_json=False の対象（ews）は JSON 不要のためそのまま実行する。
+
+    Bot が on_ready 済みで呼び出すこと。全対象の実行が終わったら
+    サマリーを表示し、明示的にプロセスを終了する。
+    """
+    banner = "=" * 60
+    print(banner)
+    print(f"[TEST] これは一括テスト実行です（--test_all） — fixtures: {fixtures_dir}")
+    print(banner)
+    logger.warning(f"★★★ CLIテストモード（一括実行）で実行中 ★★★ fixtures={fixtures_dir}")
+
+    if not os.path.isdir(fixtures_dir):
+        print(f"[TEST] エラー: fixtures ディレクトリが見つかりません: {fixtures_dir}")
+        logger.error(f"CLIテスト（一括）失敗: fixtures ディレクトリが見つかりません: {fixtures_dir}")
+        await bot.close()
+        sys.exit(1)
+
+    results: dict[str, str] = {}  # cog_key -> "OK" / "NG" / "SKIP"
+
+    for cog_key, target in TEST_TARGETS.items():
+        requires_json = target.get("requires_json", True)
+
+        if requires_json:
+            json_path = os.path.join(fixtures_dir, f"{cog_key}_sample.json")
+            if not os.path.exists(json_path):
+                print(f"[TEST] スキップ（{cog_key}）: fixture が見つかりません → {json_path}")
+                logger.info(f"CLIテスト（一括）スキップ: {cog_key} ({json_path} が存在しません)")
+                results[cog_key] = "SKIP"
+                continue
+        else:
+            json_path = ""
+
+        print(banner)
+        print(f"[TEST] 実行中 — 対象: {cog_key} ({target['cog_name']}.{target['method']})")
+        if requires_json:
+            print(f"[TEST] 入力ファイル: {json_path}")
+
+        cog, method = _resolve_cog_and_method(bot, cog_key, target)
+        if cog is None or method is None:
+            results[cog_key] = "NG"
+            continue
+
+        ok = await _invoke_test_target(cog_key, target, cog, method, json_path)
+        results[cog_key] = "OK" if ok else "NG"
+
+        # 各対象の間に少し間隔を空ける
+        # （音声キュー・Discordレート制限・通知の見分けやすさへの配慮）
+        await asyncio.sleep(2)
+
+    print(banner)
+    print("[TEST] 一括テスト完了 — 結果サマリー")
+    for cog_key in TEST_TARGETS:
+        status = results.get(cog_key, "SKIP")
+        icon = {"OK": "✅", "NG": "❌", "SKIP": "⚪"}.get(status, "?")
+        print(f"[TEST]   {icon} {status:<4} {cog_key}")
+    ok_count = sum(1 for s in results.values() if s == "OK")
+    ng_count = sum(1 for s in results.values() if s == "NG")
+    skip_count = sum(1 for s in results.values() if s == "SKIP")
+    print(f"[TEST] 合計: {len(TEST_TARGETS)} 件 / OK={ok_count} NG={ng_count} SKIP={skip_count}")
+    print(banner)
+    logger.warning(
+        f"★★★ CLIテスト（一括）完了 ★★★ "
+        f"OK={ok_count} NG={ng_count} SKIP={skip_count} / {results}"
+    )
+
+    await asyncio.sleep(3)
+    await bot.close()

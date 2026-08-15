@@ -64,11 +64,15 @@ QuakeInfoCog（code=551）・TsunamiCog（code=552）はそれぞれ独立して
     python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
     python3 bot.py --test_ews                  # EWS信号音（MajorWarning相当）を再生
     python3 bot.py --test_ews Warning           # EWS信号音（Warning相当）を再生
+    python3 bot.py --test_all tests/fixtures/   # TEST_TARGETS全対象を一括実行
     （その他の対応Cogは core/test_runner.py の TEST_TARGETS を参照）
 
 実際にDiscordへ接続し、対象Cogの notify_* 関数を is_test=True で呼び出す
 （＝実チャンネルに「【テスト】」接頭辞付きの通知が実際に送信され、
 目視・耳で確認できる）。テスト完了後は自動的にプロセスを終了する。
+--test_all は "<fixtures_dir>/<cog_key>_sample.json" という命名規則で
+fixture を探索し、存在する対象だけ順次実行する（詳細は
+core/test_runner.py の run_all_cli_tests を参照）。
 
 【起動手順】
     python bot.py
@@ -83,7 +87,7 @@ from discord.ext import commands
 
 from core.config import BOT_TOKEN
 from core.logging_setup import setup_logging
-from core.test_runner import parse_test_args, run_cli_test
+from core.test_runner import parse_test_args, run_cli_test, run_all_cli_tests
 
 logger = logging.getLogger("QTLBot")
 
@@ -112,7 +116,11 @@ if _test_target is not None:
         # discord.pyのon_readyは全Cogのon_readyと並行して発火しうるため、
         # 確実性を優先して固定の待機時間を設ける。
         await asyncio.sleep(2)
-        await run_cli_test(bot, cog_key, json_path)
+        if cog_key == "__all__":
+            # --test_all: json_path にはfixtureディレクトリのパスが入る
+            await run_all_cli_tests(bot, json_path)
+        else:
+            await run_cli_test(bot, cog_key, json_path)
 
 
 async def main():
@@ -124,11 +132,12 @@ async def main():
 
     if _test_target is not None:
         cog_key, json_path = _test_target
-        logger.warning(
-            f"★★★ CLIテストモードで起動します ★★★ "
-            f"対象: --test_{cog_key} {json_path}"
-        )
-        print(f"[TEST] CLIテストモードで起動します（対象: --test_{cog_key} {json_path}）")
+        if cog_key == "__all__":
+            target_desc = f"--test_all {json_path}（全対象一括実行）"
+        else:
+            target_desc = f"--test_{cog_key} {json_path}"
+        logger.warning(f"★★★ CLIテストモードで起動します ★★★ 対象: {target_desc}")
+        print(f"[TEST] CLIテストモードで起動します（対象: {target_desc}）")
         print("[TEST] 全Cogは通常通り起動します（実際の通知経路の検証のため）。")
         print("[TEST] on_ready後に指定したテストを1回実行し、完了後にプロセスを終了します")
 
