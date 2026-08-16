@@ -40,6 +40,7 @@ from core.helpers import (
     truncate_embed_description, format_jma_time,
 )
 from core.audio import AudioMixin
+from core.notification_log import record_notification
 
 logger = logging.getLogger("QTLBot")
 
@@ -365,6 +366,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             embed.set_footer(text=f"気象庁 | eventId: {event_id}")
 
             await channel.send(embed=embed)
+            record_notification("火山情報", head_title)
             logger.info(f"Volcano 通知完了: {head_title} eventId={event_id}")
 
             # 読み上げ（警戒レベル L1〜L3 のみ）
@@ -470,6 +472,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             )
             embed.set_footer(text=f"気象庁 噴火速報 | eventId: {event_id}")
             await channel.send(embed=embed)
+            record_notification("噴火速報", head_title)
             logger.info(f"噴火速報通知完了: {head_title} eventId={event_id}")
 
             speak_text = f"噴火速報。{volcano_name or title}で噴火が発生しました。"
@@ -609,6 +612,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             )
             embed.set_footer(text=f"気象庁 噴火警報 | eventId: {event_id}")
             await channel.send(embed=embed)
+            record_notification("噴火警報", title)
             logger.info(f"噴火警報通知完了: {title} eventId={event_id}")
 
             speak_text = f"噴火警報。{volcano_name or '火山'}で{warn_name}が{condition or '発表'}されました。"

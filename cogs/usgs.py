@@ -53,6 +53,7 @@ from core.helpers import (
     truncate_embed_description, format_jma_time,
 )
 from core.audio import AudioMixin
+from core.notification_log import record_notification
 
 logger = logging.getLogger("QTLBot")
 
@@ -375,6 +376,7 @@ class UsgsCog(commands.Cog, AudioMixin):
             embed.add_field(name="詳細情報", value=f"[USGS]({usgs_url})", inline=False)
             
             await channel.send(embed=embed)
+            record_notification("USGS", title, place)
             
             # 読み上げ
             speak_text = (

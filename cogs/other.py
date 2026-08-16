@@ -52,6 +52,7 @@ from core.helpers import (
     truncate_embed_description, format_jma_time,
 )
 from core.audio import AudioMixin
+from core.notification_log import record_notification
 
 logger = logging.getLogger("QTLBot")
 
@@ -318,6 +319,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 embed.set_footer(text=footer)
 
             await channel.send(embed=embed)
+            if not is_test:
+                record_notification("長周期地震動", "長周期地震動に関する観測情報", hypo_name)
 
             # 読み上げ用に時刻の「H時MM分頃」部分を抽出
             time_speak = ""
@@ -436,6 +439,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 await channel.send(embed=embed, file=image_file)
             else:
                 await channel.send(embed=embed)
+            if not is_test:
+                record_notification("気象庁その他", title_text)
 
             speak_text = f"{title_text} が発表されました"
             if "顕著な地震の震源要素更新のお知らせ" in title_text:
