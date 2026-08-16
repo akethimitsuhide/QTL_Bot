@@ -25,20 +25,19 @@ WebSocketとは無関係の別経路（気象庁HPのXML/JSON）のため、今�
 外とし、従来通りポーリングを継続する。
 
 【他モジュールとの依存関係】
-- core.config       : TSUNAMI_ENABLE, CHANNEL_ID, TSUNAMI_CHANNEL_ID,
-                       FETCH_FAILURE_THRESHOLD, FETCH_BACKOFF_SECONDS
-- core.constants    : TSUNAMI_MAP, _tsunami_height_key
+- core.config       : TSUNAMI_ENABLE, CHANNEL_ID, TSUNAMI_CHANNEL_ID
+- core.constants    : TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key
 - core.helpers      : safe_int, safe_float, safe_bool,
                        truncate_embed_description, format_jma_time
 - core.audio.AudioMixin       : speak_local, play_mp3（多重継承で利用）
 - core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用。
   2026-08-02: 内容検証を強化した安定版としてembed埋め込み方式を再度採用）
 
-【Step2 時点の設計メモ】
-- Circuit Breaker（_fetch_backoff_is_active 等）は現時点では
-  quake.py と同じロジックをこの Cog 内に個別実装している。
-  3つ目以降の Cog（volcano/usgs）でも同じパターンが必要になるため、
-  Step3以降で core/circuit_breaker.py 等への共通化を検討する。
+【設計メモ】
+- Circuit Breaker（連続失敗時のバックオフ）は core.fetch_backoff.FetchBackoff
+  に共通化済み（quake.py 等で採用）。本Cogはfetch_tsunamiの旧ポーリング処理が
+  P2P津波情報WebSocket化により廃止されたため、そもそもCircuit Breakerを
+  使用していない（2026-08: 使われなくなっていた重複実装を削除した）。
 - 音声再生（speak_local/play_mp3）は AudioMixin 経由で「自分自身の」
   speech_queue/mp3_queue/audio_files を使う設計のため、
   この Cog も __init__ で自前のキューを持つ
@@ -49,7 +48,6 @@ from discord.ext import commands, tasks
 import aiohttp
 import asyncio
 import traceback
-import time
 from datetime import datetime
 from collections import defaultdict
 import logging
@@ -57,16 +55,16 @@ import logging
 from core.config import (
     CHANNEL_ID, TSUNAMI_CHANNEL_ID,
     TSUNAMI_ENABLE,
-    FETCH_FAILURE_THRESHOLD, FETCH_BACKOFF_SECONDS,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
-from core.constants import TSUNAMI_MAP, _tsunami_height_key
+from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.helpers import (
     safe_int, safe_float, safe_bool,
     truncate_embed_description, format_jma_time,
 )
 from core.audio import AudioMixin
 from core.p2p_image import P2PImageMixin
+from core.notification_log import record_notification
 
 logger = logging.getLogger("QTLBot")
 
@@ -74,8 +72,12 @@ logger = logging.getLogger("QTLBot")
 # 読み上げ文言の両方から参照するため、モジュールレベルに定義する
 # （以前は notify_tsunami 内の cancelled=False 分岐だけのローカル変数
 # だったため、cancelled=True 側の読み上げロジックから参照すると
-# NameError になっていた）
-GRADE_ORDER = ["MajorWarning", "Warning", "Watch", "Unknown"]
+# NameError になっていた）。
+# 2026-08: core.constants.TSUNAMI_GRADE_ORDER に共有定数として集約。
+# cogs/quake.py の EWS 重複再生防止でも同じ順序が必要になったため。
+# このモジュール内では従来通り GRADE_ORDER の名前で参照できるよう
+# エイリアスとして残す（呼び出し箇所を書き換える必要をなくすため）。
+GRADE_ORDER = TSUNAMI_GRADE_ORDER
 
 
 class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
@@ -102,14 +104,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         self._last_recv = {"tsunami": None}
         self._recv_count = {"tsunami": 0}
 
-        # -- fetch_tsunami の Circuit Breaker --
-        # （P2P津波情報 code=552 のWebSocket移行によりポーリング専用の
-        #   fetch_tsunami は廃止したが、_fetch_backoff_is_active 等の
-        #   汎用メソッド自体は他のポーリング処理と共通化されているため
-        #   辞書の初期化は残す。専用ロックのみ不要になったため削除）
-        self._fetch_failures = {"tsunami": 0}
-        self._fetch_backoff_until = {"tsunami": 0.0}
-
         # -- 音声再生（AudioMixin が要求する属性） --
         self.speech_queue = asyncio.PriorityQueue(maxsize=SPEECH_QUEUE_MAXSIZE)
         self.speech_task = None
@@ -121,32 +115,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             "vxse53": "vxse53.mp3",
             "vxse5c": "vxse5c.mp3",
         }
-
-    # ===============================
-    # Circuit Breaker ヘルパー
-    # ===============================
-    def _fetch_backoff_is_active(self, key):
-        now = time.monotonic()
-        until = self._fetch_backoff_until.get(key, 0.0)
-        if until > now:
-            return True
-        if self._fetch_failures.get(key, 0) > 0:
-            self._fetch_failures[key] = 0
-            self._fetch_backoff_until[key] = 0.0
-        return False
-
-    def _reset_fetch_backoff(self, key):
-        self._fetch_failures[key] = 0
-        self._fetch_backoff_until[key] = 0.0
-
-    def _record_fetch_failure(self, key, reason):
-        self._fetch_failures[key] = self._fetch_failures.get(key, 0) + 1
-        if self._fetch_failures[key] >= FETCH_FAILURE_THRESHOLD:
-            self._fetch_backoff_until[key] = time.monotonic() + FETCH_BACKOFF_SECONDS
-            logger.warning(
-                f"{key} fetch failure threshold reached ({self._fetch_failures[key]}): "
-                f"backoff for {FETCH_BACKOFF_SECONDS}s ({reason})"
-            )
 
     # ===============================
     # Cog起動・終了
@@ -397,33 +365,12 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
     def _format_tsunami_height_value(raw: str) -> str:
         """
         JMA tsunami JSON の MaxHeight.TsunamiHeight（文字列）を表示用に整形する。
-        値の例:
-          "<0.2"  → "0.2m未満"
-          ">10" / "≧10" → "10m以上"
-          "5"     → "5m"
-          "巨大" / "高い" / "若干" 等の定性語 → そのまま返す（m を付けない）
+
+        実装本体は core.constants.format_tsunami_height_value に切り出した
+        （2026-08 リファクタリング。cogs/tsunami.py の肥大化対策）。
+        呼び出し方法・戻り値の仕様は変更していない。
         """
-        if not raw:
-            return ""
-        s = raw.strip()
-
-        # 定性的な表現はそのまま（末尾に m を付けると "巨大m" のような誤表記になるため）
-        QUALITATIVE = {"巨大", "高い", "若干", "微弱", "不明"}
-        if s in QUALITATIVE:
-            return s
-
-        if s.startswith("<"):
-            return f"{s[1:]}m未満"
-        if s.startswith(">") or s.startswith("\u2267") or s.startswith("\u2265"):
-            return f"{s[1:]}m以上"
-
-        # 数値のみ（"5", "10" 等）
-        import re as _re
-        if _re.fullmatch(r"\d+(?:\.\d+)?", s):
-            return f"{s}m"
-
-        # それ以外の未知のフォーマットはそのまま返す（mを付けて誤解させない）
-        return s
+        return format_tsunami_height_value(raw)
 
     async def notify_tsunami(self, data, is_test=False):
         if not TSUNAMI_ENABLE and not is_test:
@@ -539,8 +486,8 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 embed.set_footer(text=" | ".join(footer_parts))
 
             sent_msg = await channel.send(embed=embed)
-
-            # ── 地図画像（embed埋め込み） ──
+            if not is_test:
+                record_notification("津波情報", title)
             # 2026-08-02: CDN反映のリトライ埋め込み方式を、内容検証を
             # 強化した上で再度採用する（core/p2p_image.py の
             # _attach_p2p_image docstring参照）。
@@ -756,6 +703,8 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 mention = f"{self.bot.user.mention} "
             
             await channel.send(mention, embed=embed)
+            if not is_test:
+                record_notification("津波観測情報", title)
             logger.info(f"津波観測情報を通知しました: {title}")
             
         except Exception as e:
@@ -981,6 +930,8 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 embed.set_footer(text=" | ".join(footer_parts))
 
             await channel.send(embed=embed)
+            if not is_test:
+                record_notification("津波予報", title)
             logger.info(f"津波予報/警報通知完了: {title} max_level={max_level}")
 
 
@@ -1053,6 +1004,8 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             await channel.send(embed=embed)
+            if not is_test:
+                record_notification("震源要素更新", title)
             logger.info(f"震源要素更新通知完了: {title}")
 
         except Exception as e:
@@ -1120,6 +1073,8 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             await channel.send(embed=embed)
+            if not is_test:
+                record_notification("南海トラフ", title)
             logger.info(f"南海トラフ地震関連情報通知完了: {title}")
 
             # 読み上げ（巨大地震警戒・注意のみ）
