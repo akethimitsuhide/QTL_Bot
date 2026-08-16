@@ -57,13 +57,14 @@ from core.config import (
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
 )
 from core.constants import (
-    INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP,
+    INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP, TSUNAMI_GRADE_ORDER,
     PREFECTURE_MAP, group_points_by_scale, scale_one_level_down,
 )
 from core.helpers import format_jma_time, format_latlon
 from core.audio import AudioClientMixin
 from core.p2p_image import P2PImageMixin
 from core.ews_signal import generate_ews_pcm
+from core.notification_log import record_notification
 
 logger = logging.getLogger("QTLBot")
 
@@ -83,6 +84,19 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self.last_quake_id = None
 
         self._last_zencyu_time: datetime | None = None
+
+        # ── EWS（緊急警報放送）信号音の重複再生防止 ──
+        # 同一の地震について ScalePrompt → Destination → DetailScale と
+        # 複数回notify_quakeが呼ばれるたびにEWS信号音が毎回鳴ってしまう
+        # バグへの対応（2026-08 精査で発見）。P2P地震情報には各報を横断する
+        # 共通IDが無いため、「発生時刻 + 震源地名」を地震そのものの同一性を
+        # 判定する簡易キーとして使う。値には「そのキーで最後にEWSを再生した
+        # 際の津波区分」を保持し、区分が Warning→MajorWarning のように
+        # エスカレーションした場合のみ再度鳴らす（同じ区分の繰り返し通知
+        # では鳴らさない）。Bot再起動でリセットされるが、EEW側の
+        # eew_max_serial_seen と同様に運用上問題ない設計とする
+        # （README記載の定期再起動運用を前提）。
+        self._ews_last_grade_by_event: dict[str, str] = {}
 
         self._last_recv: dict[str, datetime | None] = {"quake": None}
         self._recv_count: dict[str, int] = {"quake": 0}
@@ -382,6 +396,8 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             embed.set_footer(text=" | ".join(footer_parts))
 
         sent_msg = await channel.send(embed=embed)
+        if not is_test:
+            record_notification("地震情報", title, name_field)
 
         # ── 地図画像（embed埋め込み） ──
         quake_id = data.get("id") or data.get("_id")
@@ -515,8 +531,61 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         # 津波警報・大津波警報（津波注意報・津波予報は対象外）が発表・
         # 更新された際に、AFSK緊急警報信号音を鳴らす。CLIテスト実行時
         # (is_test=True) は実際の警報ではないため対象外とする。
+        # 【2026-08 修正】同一の地震について複数回notify_quakeが呼ばれる
+        # （ScalePrompt→Destination→DetailScale等）たびに毎回鳴っていた
+        # バグを修正。_should_play_ews で「未再生、またはエスカレーション」
+        # の場合のみ True を返す。
         if EWS_ENABLE and not is_test and dom_tsunami in ("Warning", "MajorWarning"):
-            await self._play_ews_signal(dom_tsunami)
+            if self._should_play_ews(eq, hypo, dom_tsunami):
+                await self._play_ews_signal(dom_tsunami)
+
+    def _should_play_ews(self, eq: dict, hypo: dict, dom_tsunami: str) -> bool:
+        """
+        同一の地震について EWS 信号音を再度鳴らすべきかを判定する。
+
+        P2P地震情報の各報（ScalePrompt/Destination/DetailScale等）は
+        同一の地震でもレポートごとに異なる id を持ち、EEWのEventIDに
+        相当する共通識別子が無い。そのため「発生時刻 + 震源地名」を
+        簡易的な同一性キーとして使う（同一地震であれば通常この組は
+        変化しない）。
+
+        判定ルール:
+        - このキーで一度もEWSを鳴らしていなければ True（初回は必ず鳴らす）
+        - 既に鳴らした際の津波区分より今回の区分の方が深刻
+          （Warning → MajorWarning 等）であれば True（エスカレーションは
+          再度知らせる必要があるため）
+        - それ以外（同一区分の繰り返し、または既にMajorWarning発表済みの
+          ままWarning相当の更新が来た場合等）は False
+        """
+        event_key = f"{eq.get('time', '')}_{hypo.get('name', '')}"
+        prev_grade = self._ews_last_grade_by_event.get(event_key)
+
+        if prev_grade is None:
+            self._ews_last_grade_by_event[event_key] = dom_tsunami
+            return True
+
+        try:
+            prev_rank = TSUNAMI_GRADE_ORDER.index(prev_grade)
+            curr_rank = TSUNAMI_GRADE_ORDER.index(dom_tsunami)
+        except ValueError:
+            # 未知の区分値の場合は安全側に倒して鳴らす
+            self._ews_last_grade_by_event[event_key] = dom_tsunami
+            return True
+
+        if curr_rank < prev_rank:
+            # 順位が若いほど深刻（MajorWarning=0 < Warning=1）
+            self._ews_last_grade_by_event[event_key] = dom_tsunami
+            logger.info(
+                f"EWS: 同一地震({event_key})で津波区分がエスカレーション "
+                f"({prev_grade} → {dom_tsunami}) のため再度信号音を再生します"
+            )
+            return True
+
+        logger.debug(
+            f"EWS: 同一地震({event_key})・区分据え置き "
+            f"({prev_grade} → {dom_tsunami}) のため信号音の再生をスキップします"
+        )
+        return False
 
     async def _play_ews_signal(self, dom_tsunami: str) -> None:
         """
