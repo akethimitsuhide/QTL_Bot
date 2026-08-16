@@ -58,6 +58,7 @@ from core.config import (
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
+from core.notification_log import get_recent_notifications
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -102,16 +103,35 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   canvas { max-height: 280px; }
   .status-line { color: #7f849c; font-size: 0.8em; margin-top: 8px; }
   .error { color: #f38ba8; padding: 20px; }
+  .toolbar { margin-bottom: 16px; }
+  .csv-link { display: inline-block; color: #89b4fa; background: #292c3c;
+              border: 1px solid #45475a; border-radius: 6px;
+              padding: 6px 14px; font-size: 0.85em; text-decoration: none; }
+  .csv-link:hover { background: #313244; }
+  .notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  .notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #313244; }
+  .notif-table th { color: #7f849c; font-weight: normal; }
+  .notif-kind { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                background: #45475a; color: #cdd6f4; font-size: 0.85em; white-space: nowrap; }
+  .notif-empty { color: #7f849c; padding: 12px 0; }
+  .notif-card { grid-column: 1 / -1; }
 </style>
 </head>
 <body>
   <h1>QTL_Bot ダッシュボード</h1>
   <div class="subtitle">システムリソース・受信件数の推移（メモリ上のリングバッファ、Bot再起動でリセットされます）</div>
+  <div class="toolbar">
+    <a class="csv-link" href="/status/history?format=csv" download>CSVをダウンロード</a>
+  </div>
   <div id="content" class="grid">
     <div class="card"><h2>CPU 使用率 (%)</h2><canvas id="cpuChart"></canvas></div>
     <div class="card"><h2>メモリ使用量 (MB)</h2><canvas id="memChart"></canvas></div>
     <div class="card"><h2>ディスク使用率 (%)</h2><canvas id="diskChart"></canvas></div>
     <div class="card"><h2>受信件数（累積）</h2><canvas id="recvChart"></canvas></div>
+    <div class="card notif-card">
+      <h2>直近の通知履歴</h2>
+      <div id="notifContent"><div class="notif-empty">読み込み中...</div></div>
+    </div>
   </div>
   <div class="status-line" id="statusLine">読み込み中...</div>
 
@@ -185,8 +205,52 @@ async function loadAndRender() {
   }
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+async function loadAndRenderNotifications() {
+  const el = document.getElementById('notifContent');
+  try {
+    const res = await fetch('/status/notifications?limit=20');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const items = data.notifications || [];
+
+    if (items.length === 0) {
+      el.innerHTML = '<div class="notif-empty">まだ通知の記録がありません</div>';
+      return;
+    }
+
+    let html = '<table class="notif-table"><thead><tr>' +
+      '<th>時刻</th><th>種別</th><th>タイトル</th><th>詳細</th>' +
+      '</tr></thead><tbody>';
+    for (const n of items) {
+      const d = new Date(n.timestamp);
+      const timeStr = d.getMonth() + 1 + '/' + d.getDate() + ' ' +
+        d.getHours().toString().padStart(2, '0') + ':' +
+        d.getMinutes().toString().padStart(2, '0') + ':' +
+        d.getSeconds().toString().padStart(2, '0');
+      html += '<tr>' +
+        '<td>' + timeStr + '</td>' +
+        '<td><span class="notif-kind">' + escapeHtml(n.kind) + '</span></td>' +
+        '<td>' + escapeHtml(n.title) + '</td>' +
+        '<td>' + escapeHtml(n.detail || '') + '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<div class="error">通知履歴の取得に失敗しました: ' + e.message + '</div>';
+  }
+}
+
 loadAndRender();
+loadAndRenderNotifications();
 setInterval(loadAndRender, 60000);
+setInterval(loadAndRenderNotifications, 30000);
 </script>
 </body>
 </html>
@@ -458,17 +522,115 @@ class SystemCog(commands.Cog):
     # !status / /qtl_status コマンド
     # ===============================
 
-    def _build_status_embed(self) -> discord.Embed:
-        """ステータス Embed を組み立てて返す（!status と /qtl_status 共通）"""
+    def _sample_resource_usage(self) -> dict | None:
+        """
+        プロセスのCPU使用率・メモリ使用量・ディスク使用率をまとめて
+        計測する共通ヘルパー。
+
+        【2026-08 統合の経緯】
+        以前は3箇所がそれぞれ独自にpsutilで計測しており、計測方式が
+        不統一だった:
+          - _build_status_embed: 毎回 psutil.Process() を新規生成し、
+            cpu_percent(interval=0.5) で0.5秒間 *同期的に* ブロックして
+            計測していた（!status実行のたびにBot全体の応答が0.5秒
+            停止する問題があった）
+          - resource_monitor: 同様に毎回新規Process()を生成し、
+            cpu_percent(interval=1) で1秒間ブロック
+          - Web Dashboard /status・status_history_recorder: 起動時に
+            プライミング済みの永続インスタンス self._status_psutil_proc
+            を cpu_percent(interval=None) でノンブロッキング計測
+            （こちらが正しい方式）
+
+        本メソッドは全箇所を後者のノンブロッキング方式に統一する。
+        self._status_psutil_proc（__init__ で起動時に一度だけ生成・
+        プライミング済み）が利用できない場合（psutil未インストール等）
+        は None を返す。
+        """
+        if self._status_psutil_proc is None:
+            return None
         try:
             import psutil
-            proc = psutil.Process()
-            cpu  = proc.cpu_percent(interval=0.5)
-            mem  = proc.memory_info().rss / 1024 / 1024
-            mem_total = psutil.virtual_memory().total / 1024 / 1024
+            proc = self._status_psutil_proc
+            cpu_percent = proc.cpu_percent(interval=None)
+            mem_mb = proc.memory_info().rss / 1024 / 1024
+            mem_total_mb = psutil.virtual_memory().total / 1024 / 1024
             disk = psutil.disk_usage("/")
+            return {
+                "cpu_percent": cpu_percent,
+                "memory_mb": mem_mb,
+                "memory_total_mb": mem_total_mb,
+                "disk": disk,  # psutil.disk_usage結果（.percent/.free/.used/.total）
+            }
+        except Exception:
+            return None
+
+    def _history_csv_response(self, history_list: list[dict]):
+        """
+        status_history のスナップショット一覧を CSV（text/csv）の
+        aiohttp.web.Response として組み立てて返す。
+
+        history_handler（GET /status/history?format=csv）専用の
+        ヘルパー。history_list の各スナップショットは
+        {"timestamp", "cpu_percent", "memory_mb", "disk_percent",
+         "recv_count": {...}} という構造（status_history_recorder参照）。
+        recv_count は "recv_<key>" 列にフラット化する（CSVは
+        ネスト構造を持てないため）。
+
+        recv_count のキー集合はスナップショットごとに変わらない前提だが、
+        念のため全スナップショットを走査してキー集合の和集合を取り、
+        欠けているキーは空欄にする（将来的にrecv_countへキーが
+        追加/削除されても壊れないようにするため）。
+        """
+        import csv
+        import io
+        from aiohttp import web
+
+        recv_keys: list[str] = []
+        seen_recv_keys: set[str] = set()
+        for snap in history_list:
+            for k in (snap.get("recv_count") or {}).keys():
+                if k not in seen_recv_keys:
+                    seen_recv_keys.add(k)
+                    recv_keys.append(k)
+
+        fieldnames = ["timestamp", "cpu_percent", "memory_mb", "disk_percent"]
+        fieldnames += [f"recv_{k}" for k in recv_keys]
+
+        buf = io.StringIO()
+        # Excelでの文字化け防止のためUTF-8 BOM付きにする
+        buf.write("\ufeff")
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for snap in history_list:
+            row = {
+                "timestamp": snap.get("timestamp", ""),
+                "cpu_percent": snap.get("cpu_percent", ""),
+                "memory_mb": snap.get("memory_mb", ""),
+                "disk_percent": snap.get("disk_percent", ""),
+            }
+            recv_count = snap.get("recv_count") or {}
+            for k in recv_keys:
+                row[f"recv_{k}"] = recv_count.get(k, "")
+            writer.writerow(row)
+
+        filename = f"qtlbot_status_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        return web.Response(
+            body=buf.getvalue().encode("utf-8"),
+            content_type="text/csv",
+            charset="utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    def _build_status_embed(self) -> discord.Embed:
+        """ステータス Embed を組み立てて返す（!status と /qtl_status 共通）"""
+        metrics = self._sample_resource_usage()
+        if metrics is not None:
+            cpu = metrics["cpu_percent"]
+            mem = metrics["memory_mb"]
+            mem_total = metrics["memory_total_mb"]
+            disk = metrics["disk"]
             _psutil_ok = True
-        except ImportError:
+        else:
             _psutil_ok = False
             cpu = mem = mem_total = disk = None
 
@@ -737,10 +899,9 @@ class SystemCog(commands.Cog):
         """Web ダッシュボード（aiohttp）を起動"""
         from aiohttp import web
         import ipaddress
-        try:
-            import psutil
-        except ImportError:
-            psutil = None
+        # 【2026-08】CPU/メモリ/ディスク計測は _sample_resource_usage() に
+        # 統一したため、ここでの psutil インポートは不要になった
+        # （各ハンドラは _sample_resource_usage 経由で計測する）。
 
         port = WEB_DASHBOARD_PORT
         host = WEB_DASHBOARD_HOST
@@ -790,29 +951,21 @@ class SystemCog(commands.Cog):
                 last_recv = self._merged_last_recv()
                 recv_count = self._merged_recv_count()
 
-                # システムリソース（リクエスト時のみ計測）
+                # システムリソース（リクエスト時のみ計測、共通ヘルパー経由でノンブロッキング）
                 system_info: dict = {}
-                if psutil:
-                    try:
-                        if self._status_psutil_proc is not None:
-                            proc = self._status_psutil_proc
-                            cpu_val = proc.cpu_percent(interval=None)
-                        else:
-                            proc = psutil.Process(os.getpid())
-                            cpu_val = proc.cpu_percent(interval=None)
-                        mem = proc.memory_info().rss / 1024 / 1024
-                        mem_total = psutil.virtual_memory().total / 1024 / 1024
-                        disk = psutil.disk_usage("/")
-                        system_info = {
-                            "cpu_percent": cpu_val,
-                            "memory_mb": round(mem, 1),
-                            "memory_total_mb": round(mem_total, 1),
-                            "memory_percent": round(mem / mem_total * 100, 1),
-                            "disk_percent": disk.percent,
-                            "disk_free_gb": round(disk.free / 1024**3, 2),
-                        }
-                    except Exception:
-                        pass
+                metrics = self._sample_resource_usage()
+                if metrics is not None:
+                    mem = metrics["memory_mb"]
+                    mem_total = metrics["memory_total_mb"]
+                    disk = metrics["disk"]
+                    system_info = {
+                        "cpu_percent": metrics["cpu_percent"],
+                        "memory_mb": round(mem, 1),
+                        "memory_total_mb": round(mem_total, 1),
+                        "memory_percent": round(mem / mem_total * 100, 1),
+                        "disk_percent": disk.percent,
+                        "disk_free_gb": round(disk.free / 1024**3, 2),
+                    }
 
                 def _api_info(key: str) -> dict:
                     t = last_recv.get(key)
@@ -991,12 +1144,50 @@ class SystemCog(commands.Cog):
             status_history_recorder が STATUS_HISTORY_INTERVAL 秒ごとに
             記録したデータ（メモリ上のリングバッファ、Bot再起動でリセット）
             をそのままJSON配列として返す。
+
+            【CSVエクスポート】
+            クエリパラメータ ?format=csv を付けると、同じデータを
+            text/csv（Content-Disposition: attachment付き）で返す。
+            長期障害調査時にExcel等の外部ツールへ取り込みやすくするため
+            （2026-08 追加）。JSON配列に含まれる recv_count は各キーを
+            "recv_<key>" 列に展開してフラット化する。
             """
+            history_list = list(self.status_history)
+
+            if request.query.get("format", "").lower() == "csv":
+                return self._history_csv_response(history_list)
+
             return web.json_response({
                 "interval_sec": STATUS_HISTORY_INTERVAL,
                 "max_points": STATUS_HISTORY_MAXLEN,
-                "count": len(self.status_history),
-                "history": list(self.status_history),
+                "count": len(history_list),
+                "history": history_list,
+            })
+
+        async def notifications_handler(request):
+            """
+            GET /status/notifications - 直近の通知履歴。
+
+            各Cogのnotify_*メソッドが core.notification_log.record_notification
+            で記録した「実際にDiscordへ送信した通知」の一覧を新しい順に
+            返す（メモリ上のリングバッファ、Bot再起動でリセット）。
+            障害調査時に「何が通知されたか」を素早く確認できるようにする
+            ためのエンドポイント（2026-08 追加）。
+
+            クエリパラメータ ?limit=N で件数を絞れる（省略時は全件、
+            最大でも core.notification_log.NOTIFICATION_LOG_MAXLEN 件）。
+            """
+            limit_raw = request.query.get("limit")
+            limit = None
+            if limit_raw is not None:
+                try:
+                    limit = max(1, int(limit_raw))
+                except ValueError:
+                    pass
+            notifications = get_recent_notifications(limit)
+            return web.json_response({
+                "count": len(notifications),
+                "notifications": notifications,
             })
 
         async def dashboard_handler(request):
@@ -1014,6 +1205,7 @@ class SystemCog(commands.Cog):
             self._web_app = web.Application(middlewares=[ip_allowlist_middleware])
             self._web_app.router.add_get("/status", status_handler)
             self._web_app.router.add_get("/status/history", history_handler)
+            self._web_app.router.add_get("/status/notifications", notifications_handler)
             self._web_app.router.add_get("/dashboard", dashboard_handler)
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
@@ -1059,9 +1251,7 @@ class SystemCog(commands.Cog):
     # ===============================
     async def resource_monitor(self) -> None:
         """1時間ごとにリソース使用率をログに記録"""
-        try:
-            import psutil
-        except ImportError:
+        if self._status_psutil_proc is None:
             logger.warning("psutil がインストールされていません。リソース監視は無効です。")
             return
 
@@ -1074,12 +1264,19 @@ class SystemCog(commands.Cog):
                 await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
 
                 try:
-                    proc = psutil.Process()
-                    cpu_percent = proc.cpu_percent(interval=1)
-                    mem_info = proc.memory_info()
-                    mem_mb = mem_info.rss / 1024 / 1024
+                    # 【2026-08修正】以前は毎回 psutil.Process() を新規生成し
+                    # cpu_percent(interval=1) で1秒間 *同期的に* ブロック
+                    # していた（1時間に1回とはいえ、その1秒間はBot全体の
+                    # 応答が完全に停止していた）。_sample_resource_usage()
+                    # 経由のノンブロッキング計測に統一する。
+                    metrics = self._sample_resource_usage()
+                    if metrics is None:
+                        logger.error("リソース情報取得エラー: psutil計測に失敗しました")
+                        continue
 
-                    disk_info = psutil.disk_usage('/')
+                    cpu_percent = metrics["cpu_percent"]
+                    mem_mb = metrics["memory_mb"]
+                    disk_info = metrics["disk"]
                     disk_percent = disk_info.percent
                     disk_free_gb = disk_info.free / 1024 / 1024 / 1024
 
@@ -1116,9 +1313,7 @@ class SystemCog(commands.Cog):
         別タスクとして動かす。記録内容はメモリ上にのみ保持し、Bot再起動で
         リセットされる（外部DB等は使用しない軽量設計）。
         """
-        try:
-            import psutil
-        except ImportError:
+        if self._status_psutil_proc is None:
             logger.warning("psutil がインストールされていません。履歴記録は無効です。")
             return
 
@@ -1127,10 +1322,15 @@ class SystemCog(commands.Cog):
                 await asyncio.sleep(STATUS_HISTORY_INTERVAL)
 
                 try:
-                    proc = self._status_psutil_proc or psutil.Process()
-                    cpu_percent = proc.cpu_percent(interval=None)
-                    mem_mb = proc.memory_info().rss / 1024 / 1024
-                    disk_info = psutil.disk_usage('/')
+                    # 【2026-08修正】計測ロジックを _sample_resource_usage()
+                    # に統一（他2箇所と方式を揃え、psutil呼び出しを一元化）
+                    metrics = self._sample_resource_usage()
+                    if metrics is None:
+                        logger.debug("status_history_recorder: psutil計測に失敗したためスキップします")
+                        continue
+                    cpu_percent = metrics["cpu_percent"]
+                    mem_mb = metrics["memory_mb"]
+                    disk_info = metrics["disk"]
 
                     last_recv = self._eew_attr("_last_recv", {}) or {}
                     recv_count = self._merged_recv_count()
