@@ -194,6 +194,12 @@ TSUNAMI_MAP = {
     "MajorWarning": "大津波警報",
 }
 
+# 津波区分コードの深刻度順（重い順）。
+# 複数エリアの中から最も深刻な区分を選ぶソートキーや、
+# 「前回よりエスカレーションしたか」の比較に使う
+# （例: cogs/quake.py の EWS 重複再生防止、cogs/tsunami.py の表示順ソート）。
+TSUNAMI_GRADE_ORDER = ["MajorWarning", "Warning", "Watch", "Unknown"]
+
 # 地震情報の発表種別 → 表示文字列
 QUAKE_TYPE_MAP = {
     "ScalePrompt":          "震度速報",
@@ -229,6 +235,45 @@ def _tsunami_height_key(height_str: str) -> float:
     elif "未満" in s:
         v -= 0.001
     return v
+
+
+def format_tsunami_height_value(raw: str) -> str:
+    """
+    JMA tsunami JSON の MaxHeight.TsunamiHeight（文字列）を表示用に整形する。
+
+    2026-08: cogs/tsunami.py（1100行超）の肥大化対策として、TsunamiCogの
+    静的メソッド _format_tsunami_height_value から移設（cogs/tsunami.py
+    側には後方互換の薄いラッパーを残してある）。_tsunami_height_key
+    （ソートキー生成）と同じ「津波高さ文字列」を扱う関数のため、
+    同じモジュールにまとめる方が自然という判断もある。
+
+    値の例:
+      "<0.2"  → "0.2m未満"
+      ">10" / "≧10" → "10m以上"
+      "5"     → "5m"
+      "巨大" / "高い" / "若干" 等の定性語 → そのまま返す（m を付けない）
+    """
+    if not raw:
+        return ""
+    s = raw.strip()
+
+    # 定性的な表現はそのまま（末尾に m を付けると "巨大m" のような誤表記になるため）
+    QUALITATIVE = {"巨大", "高い", "若干", "微弱", "不明"}
+    if s in QUALITATIVE:
+        return s
+
+    if s.startswith("<"):
+        return f"{s[1:]}m未満"
+    if s.startswith(">") or s.startswith("\u2267") or s.startswith("\u2265"):
+        return f"{s[1:]}m以上"
+
+    # 数値のみ（"5", "10" 等）
+    import re
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return f"{s}m"
+
+    # それ以外の未知のフォーマットはそのまま返す（mを付けて誤解させない）
+    return s
 
 
 # 震度コード（scale値）の降順リスト。
