@@ -95,7 +95,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
   h1 { font-size: 1.4em; margin-bottom: 4px; }
-  .subtitle { color: #7f849c; font-size: 0.85em; margin-bottom: 20px; }
+  .subtitle { color: #7f849c; font-size: 0.85em; margin-bottom: 16px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
           gap: 20px; }
   .card { background: #292c3c; border-radius: 8px; padding: 16px; }
@@ -103,33 +103,78 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   canvas { max-height: 280px; }
   .status-line { color: #7f849c; font-size: 0.8em; margin-top: 8px; }
   .error { color: #f38ba8; padding: 20px; }
-  .toolbar { margin-bottom: 16px; }
-  .csv-link { display: inline-block; color: #89b4fa; background: #292c3c;
+  .toolbar { margin-bottom: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .btn-link { display: inline-block; color: #89b4fa; background: #292c3c;
               border: 1px solid #45475a; border-radius: 6px;
-              padding: 6px 14px; font-size: 0.85em; text-decoration: none; }
-  .csv-link:hover { background: #313244; }
+              padding: 6px 14px; font-size: 0.85em; text-decoration: none;
+              cursor: pointer; font-family: inherit; }
+  .btn-link:hover { background: #313244; }
+
+  /* ── ステータスサマリーヘッダー ── */
+  .summary-bar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+  .summary-chip { background: #292c3c; border-radius: 8px; padding: 10px 16px;
+                  min-width: 130px; flex: 1 1 130px; }
+  .summary-chip .chip-label { color: #7f849c; font-size: 0.75em; margin-bottom: 4px; }
+  .summary-chip .chip-value { font-size: 1.1em; font-weight: 600; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .dot-green  { background: #a6e3a1; }
+  .dot-yellow { background: #f9e2af; }
+  .dot-red    { background: #f38ba8; }
+  .dot-gray   { background: #6c7086; }
+
+  /* ── 通知履歴 ── */
   .notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
   .notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #313244; }
   .notif-table th { color: #7f849c; font-weight: normal; }
   .notif-kind { display: inline-block; padding: 2px 8px; border-radius: 10px;
-                background: #45475a; color: #cdd6f4; font-size: 0.85em; white-space: nowrap; }
+                background: #45475a; color: #11111b; font-size: 0.85em; white-space: nowrap;
+                font-weight: 600; }
   .notif-empty { color: #7f849c; padding: 12px 0; }
   .notif-card { grid-column: 1 / -1; }
+  .notif-header-row { display: flex; justify-content: space-between; align-items: center;
+                      flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .notif-header-row h2 { margin: 0; }
+  .notif-filter { background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a;
+                  border-radius: 6px; padding: 5px 10px; font-size: 0.85em; }
+
+  @media (max-width: 480px) {
+    body { padding: 10px; }
+    .grid { grid-template-columns: 1fr; gap: 12px; }
+    .summary-chip { min-width: 100px; }
+  }
 </style>
 </head>
 <body>
   <h1>QTL_Bot ダッシュボード</h1>
   <div class="subtitle">システムリソース・受信件数の推移（メモリ上のリングバッファ、Bot再起動でリセットされます）</div>
-  <div class="toolbar">
-    <a class="csv-link" href="/status/history?format=csv" download>CSVをダウンロード</a>
+
+  <div class="summary-bar" id="summaryBar">
+    <div class="summary-chip"><div class="chip-label">Bot状態</div><div class="chip-value" id="sumStatus">読み込み中...</div></div>
+    <div class="summary-chip"><div class="chip-label">稼働時間</div><div class="chip-value" id="sumUptime">-</div></div>
+    <div class="summary-chip"><div class="chip-label">Ping</div><div class="chip-value" id="sumPing">-</div></div>
+    <div class="summary-chip"><div class="chip-label">Wolfx EEW</div><div class="chip-value" id="sumWolfx">-</div></div>
+    <div class="summary-chip"><div class="chip-label">CPU / メモリ</div><div class="chip-value" id="sumResource">-</div></div>
+    <div class="summary-chip"><div class="chip-label">ディスク</div><div class="chip-value" id="sumDisk">-</div></div>
   </div>
-  <div id="content" class="grid">
+
+  <div class="toolbar">
+    <a class="btn-link" href="/status/history?format=csv" download>CSVをダウンロード</a>
+    <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
+  </div>
+  <div id="chartsContent" class="grid">
     <div class="card"><h2>CPU 使用率 (%)</h2><canvas id="cpuChart"></canvas></div>
     <div class="card"><h2>メモリ使用量 (MB)</h2><canvas id="memChart"></canvas></div>
     <div class="card"><h2>ディスク使用率 (%)</h2><canvas id="diskChart"></canvas></div>
     <div class="card"><h2>受信件数（累積）</h2><canvas id="recvChart"></canvas></div>
+  </div>
+  <div id="notifSection" class="grid" style="margin-top: 20px;">
     <div class="card notif-card">
-      <h2>直近の通知履歴</h2>
+      <div class="notif-header-row">
+        <h2>直近の通知履歴</h2>
+        <select class="notif-filter" id="notifFilter">
+          <option value="">すべての種別</option>
+        </select>
+      </div>
       <div id="notifContent"><div class="notif-empty">読み込み中...</div></div>
     </div>
   </div>
@@ -141,6 +186,19 @@ const COLORS = {
   wolfx: '#f38ba8', p2p_eew: '#fab387', quake: '#94e2d5',
   tsunami: '#89dceb', usgs: '#cba6f7', volcano: '#eba0ac',
 };
+
+// 通知種別ごとの表示色（notif-kindピルの背景色）。
+// core/notification_log.py 経由で記録されるkind文字列と対応させる。
+// 未知の種別が来た場合はCSS側のデフォルト（#45475a）にフォールバックする。
+const KIND_COLORS = {
+  'EEW': '#f38ba8', '地震情報': '#94e2d5', '津波情報': '#89dceb',
+  '津波観測情報': '#74c7ec', '津波予報': '#89dceb', '震源要素更新': '#b4befe',
+  '南海トラフ': '#eba0ac', '火山情報': '#fab387', '噴火速報': '#f9e2af',
+  '噴火警報': '#f38ba8', 'USGS': '#cba6f7', '長周期地震動': '#a6e3a1',
+  '気象庁その他': '#9399b2',
+};
+
+let notifItemsCache = [];  // フィルタ再描画用に直近取得分を保持
 
 function makeLineChart(ctx, labels, datasets, yLabel) {
   return new Chart(ctx, {
@@ -156,6 +214,51 @@ function makeLineChart(ctx, labels, datasets, yLabel) {
       plugins: { legend: { labels: { color: '#cdd6f4' } } },
     },
   });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+// ── ステータスサマリーヘッダー（/status を取得して表示） ──
+async function loadAndRenderSummary() {
+  try {
+    const res = await fetch('/status');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+
+    const statusOk = data.status === 'online';
+    document.getElementById('sumStatus').innerHTML =
+      '<span class="dot ' + (statusOk ? 'dot-green' : 'dot-red') + '"></span>' +
+      escapeHtml(data.bot_user || (statusOk ? 'オンライン' : 'オフライン'));
+
+    document.getElementById('sumUptime').textContent = data.uptime || '-';
+    document.getElementById('sumPing').textContent =
+      (data.ping_ms != null ? data.ping_ms + ' ms' : '-');
+
+    const wolfx = (data.eew && data.eew.wolfx) || {};
+    const wolfxStatus = wolfx.ws_status || 'unknown';
+    const wolfxDot = wolfxStatus === 'online' ? 'dot-green'
+      : (wolfxStatus === 'connecting' ? 'dot-yellow' : 'dot-red');
+    document.getElementById('sumWolfx').innerHTML =
+      '<span class="dot ' + wolfxDot + '"></span>' + escapeHtml(wolfxStatus);
+
+    const sys = data.system || {};
+    if (sys.cpu_percent != null) {
+      document.getElementById('sumResource').textContent =
+        sys.cpu_percent.toFixed(1) + '% / ' + sys.memory_mb + 'MB';
+    }
+    if (sys.disk_percent != null) {
+      const diskDot = sys.disk_percent >= 90 ? 'dot-red' : (sys.disk_percent >= 80 ? 'dot-yellow' : 'dot-green');
+      document.getElementById('sumDisk').innerHTML =
+        '<span class="dot ' + diskDot + '"></span>' + sys.disk_percent + '%';
+    }
+  } catch (e) {
+    document.getElementById('sumStatus').innerHTML =
+      '<span class="dot dot-gray"></span>取得失敗';
+  }
 }
 
 async function loadAndRender() {
@@ -198,57 +301,89 @@ async function loadAndRender() {
     }));
     makeLineChart(document.getElementById('recvChart'), labels, recvDatasets, '件数（累積）');
 
+    const nowStr = new Date().toLocaleTimeString('ja-JP');
     document.getElementById('statusLine').textContent =
-      data.count + '件のスナップショット（記録間隔: ' + data.interval_sec + '秒、最大保持: ' + data.max_points + '件）';
+      data.count + '件のスナップショット（記録間隔: ' + data.interval_sec + '秒、最大保持: ' + data.max_points + '件） ／ 最終更新: ' + nowStr;
   } catch (e) {
-    document.getElementById('content').innerHTML = '<div class="error">履歴データの取得に失敗しました: ' + e.message + '</div>';
+    document.getElementById('chartsContent').innerHTML = '<div class="error">履歴データの取得に失敗しました: ' + e.message + '</div>';
   }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
+function renderNotifTable(items) {
+  const el = document.getElementById('notifContent');
+  if (items.length === 0) {
+    el.innerHTML = '<div class="notif-empty">該当する通知がありません</div>';
+    return;
+  }
+  let html = '<table class="notif-table"><thead><tr>' +
+    '<th>時刻</th><th>種別</th><th>タイトル</th><th>詳細</th>' +
+    '</tr></thead><tbody>';
+  for (const n of items) {
+    const d = new Date(n.timestamp);
+    const timeStr = (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
+      d.getHours().toString().padStart(2, '0') + ':' +
+      d.getMinutes().toString().padStart(2, '0') + ':' +
+      d.getSeconds().toString().padStart(2, '0');
+    const kindColor = KIND_COLORS[n.kind] || '#45475a';
+    html += '<tr>' +
+      '<td>' + timeStr + '</td>' +
+      '<td><span class="notif-kind" style="background:' + kindColor + '">' + escapeHtml(n.kind) + '</span></td>' +
+      '<td>' + escapeHtml(n.title) + '</td>' +
+      '<td>' + escapeHtml(n.detail || '') + '</td>' +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function populateNotifFilterOptions(items) {
+  const select = document.getElementById('notifFilter');
+  const prevValue = select.value;
+  const kinds = [...new Set(items.map(n => n.kind))].sort();
+
+  select.innerHTML = '<option value="">すべての種別</option>' +
+    kinds.map(k => '<option value="' + escapeHtml(k) + '">' + escapeHtml(k) + '</option>').join('');
+
+  // 再描画後も選択中のフィルタを維持する（選択肢が存在する場合のみ）
+  if (kinds.includes(prevValue)) {
+    select.value = prevValue;
+  }
+}
+
+function applyNotifFilter() {
+  const selected = document.getElementById('notifFilter').value;
+  const filtered = selected
+    ? notifItemsCache.filter(n => n.kind === selected)
+    : notifItemsCache;
+  renderNotifTable(filtered);
 }
 
 async function loadAndRenderNotifications() {
   const el = document.getElementById('notifContent');
   try {
-    const res = await fetch('/status/notifications?limit=20');
+    const res = await fetch('/status/notifications?limit=50');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    const items = data.notifications || [];
+    notifItemsCache = data.notifications || [];
 
-    if (items.length === 0) {
-      el.innerHTML = '<div class="notif-empty">まだ通知の記録がありません</div>';
-      return;
-    }
-
-    let html = '<table class="notif-table"><thead><tr>' +
-      '<th>時刻</th><th>種別</th><th>タイトル</th><th>詳細</th>' +
-      '</tr></thead><tbody>';
-    for (const n of items) {
-      const d = new Date(n.timestamp);
-      const timeStr = d.getMonth() + 1 + '/' + d.getDate() + ' ' +
-        d.getHours().toString().padStart(2, '0') + ':' +
-        d.getMinutes().toString().padStart(2, '0') + ':' +
-        d.getSeconds().toString().padStart(2, '0');
-      html += '<tr>' +
-        '<td>' + timeStr + '</td>' +
-        '<td><span class="notif-kind">' + escapeHtml(n.kind) + '</span></td>' +
-        '<td>' + escapeHtml(n.title) + '</td>' +
-        '<td>' + escapeHtml(n.detail || '') + '</td>' +
-        '</tr>';
-    }
-    html += '</tbody></table>';
-    el.innerHTML = html;
+    populateNotifFilterOptions(notifItemsCache);
+    applyNotifFilter();
   } catch (e) {
     el.innerHTML = '<div class="error">通知履歴の取得に失敗しました: ' + e.message + '</div>';
   }
 }
 
-loadAndRender();
-loadAndRenderNotifications();
+function loadAll() {
+  loadAndRenderSummary();
+  loadAndRender();
+  loadAndRenderNotifications();
+}
+
+document.getElementById('notifFilter').addEventListener('change', applyNotifFilter);
+document.getElementById('refreshBtn').addEventListener('click', loadAll);
+
+loadAll();
+setInterval(loadAndRenderSummary, 15000);
 setInterval(loadAndRender, 60000);
 setInterval(loadAndRenderNotifications, 30000);
 </script>
