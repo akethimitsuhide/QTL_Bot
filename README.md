@@ -102,8 +102,9 @@
 
 ### Web Dashboard / コマンド
 - `GET /status` で詳細な稼働状況を JSON で取得
-- `GET /status/history` でシステムリソース・受信件数の推移スナップショット履歴を JSON で取得（`STATUS_HISTORY_INTERVAL` 秒ごとに記録、メモリ上のリングバッファのみで保持しBot再起動でリセットされる）
-- `GET /dashboard` で上記履歴を Chart.js によるグラフとして表示する HTML ページ（CPU/メモリ/ディスク使用率・各種受信件数の推移）
+- `GET /status/history` でシステムリソース・受信件数の推移スナップショット履歴を JSON で取得（`STATUS_HISTORY_INTERVAL` 秒ごとに記録、メモリ上のリングバッファのみで保持しBot再起動でリセットされる）。`?format=csv` を付けると同じデータを CSV（UTF-8 BOM付き）でダウンロード可能
+- `GET /status/notifications` で実際にDiscordへ送信した通知（種別・タイトル・時刻）の直近履歴を JSON で取得（最大50件、メモリ上のリングバッファのみで保持）。`?limit=N` で件数を絞り込み可能
+- `GET /dashboard` で上記データを可視化する HTML ページ。ステータスサマリー（Bot状態・稼働時間・Ping・Wolfx EEW接続状態・CPU/メモリ・ディスク使用率を色付きインジケーターで表示）、CPU/メモリ/ディスク使用率・各種受信件数の推移グラフ（Chart.js）、種別フィルタ付きの直近通知履歴テーブル、CSVダウンロードボタン、手動更新ボタンを備える。15〜60秒間隔で自動更新
 - `!status` コマンド（管理者専用）
 - `/qtl_status` スラッシュコマンド（管理者専用）
 
@@ -459,6 +460,69 @@ curl http://localhost:8080/health
 # {"status": "online"}
 ```
 
+### GET /status/history（システムリソース・受信件数の推移履歴）
+
+`STATUS_HISTORY_INTERVAL` 秒（既定300秒）ごとに記録されたスナップショットを
+新しい順ではなく記録順（古い→新しい）の配列で返す。メモリ上のリングバッファ
+（最大 `STATUS_HISTORY_MAXLEN` 件）のみで保持し、Bot再起動でリセットされる。
+
+```bash
+curl http://localhost:8080/status/history | jq
+```
+
+```json
+{
+  "interval_sec": 300,
+  "max_points": 288,
+  "count": 42,
+  "history": [
+    {
+      "timestamp": "2026-08-17T10:00:00.000000",
+      "cpu_percent": 3.2,
+      "memory_mb": 85.1,
+      "disk_percent": 42.5,
+      "recv_count": { "wolfx": 1, "p2p_eew": 0, "quake": 5, "tsunami": 0, "usgs": 2, "volcano": 1 }
+    }
+  ]
+}
+```
+
+**CSVエクスポート**: `?format=csv` を付けると同じデータを CSV（UTF-8 BOM付き、
+Excelでの文字化け対策済み）でダウンロードできる。`recv_count` の各キーは
+`recv_<key>` 列にフラット化される。
+
+```bash
+curl "http://localhost:8080/status/history?format=csv" -o history.csv
+```
+
+`GET /dashboard` の「CSVをダウンロード」ボタンからも取得可能。
+
+### GET /status/notifications（直近の通知履歴）
+
+各Cog（EEW/地震情報/津波情報/火山情報/噴火速報/噴火警報/USGS/長周期地震動/
+気象庁その他）が実際にDiscordへ送信した通知を、新しい順に最大50件保持する
+メモリ上のリングバッファ（`core/notification_log.py`）の内容を返す。
+`?limit=N` で取得件数を絞り込める。
+
+```bash
+curl "http://localhost:8080/status/notifications?limit=10" | jq
+```
+
+```json
+{
+  "count": 2,
+  "notifications": [
+    { "timestamp": "2026-08-17T10:02:00.000000", "kind": "EEW", "title": "緊急地震速報（第2報）", "detail": "能登半島沖" },
+    { "timestamp": "2026-08-17T10:00:00.000000", "kind": "地震情報", "title": "震度速報", "detail": "" }
+  ]
+}
+```
+
+> EEW・地震情報・津波系・長周期地震動・気象庁その他の通知は、CLIテスト
+> （`is_test=True`）による通知は記録されない。一方、火山情報・噴火速報・
+> 噴火警報・USGSの通知メソッドは `is_test` 引数を持たない設計のため、
+> テスト実行時の通知も記録される（`--test_all` 実行時など）。
+
 ---
 
 ## CLIテスト実行機能
@@ -475,6 +539,38 @@ python3 bot.py --test_<対象> <JSONファイルパス>
 
 Botは通常通り起動し、全Cogの `on_ready` が完了した後に指定したテストを1回実行し、
 完了後に自動的にプロセスを終了する。
+
+### 一括実行（`--test_all`）
+
+デプロイ前の一括疎通確認用に、`TEST_TARGETS` に登録された全対象を順に
+実行するモードも用意している。個別に `--test_<対象> <JSONパス>` を指定する
+代わりに、fixture（サンプルJSON）を集めたディレクトリを1つ指定する。
+
+```bash
+python3 bot.py --test_all tests/fixtures/
+```
+
+`"<fixtures_dir>/<対象>_sample.json"`（例: `tests/fixtures/eew_sample.json`）
+という命名規則でファイルを探索し、存在するものだけ実行する。存在しない
+対象は SKIP として扱われ、実行を中断せず次の対象へ進む（1つのJSONが
+壊れている場合も同様にその対象だけスキップし、全体は継続する）。
+`ews`（JSONファイル不要な対象）はfixtureの有無に関わらず常に実行される。
+
+全対象の実行が終わると、OK / NG / SKIP のサマリーが表示される。
+
+```
+============================================================
+[TEST] 一括テスト完了 — 結果サマリー
+[TEST]   ✅ OK   eew
+[TEST]   ✅ OK   quake
+[TEST]   ✅ OK   tsunami
+[TEST]   ⚪ SKIP tsunami_observation
+[TEST]   ✅ OK   volcano
+[TEST]   ✅ OK   usgs
+[TEST]   ✅ OK   ews
+[TEST] 合計: 12 件 / OK=6 NG=0 SKIP=6
+============================================================
+```
 
 ### EWS（緊急警報放送）信号音の単体テスト
 
@@ -723,6 +819,11 @@ QTL_Bot/
     ├── fetch_backoff.py           - HTTPポーリングのCircuit Breaker（連続失敗時のバックオフ）
     ├── p2p_image.py               - P2PImageMixin（P2P地震情報CDNの地図画像をEmbedに添付。
     │                                 内容検証付きリトライで QuakeInfoCog/TsunamiCog が共有）
+    ├── eew_convert.py             - P2P地震情報（EEW code=556）→ Wolfx形式変換の純粋関数
+    │                                 （EewCog._convert_p2p_eew_to_wolfx等から分離。状態非依存）
+    ├── notification_log.py        - 実際にDiscordへ送信した通知の履歴記録（全Cog共有の
+    │                                 メモリ上リングバッファ、最大50件。Web Dashboardの
+    │                                 「直近の通知履歴」表示・GET /status/notifications 用）
     ├── ews_signal.py               - EWS（緊急警報放送）AFSK信号音のビット列組み立て・PCM波形合成
     │                                 （外部ファイル出力なし、生成したPCMをメモリ上のまま再生に渡す）
     ├── kyoshin_shared.py          - 震度色分け・両画像取得・振動レベル取得の共通ロジック
@@ -764,7 +865,10 @@ QTL_Bot/
 | `speech_worker()` | AquesTalkPi 音声再生ワーカー |
 | `mp3_worker()` | MP3 再生ワーカー |
 | `start_web_dashboard()` | Web Dashboard（aiohttp） |
+| `_sample_resource_usage()` | CPU/メモリ/ディスク使用率の計測共通ヘルパー（`_build_status_embed`・`resource_monitor`・`status_history_recorder`が共有。起動時にプライミング済みの永続psutilインスタンス経由でノンブロッキング計測する） |
 | `_build_status_embed()` | !status / /qtl_status 共通 Embed 生成 |
+| `record_notification()` | 通知（種別・タイトル・時刻）を`core/notification_log.py`のリングバッファへ記録（各Cogのnotify_*から呼び出し） |
+| `convert_p2p_eew_to_wolfx()` | P2P地震情報（EEW code=556）→ Wolfx形式変換（`core/eew_convert.py`、状態非依存の純粋関数） |
 | `notify_*()` | 各通知関数 |
 | `KyoshinImageAnalyzer.analyze_all()` | 強震モニタ画像をグリッド分割し、HSVマスクで各セルの実震度を推定 |
 | `EventManager.ingest()` | 観測点ごとに基準値との差分から上昇トリガーを判定し、ブラックリスト仮判定も行う |
@@ -785,5 +889,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-04
+**最終更新**: 2026-08-17
 **対応 Python**: 3.11+
