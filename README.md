@@ -91,10 +91,13 @@
   - レベルが下降し tier が変わった場合は新しい tier の MP3 に切り替わる（100未満は無音）
 
 ### 強震モニタ画像解析（画像解析検知）
-- 強震モニタ画像（`jma_s` 系統）をHSVマスク処理・グリッド分割で解析し、数値APIを使わず画像のみから揺れを検知する独立機能（`KyoshinMonitorCog`）
-- 検知は「基準値（過去10〜25秒平均）との差分による上昇トリガー」＋「8近傍のうち一定数以上が同時に上昇トリガー成立」の空間クロスバリデーション方式（ingen084氏の記事の実装方針を採用）。震度の絶対値のみによる無条件判定は行わない
+- 強震モニタ画像（`jma_s` 系統）を実観測点データに基づいてサンプリング・解析し、数値APIを使わず画像のみから揺れを検知する独立機能（`KyoshinMonitorCog`）
+- 観測点データは ingen084氏の [kyoshin-monitor-observation-points](https://github.com/ingen084/kyoshin-monitor-observation-points)（`intensity-points.json`）を起動時に取得・キャッシュし、`KYOSHIN_STATIONS_REFRESH_SEC`（既定1時間）ごとにバックグラウンドで再取得・追従する（観測点データは経年で「やや古く」なりうる前提のため）。色→震度への変換式は [t0729/kyoshin-monitor-python](https://github.com/t0729/kyoshin-monitor-python)の実装を移植
+- 近隣観測点は緯度経度に基づく地理的K近傍（既定6件、`KYOSHIN_NEIGHBOR_K`）で決定する。実観測点の分布密度は地域差が大きい（都市部は密、山間部・離島は疎）ため、固定半径ではなく件数固定のK近傍方式を採用
+- 検知は「基準値（過去10〜25秒平均）との差分による上昇トリガー」＋「K近傍のうち一定数以上が同時に上昇トリガー成立」の空間クロスバリデーション方式（ingen084氏の記事の実装方針を採用）。震度の絶対値のみによる無条件判定は行わない
 - イベントの生死は「最後に本物の上昇トリガーが立ってから `KYOSHIN_EVENT_TIMEOUT_SEC` 秒経過したか」の1点のみで判定（複数条件を組み合わせない単純な状態機械）
-- 周囲が無反応のまま単独でフラット（変化なし）かつ高震度が続く観測点は機器異常とみなし自動的にブラックリスト化し、以後の判定から除外する
+- 周囲が無反応のまま単独でフラット（変化なし）かつ高震度が続く観測点は機器異常とみなし自動的にブラックリスト化し、以後の判定から除外する（観測点メタデータが実態と乖離していた場合の実行時セーフティネットとしても機能する）
+- 画像上でカラースケール外（背景・地図色等）と判定されたピクセルは、地震発生を意味しない固定の「静穏相当」代表値として扱う（無効値をそのまま検知ロジックへ注入しない安全設計）
 - 画像の時刻決定は `latest.json` API（実際に配信されている最新時刻）を優先取得し、失敗時のみ従来のリトライ探索方式にフォールバック
 - 通知には `jma_s` 系統・`abrspmx_s` 系統の両画像と振動レベルを含める
 - 通知の色は `jma_s` 系統の実震度に基づく独自カラーマップで決定（EEW発表時の強震モニタ通知と共通仕様）
@@ -244,23 +247,27 @@ python bot.py
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `ENABLE_KYOSHIN` | true | 強震モニタ画像解析検知機能の有効化 |
-| `KYOSHIN_GRID_SIZE` | 10 | 画像を何 px 四方の疑似観測点セルに分割するか |
+| `KYOSHIN_STATIONS_SOURCE_URL` | ingen084氏のリポジトリURL | 実観測点データ（`intensity-points.json`）の取得元。通常変更不要 |
+| `KYOSHIN_STATIONS_CACHE_PATH` | kyoshin_stations_cache.json | 観測点データのキャッシュファイルパス（`.gitignore`対象） |
+| `KYOSHIN_STATIONS_REFRESH_SEC` | 3600 | 観測点データの再取得間隔（秒）。起動時はキャッシュ優先、以後この間隔で追従する |
+| `KYOSHIN_NEIGHBOR_K` | 6 | 近隣観測点として扱う件数（地理的K近傍）。`KYOSHIN_NEIGHBOR_TRIGGER_COUNT`より大きい値にすること |
 | `KYOSHIN_IMAGE_DELAY_SEC` | 6 | `latest.json` 取得失敗時のフォールバック探索で遡る基準秒数 |
 | `KYOSHIN_IMAGE_STEP_SEC` | 3 | フォールバック探索で画像が見つからない場合に遡るステップ幅（秒） |
 | `KYOSHIN_IMAGE_MAX_RETRY` | 4 | フォールバック探索の最大リトライ回数 |
 | `KYOSHIN_POLL_INTERVAL_SEC` | 2.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒） |
 | `KYOSHIN_NOTIFY_INTERVAL_SEC` | 2.0 | イベント継続中の通知再送間隔（秒） |
-| `KYOSHIN_MIN_ACTIVE_PIXELS` | 2 | 1セル内でアクティブとみなす最小の揺れ候補ピクセル数（HSVマスクの一次フィルタ） |
-| `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補ピクセルとみなす実震度の下限。下げるとGIF圧縮ノイズを誤検知しやすくなるため非推奨 |
+| `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補とみなす実震度の下限。`core.kyoshin_shared.estimate_max_shindo_from_image`（EEW発表時トリガーの振動モニタ機能）が使用 |
 | `KYOSHIN_RISE_THRESHOLD` | 0.5 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する |
 | `KYOSHIN_BASELINE_WINDOW_START_SEC` | 10.0 | 基準値計算に使う過去サンプルの開始位置（秒前） |
 | `KYOSHIN_BASELINE_WINDOW_END_SEC` | 25.0 | 基準値計算に使う過去サンプルの終了位置（秒前） |
 | `KYOSHIN_HISTORY_WINDOW_SEC` | 25.0 | 観測点ごとに保持する震度履歴の長さ（秒）。BASELINE_WINDOW_END_SEC以上を推奨 |
-| `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 2 | 上昇トリガー確定に必要な、8近傍のうち同時に上昇トリガーが立っている観測点数 |
+| `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 2 | 上昇トリガー確定に必要な、K近傍のうち同時に上昇トリガーが立っている観測点数 |
 | `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
 | `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
 | `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
+
+> `KYOSHIN_GRID_SIZE` / `KYOSHIN_MIN_ACTIVE_PIXELS` は旧・画像ピクセルグリッド疑似観測点方式（〜2026-08）で使用していた設定で、実観測点データ方式への移行に伴い現在は未使用（後方互換のため定義のみ残っている）。
 | `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 
@@ -777,7 +784,15 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
    ```bash
    pip list | grep -i pillow
    ```
-2. ログで検知の状態を確認
+2. 実観測点データが正しく取得できているか確認
+   ```bash
+   tail -f qtlbot.log | grep -i "KyoshinStations"
+   # "観測点データを取得しました" / "キャッシュから観測点データを読み込みました" が
+   # 出ていない場合はネットワーク接続、または KYOSHIN_STATIONS_SOURCE_URL の
+   # 到達性を確認する。取得に一度も成功していない場合、キャッシュファイル
+   # （KYOSHIN_STATIONS_CACHE_PATH）も存在せず検知機能が実質無効化される
+   ```
+3. ログで検知の状態を確認
    ```bash
    tail -f qtlbot.log | grep -i kyoshin
    # イベントが生成されているのに通知が来ない場合は
@@ -785,7 +800,7 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
    # 特定の観測点の警告ログが繰り返し出る場合は、その観測点が機器異常として
    # ブラックリスト化されている可能性がある（"ブラックリスト化しました" で検索）
    ```
-3. `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` に保存された画像で誤検知・未検知の状況を事後確認
+4. `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` に保存された画像で誤検知・未検知の状況を事後確認
 4. 揺れが収まった後も通知が続く時間が長い／短いと感じる場合は `KYOSHIN_EVENT_TIMEOUT_SEC`（デフォルト45秒）を調整
 
 ---
@@ -828,7 +843,11 @@ QTL_Bot/
     │                                 （外部ファイル出力なし、生成したPCMをメモリ上のまま再生に渡す）
     ├── kyoshin_shared.py          - 震度色分け・両画像取得・振動レベル取得の共通ロジック
     │                                 （EEW発表時通知・画像解析検知通知の両方から利用）
-    ├── kyoshin_image_analyzer.py  - HSVマスク処理による画像→震度グリッド変換
+    ├── kyoshin_stations.py        - 実観測点データ（intensity-points.json）の取得・
+    │                                 キャッシュ・K近傍計算・色→震度変換（2026-08〜）
+    ├── kyoshin_image_analyzer.py  - HSVマスク処理による画像→震度変換（EEW発表時トリガーの
+    │                                 振動モニタ機能 estimate_max_shindo_from_image 用。
+    │                                 画像解析検知本体は kyoshin_stations.py に移行済み）
     ├── kyoshin_detector.py        - 揺れ検知イベントのライフサイクル管理（EventManager による状態機械）
     └── kyoshin_image_monitor.py   - EventManager と連動し、イベント継続中の画像通知ループを制御
 ```
@@ -870,11 +889,13 @@ QTL_Bot/
 | `record_notification()` | 通知（種別・タイトル・時刻）を`core/notification_log.py`のリングバッファへ記録（各Cogのnotify_*から呼び出し） |
 | `convert_p2p_eew_to_wolfx()` | P2P地震情報（EEW code=556）→ Wolfx形式変換（`core/eew_convert.py`、状態非依存の純粋関数） |
 | `notify_*()` | 各通知関数 |
-| `KyoshinImageAnalyzer.analyze_all()` | 強震モニタ画像をグリッド分割し、HSVマスクで各セルの実震度を推定 |
+| `StationStore.load_or_fetch()` / `refresh()` | 実観測点データの取得・キャッシュ・定期更新（`core/kyoshin_stations.py`） |
+| `build_k_nearest_neighbors()` | 緯度経度から地理的K近傍を計算（グリッドバケット法で高速化、`core/kyoshin_stations.py`） |
+| `color2position()` / `make_shindo_decoder()` | 強震モニタ画像の色→実震度変換（`core/kyoshin_stations.py`。akethimitsuhide/kyoshin-monitor-pythonから移植） |
 | `EventManager.ingest()` | 観測点ごとに基準値との差分から上昇トリガーを判定し、ブラックリスト仮判定も行う |
-| `EventManager.tick()` | 近隣同時上昇の確認・ブラックリスト確定・イベントの生成/マージ/終了判定を行う |
+| `EventManager.tick()` | K近傍同時上昇の確認・ブラックリスト確定・イベントの生成/マージ/終了判定を行う |
 | `shindo_to_color()` | 実震度から独自カラーマップに基づく通知色を決定（`core/kyoshin_shared.py`） |
-| `estimate_max_shindo_from_image()` | `jma_s` 画像から画面内の最大実震度を推定（`core/kyoshin_shared.py`） |
+| `estimate_max_shindo_from_image()` | `jma_s` 画像から画面内の最大実震度を推定（`core/kyoshin_shared.py`、`KyoshinImageAnalyzer.analyze()`を使用） |
 
 ---
 
@@ -889,5 +910,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-17
+**最終更新**: 2026-08-17（強震モニタ画像解析: 実観測点データ方式へ移行）
 **対応 Python**: 3.11+

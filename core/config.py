@@ -297,25 +297,18 @@ EWS_POSTTONE_SEC   = float(os.getenv("EWS_POSTTONE_SEC", "0.2"))
 # という単一の値(last_rise_at)だけで判定するよう単純化した。
 # 旧KYOSHIN_HIGH_VALUE_BYPASS_SHINDO・旧KYOSHIN_STALE_AFTER_SECは廃止し、
 # 単一のKYOSHIN_EVENT_TIMEOUT_SECに統合した。
-KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # px。画像を何px四方の疑似観測点セルに分割するか
+KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # px。旧・画像ピクセルグリッド疑似観測点方式で使用（2026-08 実観測点方式へ切替のため廃止。後方互換のため定義のみ残す）
 KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 秒。NIED側の配信遅延を見込んで遡る基準秒数
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
 KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "2.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
 KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "2.0")) # 秒。イベント継続中の画像通知の再送間隔
 
-KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。1セル内でこの数以上「揺れ候補ピクセル」がないとアクティブとみなさない
-# ↑ このピクセル数フィルタは、KyoshinImageAnalyzer.analyze_all() が
-#   各セルの代表震度を計算する際の一次フィルタとして引き続き使う
-#   （明らかに単一ピクセルしかないセルにまで反応しないようにするため）。
-#   真の検知判定（誤検知対策の主眼）は下記のKYOSHIN_RISE_THRESHOLD /
-#   KYOSHIN_NEIGHBOR_TRIGGER_COUNTが担う。
+KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。旧・画像ピクセルグリッド疑似観測点方式で使用（2026-08 実観測点方式へ切替のため廃止。後方互換のため定義のみ残す）
 
 # HSVマスク処理で「揺れ候補ピクセル」とみなす実震度の下限値。
-# これ未満の実震度に相当する色（背景の青〜水色域）は、GIFノイズの
-# 温床であるため最初から解析対象に含めない（analyze_all()の一次フィルタ）。
-# 0.5より下げると、単一観測点のGIF圧縮ノイズまで解析対象に含まれ
-# 誤検知の原因になることが確認されているため、0.5を推奨する。
+# core.kyoshin_shared.estimate_max_shindo_from_image
+# （EEW発表時トリガーの振動モニタ機能）が引き続き使用する。
 KYOSHIN_ACTIVE_SHINDO_FLOOR  = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0.5"))
 
 # 「上昇トリガー」とみなす実震度の上昇幅（基準値との差分）。
@@ -326,6 +319,32 @@ KYOSHIN_ACTIVE_SHINDO_FLOOR  = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0
 # （震度が高止まりし続ける限り真であり続けてしまい、「検知が終わらない
 # バグ」の直接原因になるため）。
 KYOSHIN_RISE_THRESHOLD = float(os.getenv("KYOSHIN_RISE_THRESHOLD", "0.5"))
+
+# ===============================
+# 強震モニタ: 実観測点データソース（2026-08〜）
+# ===============================
+# 画像ピクセルの疑似グリッド分割方式から、実際の観測点データ
+# （ingen084氏の kyoshin-monitor-observation-points リポジトリが
+# 配布する intensity-points.json）を用いる方式に切り替えた。
+# 参考実装: https://github.com/akethimitsuhide/kyoshin-monitor-python
+# （フォーク元: https://github.com/t0729/kyoshin-monitor-python）
+#
+# 起動時にキャッシュファイルが無い/古い場合はソースURLから取得し、
+# 以後 KYOSHIN_STATIONS_REFRESH_SEC 秒ごとにバックグラウンドで
+# 再取得・キャッシュ更新する（観測点データは「やや古い」ことがある
+# 前提のため、定期的に追従する設計）。
+KYOSHIN_STATIONS_SOURCE_URL = os.getenv(
+    "KYOSHIN_STATIONS_SOURCE_URL",
+    "https://raw.githubusercontent.com/ingen084/kyoshin-monitor-observation-points/refs/heads/master/intensity-points.json",
+)
+KYOSHIN_STATIONS_CACHE_PATH = os.getenv("KYOSHIN_STATIONS_CACHE_PATH", "kyoshin_stations_cache.json")
+KYOSHIN_STATIONS_REFRESH_SEC = _env_int("KYOSHIN_STATIONS_REFRESH_SEC", 3600)  # 秒。1時間ごとに再フェッチ
+
+# 近隣観測点として扱う件数（K近傍方式）。画像ピクセルグリッドの8近傍に
+# 相当する概念だが、実観測点は分布密度が地域によって大きく異なる
+# （都市部は密、山間部・離島は疎）ため、固定半径ではなく件数固定の
+# K近傍方式を採用する。
+KYOSHIN_NEIGHBOR_K = _env_int("KYOSHIN_NEIGHBOR_K", 6)
 
 # 基準値(baseline)は「過去10〜25秒前」の範囲内サンプルの平均で計算する
 # （参考: https://qiita.com/ingen084/items/82985e8d3227c97c608d

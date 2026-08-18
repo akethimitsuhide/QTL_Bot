@@ -1,19 +1,27 @@
 """
 cogs/kyoshin_monitor.py
 ========================
-core.kyoshin_detector / core.kyoshin_image_monitor / core.kyoshin_image_analyzer を
+core.kyoshin_detector / core.kyoshin_image_monitor / core.kyoshin_stations を
 統合し、強震モニタ画像の解析による揺れ検知と、Discord への画像通知を
 実際に行う Cog。
 
-【検知パイプライン（2026-07-22 方針転換後）】
-1. KyoshinImageAnalyzer.analyze_all(): 画像を全グリッドセル（アクティブ・
-   非アクティブ問わず）の代表震度に変換する
-2. EventManager.ingest(): 各セルの震度の時系列（過去10秒分）を追跡し、
-   「上昇幅がしきい値を超えたセル」を検出したら、その近隣セルも
+【検知パイプライン（2026-08 実観測点方式への移行後）】
+1. core.kyoshin_stations.StationStore: ingen084氏の
+   kyoshin-monitor-observation-points（intensity-points.json）から
+   実観測点データ（コード・名称・緯度経度・画像上のピクセル座標）を
+   取得・キャッシュする。起動時はキャッシュ優先、以後
+   KYOSHIN_STATIONS_REFRESH_SEC 秒（既定1時間）ごとに再取得する
+2. core.kyoshin_stations.build_k_nearest_neighbors(): 緯度経度から
+   K近傍（既定6件）の近隣観測点リストを計算する
+3. 画像取得後、各観測点のピクセル座標を直接サンプリングし、
+   core.kyoshin_stations.color2position()（フォーク版
+   akethimitsuhide/kyoshin-monitor-python から移植）で実震度に変換する
+4. EventManager.ingest(): 各観測点の震度の時系列（過去10秒分）を追跡し、
+   「上昇幅がしきい値を超えた観測点」を検出したら、K近傍の観測点も
    同時に上昇しているかで真偽を判定する（ingen084氏の記事のアルゴリズム）
-3. EventManager.tick(): 判定された観測点群をイベントとしてまとめる
+5. EventManager.tick(): 判定された観測点群をイベントとしてまとめる
 
-【方針転換の経緯】
+【方針転換の経緯（2026-07-22、画像ピクセルグリッド方式への転換）】
 当初はHSVマスクで抽出した「アクティブセル（絶対震度が閾値以上）」を
 8近傍の連結成分でクラスタリングし、複数フレーム持続を見る
 （core.kyoshin_cluster_tracker.ClusterTracker）方式だったが、これは
@@ -29,9 +37,27 @@ ingen084氏の記事（強震モニタの画像から揺れていることを検
 実装したコアロジック）を検知の主軸に据える方針に転換した。
 ClusterTrackerは使用しないこととした。
 
+【方針転換の経緯（2026-08、実観測点方式への移行）】
+上記の転換時点では「観測点ごとの座標・ピクセル位置対応表」を
+持っていなかったため、画像をN×Nピクセルのグリッドセルに分割し、
+セルを疑似観測点として扱っていた（core.kyoshin_image_analyzer の
+build_station_grid / analyze_all、現在は未使用）。
+ingen084氏の kyoshin-monitor-observation-points リポジトリが
+配布する intensity-points.json に、まさにこの対応表（実観測点の
+座標・ピクセル位置）が含まれていたため、疑似グリッドを廃止し、
+実観測点データへ全面的に切り替えた。EventManagerのコアロジック
+（ingest/tick、近隣クロスバリデーション、イベントマージ、
+自動終了と最大震度保持、ブラックリスト）自体は無変更で、
+「何を観測点として登録するか」だけが変わった形になる。
+
 参考:
 - https://qiita.com/ingen084/items/82985e8d3227c97c608d
   （強震モニタの画像から揺れていることを検知する／ingen084氏）
+- https://github.com/ingen084/kyoshin-monitor-observation-points
+  （観測点データ intensity-points.json の配布元）
+- https://github.com/akethimitsuhide/kyoshin-monitor-python
+  （フォーク元: https://github.com/t0729/kyoshin-monitor-python。
+  色→震度変換式 color2position() の移植元）
 
 【画像取得元】
 https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYYMMDDHHMMSS}.jma_s.gif
@@ -48,11 +74,11 @@ https://smi.lmoniexp.bosai.go.jp/webservice/server/pros/latest.json
   両方の画像と、kwatch-24h.netの振動レベルを表示する
 - 通知の色は、jma_s系統から推定した実震度に基づく独自カラーマップ
   （core.kyoshin_shared.JMA_S_SHINDO_COLORS）で決定する
-- 検出観測点（グリッドセル）数は通知本文には表示しない
-  （内部的な閾値判定にのみ使用する）
+- 検出観測点数は通知本文には表示しない（内部的な閾値判定にのみ使用する）
 - 通知に必要な最小観測点数は、実震度（震度0相当 / 震度1相当以上）に
   応じて2段階に分ける（KYOSHIN_MIN_STATIONS_SHINDO0 / SHINDO1）
 """
+import asyncio
 import io
 import logging
 import os
@@ -65,18 +91,22 @@ import aiohttp
 
 from core.config import (
     CHANNEL_ID, KYOSHIN_CHANNEL_ID, ENABLE_KYOSHIN,
-    KYOSHIN_GRID_SIZE, KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
+    KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
     KYOSHIN_IMAGE_MAX_RETRY, KYOSHIN_POLL_INTERVAL_SEC, KYOSHIN_NOTIFY_INTERVAL_SEC,
-    KYOSHIN_MIN_ACTIVE_PIXELS, KYOSHIN_ACTIVE_SHINDO_FLOOR,
+    KYOSHIN_ACTIVE_SHINDO_FLOOR,
     KYOSHIN_RISE_THRESHOLD, KYOSHIN_NEIGHBOR_TRIGGER_COUNT,
     KYOSHIN_BASELINE_WINDOW_START_SEC, KYOSHIN_BASELINE_WINDOW_END_SEC,
     KYOSHIN_HISTORY_WINDOW_SEC, KYOSHIN_EVENT_TIMEOUT_SEC,
     KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_SHINDO0, KYOSHIN_MIN_STATIONS_SHINDO1,
     KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
+    KYOSHIN_STATIONS_SOURCE_URL, KYOSHIN_STATIONS_CACHE_PATH,
+    KYOSHIN_STATIONS_REFRESH_SEC, KYOSHIN_NEIGHBOR_K,
 )
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
-from core.kyoshin_image_analyzer import KyoshinImageAnalyzer
+from core.kyoshin_stations import (
+    StationStore, KyoshinStationMeta, build_k_nearest_neighbors, make_shindo_decoder,
+)
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
 )
@@ -123,7 +153,7 @@ def _phase_index(phase: str) -> int:
 
 
 class KyoshinMonitorCog(commands.Cog):
-    """強震モニタ画像の解析（震度の時系列上昇幅＋近隣同時上昇の検証）による揺れ検知・Discord通知を行う Cog。"""
+    """強震モニタ画像の解析（震度の時系列上昇幅＋K近傍同時上昇の検証）による揺れ検知・Discord通知を行う Cog。"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -131,12 +161,20 @@ class KyoshinMonitorCog(commands.Cog):
         self.kyoshin_channel = None
         self.session: aiohttp.ClientSession | None = None
 
-        self.analyzer = KyoshinImageAnalyzer(
-            grid_size=KYOSHIN_GRID_SIZE,
-            active_shindo_floor=KYOSHIN_ACTIVE_SHINDO_FLOOR,
-            min_active_pixels=KYOSHIN_MIN_ACTIVE_PIXELS,
+        self._station_store = StationStore(
+            source_url=KYOSHIN_STATIONS_SOURCE_URL,
+            cache_path=KYOSHIN_STATIONS_CACHE_PATH,
+            refresh_interval_sec=KYOSHIN_STATIONS_REFRESH_SEC,
         )
-        self._stations_registered = False
+        # station_code -> KyoshinStationMeta（サンプリング用の座標参照に使う）
+        self._station_by_code: dict[str, KyoshinStationMeta] = {}
+        self._stations_initialized = False
+        self._stations_refresh_task = None
+
+        self._shindo_from_rgb = make_shindo_decoder(
+            inactive_sentinel=KYOSHIN_ACTIVE_SHINDO_FLOOR - 1.0
+        )
+
         self._last_image_url: str | None = None
         self._dual_image_fetcher = DualImageFetcher()
 
@@ -171,6 +209,8 @@ class KyoshinMonitorCog(commands.Cog):
         logger.info("KyoshinMonitorCog: aiohttp セッションを作成しました")
 
     async def cog_unload(self):
+        if self._stations_refresh_task and not self._stations_refresh_task.done():
+            self._stations_refresh_task.cancel()
         if self._monitor_task and not self._monitor_task.done():
             await self.monitor.stop()
             self._monitor_task.cancel()
@@ -193,40 +233,117 @@ class KyoshinMonitorCog(commands.Cog):
             )
             return
 
+        await self._init_stations()
+
         if self._monitor_task is None or self._monitor_task.done():
             self._monitor_task = self.bot.loop.create_task(self.monitor.run())
             logger.info(
                 "KyoshinMonitorCog: 監視ループを開始しました"
-                "（震度の時系列上昇幅＋近隣同時上昇の検証方式）"
+                "（震度の時系列上昇幅＋K近傍同時上昇の検証方式・実観測点データ使用）"
             )
+
+        if self._stations_refresh_task is None or self._stations_refresh_task.done():
+            self._stations_refresh_task = self.bot.loop.create_task(self._stations_refresh_loop())
+
+    # ===============================
+    # 観測点データの初期化・定期更新
+    # ===============================
+    async def _init_stations(self) -> None:
+        """
+        起動時に1回だけ呼ぶ。観測点データをロード（キャッシュ優先）し、
+        K近傍を計算して EventManager に登録する。
+        """
+        stations = await self._station_store.load_or_fetch(self.session)
+        if not stations:
+            logger.error(
+                "KyoshinMonitorCog: 観測点データが0件のため、強震モニタの検知は"
+                "実質的に機能しません（次回の定期更新で回復する可能性があります）"
+            )
+            return
+
+        await self._register_stations(stations)
+
+    async def _register_stations(self, stations: list[KyoshinStationMeta]) -> None:
+        """
+        観測点リストから K近傍を計算し、EventManager へ登録する。
+
+        K近傍計算はCPUバウンドな処理（約1,600件で0.1〜0.2秒程度、
+        グリッドバケット法で高速化済み）だが、念のため run_in_executor で
+        イベントループをブロックしないようにする。
+
+        既に登録済みの観測点（_station_by_code に存在する）は、
+        EventManager.register_station() を再度呼ばない
+        （register_station は Station を新規生成するため、再登録すると
+        進行中のイベント所属や履歴がリセットされてしまう）。
+        近隣リストのみ更新する。
+        """
+        loop = self.bot.loop
+        neighbor_map = await loop.run_in_executor(
+            None, build_k_nearest_neighbors, stations, KYOSHIN_NEIGHBOR_K
+        )
+
+        new_count = 0
+        for st in stations:
+            self._station_by_code[st.code] = st
+            neighbors = neighbor_map.get(st.code, [])
+
+            existing = self.monitor.event_manager.stations.get(st.code)
+            if existing is None:
+                self.monitor.event_manager.register_station(
+                    st.code, neighbors=neighbors, is_island=st.is_island
+                )
+                new_count += 1
+            else:
+                # 進行中の検知状態（history/event_id/blacklisted等）を
+                # 保持したまま、近隣リストのみ更新する
+                existing.neighbors = neighbors
+
+        self._stations_initialized = True
+        logger.info(
+            f"KyoshinMonitorCog: 実観測点を{len(stations)}件登録しました"
+            f"（新規{new_count}件、K近傍={KYOSHIN_NEIGHBOR_K}）"
+        )
+
+    async def _stations_refresh_loop(self) -> None:
+        """
+        KYOSHIN_STATIONS_REFRESH_SEC 秒（既定1時間）ごとに観測点データを
+        再取得し、EventManagerへの登録を更新するバックグラウンドタスク。
+        """
+        while not self.bot.is_closed():
+            await asyncio.sleep(KYOSHIN_STATIONS_REFRESH_SEC)
+            try:
+                stations = await self._station_store.refresh(self.session)
+                if stations:
+                    await self._register_stations(stations)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"KyoshinMonitorCog: 観測点データの定期更新でエラー: {e}", exc_info=True)
 
     # ===============================
     # 画像取得・解析（検知パイプライン）
     # ===============================
-    def _register_stations_once(self, image_width: int, image_height: int) -> None:
-        if self._stations_registered:
-            return
-        grid = self.analyzer.build_station_grid(image_width, image_height)
-        for cell_id, neighbors in grid.items():
-            self.monitor.event_manager.register_station(cell_id, neighbors=neighbors)
-        self._stations_registered = True
-        logger.info(f"KyoshinMonitorCog: 疑似観測点を{len(grid)}件登録しました（grid_size={KYOSHIN_GRID_SIZE}px）")
-
     async def _fetch_current_shindo_map(self) -> dict[str, float]:
         """
-        強震モニタ画像(jma_s系統)を取得し、全グリッドセル（アクティブ・
-        非アクティブ問わず）の代表震度を dict[cell_id, shindo] で返す。
+        強震モニタ画像(jma_s系統)を取得し、登録済み実観測点それぞれの
+        ピクセル座標をサンプリングして dict[station_code, shindo] で返す。
 
         「本物の地震かどうか」の判定はここでは行わない。ここでは
         画像→震度マップへの変換のみを行い、実際の判定（時系列上昇幅の
-        追跡・近隣同時上昇の検証）は core.kyoshin_detector.EventManager.
+        追跡・K近傍同時上昇の検証）は core.kyoshin_detector.EventManager.
         ingest() / tick()（呼び出し元の core.kyoshin_image_monitor.
         KyoshinImageMonitor.run()）に委ねる。
 
-        画像が取得できない場合は空の dict を返す（EventManagerには
-        何もフィードされず、そのフレームの観測値は欠測扱いになる）。
+        画像上のカラースケール外（背景・地図色等）のピクセルは、
+        core.kyoshin_stations.make_shindo_decoder が返す「静穏相当の
+        代表値」に変換される（震度7センチネルを誤って注入しないための
+        安全策。core/kyoshin_stations.py のモジュールdocstring参照）。
+
+        画像が取得できない場合、または観測点データが未初期化の場合は
+        空の dict を返す（EventManagerには何もフィードされず、その
+        フレームの観測値は欠測扱いになる）。
         """
-        if not _PIL_AVAILABLE:
+        if not _PIL_AVAILABLE or not self._stations_initialized:
             return {}
 
         image_bytes, url = await self._download_latest_image()
@@ -241,12 +358,18 @@ class KyoshinMonitorCog(commands.Cog):
             logger.warning(f"KyoshinMonitorCog: 画像デコードに失敗しました: {e}")
             return {}
 
-        self._register_stations_once(img.width, img.height)
+        pixels = img.load()
+        w, h = img.size
 
-        # 全グリッドセル（非アクティブ含む）の代表震度を返す。
-        # EventManager.ingest() が時系列の上昇幅を正しく追跡できるよう、
-        # 揺れていないセルにも背景相当の代表値を明示的にフィードする。
-        shindo_map = self.analyzer.analyze_all(img)
+        shindo_map: dict[str, float] = {}
+        for code, st in self._station_by_code.items():
+            x, y = st.pixel_x, st.pixel_y
+            if not (0 <= x < w and 0 <= y < h):
+                # 画像範囲外の座標（観測点データが画像サイズと不整合。
+                # 配信元の画像仕様変更等で起こりうる）は静穏扱いにする
+                continue
+            r, g, b = pixels[x, y]
+            shindo_map[code] = self._shindo_from_rgb(r, g, b)
 
         if KYOSHIN_DEBUG_SAVE_IMAGE:
             active_count = sum(
