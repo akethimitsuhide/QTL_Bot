@@ -60,8 +60,10 @@ ingen084氏の kyoshin-monitor-observation-points リポジトリが
   色→震度変換式 color2position() の移植元）
 
 【画像取得元】
-https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYYMMDDHHMMSS}.jma_s.gif
-（防災科研 リアルタイム震度モニタの公開画像。系統は jma_s のみを使用する）
+https://www.lmoni.bosai.go.jp/img_svr/data/map_img/RealTimeImg/jma_s/{YYYYMMDD}/{YYYYMMDDHHMMSS}.jma_s.gif
+（防災科研 リアルタイム震度モニタの公開画像。系統は jma_s のみを使用する。
+2026-08-19: 配信元を smi.lmoniexp.bosai.go.jp から
+www.lmoni.bosai.go.jp/img_svr に変更した）
 
 画像の時刻決定には、まず以下の latest.json API から実際に配信されている
 最新時刻(latest_time)を取得し、その時刻をもとに画像URLを構築する
@@ -119,7 +121,7 @@ try:
 except ImportError:
     _PIL_AVAILABLE = False
 
-JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
+JMA_S_BASE = "https://www.lmoni.bosai.go.jp/img_svr/data/map_img/RealTimeImg/jma_s"
 
 # 実際に配信されている最新画像の時刻を取得するAPI。
 # レスポンス例:
@@ -339,11 +341,20 @@ class KyoshinMonitorCog(commands.Cog):
         代表値」に変換される（震度7センチネルを誤って注入しないための
         安全策。core/kyoshin_stations.py のモジュールdocstring参照）。
 
-        画像が取得できない場合、または観測点データが未初期化の場合は
-        空の dict を返す（EventManagerには何もフィードされず、その
-        フレームの観測値は欠測扱いになる）。
+        画像が取得できない場合、観測点データが未初期化の場合、または
+        EEW発表中（_is_eew_active()参照）の場合は空の dict を返す
+        （EventManagerには何もフィードされず、そのフレームの観測値は
+        欠測扱いになる。進行中のイベントがある場合は、新たな上昇が
+        観測されないまま KYOSHIN_EVENT_TIMEOUT_SEC が経過すると自然に
+        終了する）。
         """
         if not _PIL_AVAILABLE or not self._stations_initialized:
+            return {}
+
+        if self._is_eew_active():
+            # EEW発表中はEewCog.vibration_monitor_loopが同じNIED画像を
+            # 独自に取得・通知しているため、ここで重複してポーリング
+            # しない（防災科研への負荷軽減。_is_eew_active docstring参照）。
             return {}
 
         image_bytes, url = await self._download_latest_image()
@@ -517,6 +528,18 @@ class KyoshinMonitorCog(commands.Cog):
         if not channel:
             return
 
+        if self._is_eew_active():
+            # EEW発表中はEewCog.vibration_monitor_loopが同じ内容
+            # （jma_s/abrspmx_s画像・振動レベル）を既に通知しているため、
+            # ここでの重複通知・重複NIEDポーリングをスキップする。
+            # 検知イベント自体（EventManager側の状態）はそのまま継続し、
+            # EEW最終報後にこのループが動けば通常通り通知を再開する。
+            logger.debug(
+                f"KyoshinMonitorCog: EEW発表中のため通知をスキップします "
+                f"(event={event.event_id[:8]})"
+            )
+            return
+
         jma_s_url, lmoni_url = await self._dual_image_fetcher.fetch_urls(self.session)
         if not jma_s_url and not lmoni_url:
             return
@@ -549,3 +572,47 @@ class KyoshinMonitorCog(commands.Cog):
 
     async def _on_event_ended(self, event_id: str) -> None:
         logger.info(f"KyoshinMonitorCog: イベント {event_id[:8]} の揺れ検知が終了しました")
+
+    # ===============================
+    # EEWとの連携（防災科研への負荷軽減）
+    # ===============================
+    def _is_eew_active(self) -> bool:
+        """
+        現在、EEW（緊急地震速報）が発表中（第一報〜最終報/キャンセル報の間）
+        かどうかを返す。
+
+        【背景・目的】
+        EEW発表中は EewCog.vibration_monitor_loop が独自に
+        jma_s/abrspmx_s画像・振動レベルを2秒間隔でポーリング・通知する
+        （EEW発表時トリガーの振動モニタ機能）。KyoshinMonitorCogの
+        画像解析検知（本Cog）も独立して同じNIED画像をポーリングして
+        いるため、EEW発表中は両者が同時に、しかも同じ画像に対して
+        重複してリクエストを送ってしまう。KYOSHIN_POLL_INTERVAL_SEC /
+        KYOSHIN_NOTIFY_INTERVAL_SEC を2秒→1秒に短縮したことで単純に
+        リクエスト頻度も倍増するため、防災科研サーバーへの負荷が
+        特に大きくなる地震発生直後にこそ、この重複を避ける必要がある。
+
+        EewCog.monitored_event_id は、EEW第一報検知時に設定され、
+        最終報・キャンセル報を受信するとNoneに戻る（cogs/eew.py参照）。
+        これをそのままEEW発表中かどうかの判定に使う。
+
+        【この対策が根本的な解決になるとは限らない点について】
+        本対策は「EEW発表中は本Cogの画像解析検知を一時停止し、
+        EewCog側のポーリングに一本化する」という、あくまで
+        “EEWが出ている地震” に限定した負荷軽減策である。
+        EEWが出ない小規模な揺れ・far-field地震・機器ノイズ等では
+        本Cogが単独でポーリングを継続するため、そのケースでの
+        負荷（1秒間隔化による純粋な倍増分）は軽減されない。
+        真に負荷を抑えたいなら「そもそも2つの独立した検知経路が
+        同じ画像を別々にポーリングしている」という設計自体を
+        見直す（例: 画像取得そのものを一本化し、EEW通知・画像解析
+        検知の両方がそれを共有する）方が根本的だが、影響範囲が
+        大きいため今回は見送り、まずはこの限定的な連携で様子を見る。
+
+        EewCogが未登録（Cogとして読み込まれていない等）の場合は
+        安全側に倒して False（EEWは発表されていない扱い）を返す。
+        """
+        eew_cog = self.bot.get_cog("EewCog")
+        if eew_cog is None:
+            return False
+        return getattr(eew_cog, "monitored_event_id", None) is not None

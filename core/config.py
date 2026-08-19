@@ -301,8 +301,17 @@ KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # 
 KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 秒。NIED側の配信遅延を見込んで遡る基準秒数
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
-KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "2.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
-KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "2.0")) # 秒。イベント継続中の画像通知の再送間隔
+
+# 【2026-08-19 1.0に短縮】観測値取り込み〜tick()のポーリング間隔／
+# イベント継続中の画像通知の再送間隔。より短い間隔で検知・通知できる
+# ようにする一方、防災科研サーバーへのリクエスト頻度が単純に倍増する
+# ため、KyoshinMonitorCog側でEEW発表中（EewCog.monitored_event_idが
+# 設定されている間）はこのポーリング・画像通知を一時的に中断し、
+# EewCog.vibration_monitor_loopに画像取得を一本化する連携を追加した
+# （cogs/kyoshin_monitor.py の _is_eew_active 参照）。EEW最終報が
+# 出た時点で通常のポーリングを自動的に再開する。
+KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "1.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
+KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "1.0")) # 秒。イベント継続中の画像通知の再送間隔
 
 KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。旧・画像ピクセルグリッド疑似観測点方式で使用（2026-08 実観測点方式へ切替のため廃止。後方互換のため定義のみ残す）
 

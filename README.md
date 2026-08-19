@@ -30,7 +30,7 @@
 ### P2P 地図画像の添付
 - 地震情報・津波情報の通知には、P2P 地震情報 CDN が生成する震源地図画像を Embed に添付する（`core/p2p_image.py` の `P2PImageMixin`。`QuakeInfoCog` / `TsunamiCog` が多重継承）
 - CDN 側の画像生成には数秒〜数十秒のタイムラグがあるため、通知メッセージ送信後にバックグラウンドで最大約2分間（20回 × 6秒間隔）ポーリングし、画像が実際に利用可能になった時点でメッセージを編集して画像を追加する
-- 判定は HTTP ステータス 200 だけでなく、レスポンスボディが PNG として妥当か（マジックバイト `\x89PNG\r\n\x1a\n`・最小サイズ `MIN_VALID_IMAGE_BYTES`=1024 バイト）まで検証し、CDN が「200 は返すが実体は生成中」の状態を誤って成功と判定しないようにしている
+- 判定は HTTP ステータス 200 だけでなく、レスポンスボディが完成した PNG ファイルとして妥当か（先頭のマジックバイト `\x89PNG\r\n\x1a\n` と、末尾の IEND チャンク `\x00\x00\x00\x00IEND...` の両方）まで検証し、CDN が「200 は返すが実体はまだ書き込み中」の状態を誤って成功と判定しないようにしている（2026-08-19: 判定基準を「ファイルサイズが `MIN_VALID_IMAGE_BYTES` 以上か」から「PNG構造として完結しているか」に変更。震度分布を持たない「震源に関する情報」の地図画像は内容がシンプルで正当に軽量になり、旧・サイズ閾値では常に「生成中」と誤判定され地図画像が一切表示されない不具合があったため）
 - `P2P_IMAGE_ATTACH_ENABLED=false` にすると、この画像添付処理（CDN ポーリング）自体を無効化し、通知本文に画像 URL をテキストとして含める簡易方式に切り替わる（Discord のリンクプレビュー機能により自動展開。原因切り分け用）
 
 ### 津波情報
@@ -254,14 +254,14 @@ python bot.py
 | `KYOSHIN_IMAGE_DELAY_SEC` | 6 | `latest.json` 取得失敗時のフォールバック探索で遡る基準秒数 |
 | `KYOSHIN_IMAGE_STEP_SEC` | 3 | フォールバック探索で画像が見つからない場合に遡るステップ幅（秒） |
 | `KYOSHIN_IMAGE_MAX_RETRY` | 4 | フォールバック探索の最大リトライ回数 |
-| `KYOSHIN_POLL_INTERVAL_SEC` | 2.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒） |
-| `KYOSHIN_NOTIFY_INTERVAL_SEC` | 2.0 | イベント継続中の通知再送間隔（秒） |
+| `KYOSHIN_POLL_INTERVAL_SEC` | 1.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒）。EEW発表中（`EewCog.monitored_event_id`が設定されている間）はポーリング自体をスキップし、`EewCog.vibration_monitor_loop`に画像取得を一本化する（防災科研への負荷軽減） |
+| `KYOSHIN_NOTIFY_INTERVAL_SEC` | 1.0 | イベント継続中の通知再送間隔（秒）。EEW発表中は同様に通知をスキップする |
 | `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補とみなす実震度の下限。`core.kyoshin_shared.estimate_max_shindo_from_image`（EEW発表時トリガーの振動モニタ機能）が使用 |
-| `KYOSHIN_RISE_THRESHOLD` | 0.5 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する |
+| `KYOSHIN_RISE_THRESHOLD` | 1.0 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する。実観測点方式（1ピクセルサンプリング、平滑化なし）移行後の誤検知対策として0.5から引き上げ済み（一時的な緩和措置） |
 | `KYOSHIN_BASELINE_WINDOW_START_SEC` | 10.0 | 基準値計算に使う過去サンプルの開始位置（秒前） |
 | `KYOSHIN_BASELINE_WINDOW_END_SEC` | 25.0 | 基準値計算に使う過去サンプルの終了位置（秒前） |
 | `KYOSHIN_HISTORY_WINDOW_SEC` | 25.0 | 観測点ごとに保持する震度履歴の長さ（秒）。BASELINE_WINDOW_END_SEC以上を推奨 |
-| `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 2 | 上昇トリガー確定に必要な、K近傍のうち同時に上昇トリガーが立っている観測点数 |
+| `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 3 | 上昇トリガー確定に必要な、K近傍のうち同時に上昇トリガーが立っている観測点数。実観測点のK近傍は画像上で数ピクセルしか離れていないことが多く色ノイズが相関しやすいため、2から引き上げ済み（一時的な緩和措置） |
 | `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
 | `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
 | `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
@@ -910,5 +910,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-17（強震モニタ画像解析: 実観測点データ方式へ移行）
+**最終更新**: 2026-08-19（P2P地図画像の検証方式修正・LMoni画像URL時刻ずれ修正・強震モニタ画像取得元変更・EEW連携によるポーリング間隔短縮）
 **対応 Python**: 3.11+

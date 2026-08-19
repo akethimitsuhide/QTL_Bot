@@ -45,7 +45,7 @@ except ImportError:
 # NIED/防災科研の画像URLはJST基準で命名されているため、常に明示的にJSTで計算する。
 JST = ZoneInfo("Asia/Tokyo")
 
-JMA_S_BASE = "https://smi.lmoniexp.bosai.go.jp/data/map_img/RealTimeImg/jma_s"
+JMA_S_BASE = "https://www.lmoni.bosai.go.jp/img_svr/data/map_img/RealTimeImg/jma_s"
 LMONI_BASE = "https://www.lmoni.bosai.go.jp/monitor/data/data/map_img/RealTimeImg/abrspmx_s"
 KWATCH_URL = "https://kwatch-24h.net/EQLevel.json"
 
@@ -128,10 +128,29 @@ class DualImageFetcher:
 
     async def _find_image(
         self, session: aiohttp.ClientSession, base_url: str, suffix: str,
-        last_url: str | None, last_ts: str,
+        last_url: str | None, last_ts: str, reference_now: datetime,
     ) -> tuple[str | None, str]:
+        """
+        base_url/suffix系統の画像を、reference_now を起点に遡りながら探す。
+
+        【2026-08-19 修正: reference_now を引数化した経緯】
+        以前は `datetime.now(JST)` をこのメソッド内部（しかもリトライ
+        ループの毎回）で呼び出していた。fetch_urls() は jma_s系統・
+        abrspmx_s(LMoni)系統を順番に await していたため、後者の探索
+        開始時点では前者の探索（HTTPリクエストの実時間）の分だけ
+        既に時刻が進んでしまっており、2系統で「何時何分何秒を起点に
+        探すか」という基準がずれてしまっていた（結果、2つの画像の
+        実際のタイムスタンプが数秒単位でずれる不具合の原因になって
+        いた）。また同一メソッド内でもリトライのたびに現在時刻を
+        再取得していたため、リトライ回数が多いほど基準がさらに
+        後ろにずれていく問題もあった。
+
+        呼び出し元の fetch_urls() で一度だけ取得した「基準時刻」を
+        reference_now として両系統・全リトライで共通に使うことで、
+        この2つの問題を同時に解消する。
+        """
         for i in range(IMAGE_MAX_RETRY):
-            dt = datetime.now(JST) - timedelta(seconds=IMAGE_DELAY_SEC + IMAGE_STEP_SEC * i)
+            dt = reference_now - timedelta(seconds=IMAGE_DELAY_SEC + IMAGE_STEP_SEC * i)
             ts = dt.strftime("%Y%m%d%H%M%S")
             if ts == last_ts:
                 return last_url, last_ts
@@ -148,12 +167,18 @@ class DualImageFetcher:
         """
         (jma_s画像URL, LMoni画像URL) のタプルを返す。
         見つからなかった系統は None になる。
+
+        両系統の探索は同一の基準時刻（このメソッドの呼び出し時点の
+        現在時刻）を起点に行う（_find_image のdocstring参照）。
         """
+        reference_now = datetime.now(JST)
         self._last_jma_s_url, self._last_jma_s_ts = await self._find_image(
-            session, JMA_S_BASE, "jma_s", self._last_jma_s_url, self._last_jma_s_ts
+            session, JMA_S_BASE, "jma_s", self._last_jma_s_url, self._last_jma_s_ts,
+            reference_now,
         )
         self._last_lmoni_url, self._last_lmoni_ts = await self._find_image(
-            session, LMONI_BASE, "abrspmx_s", self._last_lmoni_url, self._last_lmoni_ts
+            session, LMONI_BASE, "abrspmx_s", self._last_lmoni_url, self._last_lmoni_ts,
+            reference_now,
         )
         return self._last_jma_s_url, self._last_lmoni_url
 
