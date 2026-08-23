@@ -55,10 +55,12 @@ from core.config import (
     DISK_WARNING_THRESHOLD, DISK_ERROR_THRESHOLD,
     HEALTH_CHECK_TIMEOUT, HEALTH_CHECK_CACHE_TTL, ERROR_NOTIFICATION_TTL,
     ENABLE_KYOSHIN,
+    DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_ID,
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
 from core.notification_log import get_recent_notifications
+from core.delivery_stats import get_delivery_stats
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -431,6 +433,16 @@ class SystemCog(commands.Cog):
         self.resource_monitor_task: asyncio.Task | None = None
         self.status_history_task: asyncio.Task | None = None
 
+        # -- 週間/月間ダイジェスト（2026-08〜） --
+        self.digest_task: asyncio.Task | None = None
+        # 前回ダイジェスト実行時点の累積受信カウントのスナップショット。
+        # 次回実行時にこれとの差分を取ることで「その期間内の件数」を
+        # 求める（notification_logのような上限付きリングバッファでは
+        # 活発な期間に取りこぼしが起きるため、無制限に増え続ける
+        # 累積カウンタの差分方式を採用する）。
+        self._digest_last_recv_count_snapshot: dict = {}
+        self._digest_last_run_at: datetime | None = None
+
         # -- Web Dashboard グラフ・履歴表示用データ（2026-08-04 追加） --
         # resource_monitor が RESOURCE_CHECK_INTERVAL 秒ごとに1件ずつ
         # 追記する。deque(maxlen=...) により、上限を超えると自動的に
@@ -467,6 +479,10 @@ class SystemCog(commands.Cog):
             self.status_history_task.cancel()
             logger.info("status_history_recorder タスクをキャンセルしました")
 
+        if self.digest_task and not self.digest_task.done():
+            self.digest_task.cancel()
+            logger.info("digest_worker タスクをキャンセルしました")
+
         if self._web_runner:
             await self._web_runner.cleanup()
 
@@ -496,6 +512,13 @@ class SystemCog(commands.Cog):
         if not self.status_history_task:
             self.status_history_task = self.bot.loop.create_task(self.status_history_recorder())
             logger.info("Web Dashboard 履歴記録タスクを開始しました")
+
+        if not self.digest_task:
+            self.digest_task = self.bot.loop.create_task(self.digest_worker())
+            logger.info(
+                f"週間/月間ダイジェストタスクを開始しました "
+                f"(有効={DIGEST_ENABLED}, 間隔={DIGEST_INTERVAL})"
+            )
 
         if _test_runner_module.CLI_TEST_MODE:
             # CLIテストモード（python3 bot.py --test_xxx ...）では、
@@ -998,6 +1021,19 @@ class SystemCog(commands.Cog):
         if apm_cog is not None:
             embed.add_field(name="APM (Mackerel)", value=apm_cog.apm_status_summary(), inline=False)
 
+        # -- 配信成功率（直近24時間） --
+        delivery = get_delivery_stats(window_hours=24.0)
+        if delivery["total"] > 0:
+            rate = delivery["success_rate"]
+            icon = "🟢" if rate >= 99.0 else ("🟡" if rate >= 90.0 else "🔴")
+            delivery_lines = [
+                f"{icon} 成功率: {rate:.1f}% "
+                f"({delivery['success']}/{delivery['total']}件、直近24時間)",
+            ]
+            if delivery["failure"] > 0:
+                delivery_lines.append(f"⚠️ 失敗: {delivery['failure']}件")
+            embed.add_field(name="配信成功率", value="\n".join(delivery_lines), inline=False)
+
         # -- フィルター設定 --
         if STATUS_SHOW_UPTIME:
             filter_lines = [
@@ -1239,6 +1275,7 @@ class SystemCog(commands.Cog):
                         "kyoshin": self._kyoshin_status_dict(),
                     },
                     "tasks": tasks_info,
+                    "delivery": get_delivery_stats(window_hours=24.0),
                     # 後方互換フィールド
                     "last_eew": {
                         "event_id": self._eew_attr("last_eew_event_id"),
@@ -1677,4 +1714,173 @@ class SystemCog(commands.Cog):
                 break
             except Exception as e:
                 logger.error(f"error_summary_worker エラー: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
+    # ===============================
+    # 週間/月間ダイジェスト（2026-08〜）
+    # ===============================
+    def _compute_next_digest_time(self, now: datetime) -> datetime:
+        """
+        次回ダイジェスト投稿時刻を計算する。
+
+        DIGEST_INTERVAL="monthly" の場合は「翌月1日のDIGEST_HOUR時」、
+        それ以外（"weekly"扱い）は「次のDIGEST_WEEKDAY曜日の
+        DIGEST_HOUR時」を返す。
+        """
+        if DIGEST_INTERVAL == "monthly":
+            if now.month == 12:
+                return now.replace(
+                    year=now.year + 1, month=1, day=1,
+                    hour=DIGEST_HOUR, minute=0, second=0, microsecond=0,
+                )
+            return now.replace(
+                month=now.month + 1, day=1,
+                hour=DIGEST_HOUR, minute=0, second=0, microsecond=0,
+            )
+
+        # weekly（DIGEST_INTERVALが不明な値の場合もこちらにフォールバック）
+        days_ahead = (DIGEST_WEEKDAY - now.weekday()) % 7
+        candidate = now.replace(
+            hour=DIGEST_HOUR, minute=0, second=0, microsecond=0
+        ) + timedelta(days=days_ahead)
+        if candidate <= now:
+            candidate += timedelta(days=7)
+        return candidate
+
+    # recv_count のキー → 表示ラベル対応表。
+    # SystemCog._merged_recv_count() が返すキー名（内部識別子）を、
+    # ダイジェストEmbedでの表示用の日本語ラベルに変換する。
+    _DIGEST_LABEL_MAP = {
+        "wolfx": "EEW",
+        "p2p_eew": "EEW（P2Pフォールバック）",
+        "quake": "地震情報",
+        "tsunami": "津波情報",
+        "long_period": "長周期地震動",
+        "tsunami_obs": "津波観測情報",
+        "volcano": "火山情報",
+        "eruption": "噴火速報",
+        "warning": "噴火警報",
+        "usgs": "USGS地震情報",
+    }
+
+    async def _send_digest(self) -> None:
+        """
+        ダイジェストEmbedを組み立てて送信する。前回実行時点の累積
+        受信カウントとの差分を「この期間内の件数」として集計する。
+
+        【なぜ累積カウンタの差分方式なのか】
+        core.notification_log は最大50件のリングバッファのため、
+        活発な期間（大きな地震が続いた週等）には集計対象の期間中に
+        古い記録が上書きされて消えてしまい、正確な週間/月間集計には
+        使えない。各Cogが保持する「起動からの累積受信カウント」
+        （_merged_recv_count()）は上限がないため、スナップショットの
+        差分を取ることで正確な期間内カウントが得られる。
+
+        【Bot再起動を挟んだ場合の注意】
+        累積カウンタはBot再起動でゼロにリセットされる。再起動後の
+        カウントが前回スナップショットより小さくなった場合（＝
+        再起動があったと推定できる場合）、負の差分をそのまま使うと
+        不自然な値になるため、0でクランプする（実態よりは少なく
+        出るが、マイナス表示になるよりは健全）。
+        """
+        channel = self.bot.get_channel(DIGEST_CHANNEL_ID) or self.bot.get_channel(CHANNEL_ID)
+        if not channel:
+            logger.warning("digest_worker: 送信先チャンネルが見つかりません")
+            return
+
+        now = datetime.now()
+        now_snapshot = self._merged_recv_count()
+        prev_snapshot = self._digest_last_recv_count_snapshot or {}
+
+        deltas: dict[str, int] = {}
+        for key, current in now_snapshot.items():
+            prev = prev_snapshot.get(key, 0)
+            deltas[key] = max(current - prev, 0)
+
+        total = sum(deltas.values())
+        period_label = "先月" if DIGEST_INTERVAL == "monthly" else "先週"
+
+        lines = []
+        for key, label in self._DIGEST_LABEL_MAP.items():
+            count = deltas.get(key, 0)
+            if count > 0:
+                lines.append(f"・{label}: {count}件")
+
+        # 配信成功率（このダイジェスト期間にできるだけ近いウィンドウで取得）。
+        # core.delivery_stats はリングバッファ上限があるため、活発な期間は
+        # 実際の件数より少なく出ることがある点に注意（正確な累積値では
+        # なく「直近の傾向」として参考値扱いとする）。
+        window_hours = 24 * 30 if DIGEST_INTERVAL == "monthly" else 24 * 7
+        delivery = get_delivery_stats(window_hours=window_hours)
+
+        if self._digest_last_run_at is not None:
+            period_desc = (
+                f"{self._digest_last_run_at.strftime('%Y-%m-%d')} 〜 "
+                f"{now.strftime('%Y-%m-%d')}"
+            )
+        else:
+            period_desc = f"〜 {now.strftime('%Y-%m-%d')}（初回集計）"
+
+        embed = discord.Embed(
+            title=f"📊 {period_label}の地震活動まとめ",
+            description=(
+                f"**通知件数合計: {total}件**" if total > 0
+                else "この期間の通知はありませんでした。"
+            ),
+            color=discord.Color.blue(),
+            timestamp=now,
+        )
+        if lines:
+            embed.add_field(name="種別ごとの件数", value="\n".join(lines), inline=False)
+        if delivery["total"] > 0:
+            embed.add_field(
+                name="配信成功率（参考値）",
+                value=(
+                    f"{delivery['success_rate']:.1f}% "
+                    f"({delivery['success']}/{delivery['total']}件)"
+                ),
+                inline=False,
+            )
+        embed.set_footer(text=f"集計期間: {period_desc}")
+
+        try:
+            await channel.send(embed=embed)
+            logger.info(f"ダイジェストを送信しました（期間={period_label}, 合計{total}件）")
+        except Exception as e:
+            logger.error(f"digest_worker: 送信に失敗しました: {e}", exc_info=True)
+            # 送信に失敗した場合でもスナップショットは更新する
+            # （次回また同じ差分を再送しようとして二重計上になるより、
+            # 1回分の集計を諦める方が実害が小さいという判断）。
+
+        self._digest_last_recv_count_snapshot = now_snapshot
+        self._digest_last_run_at = now
+
+    async def digest_worker(self) -> None:
+        """
+        DIGEST_INTERVAL（weekly/monthly）に応じて定期的にダイジェストを
+        送信するバックグラウンドタスク。DIGEST_ENABLED=false の場合は
+        何もせず即座に終了する。
+        """
+        if not DIGEST_ENABLED:
+            logger.debug("digest_worker: DIGEST_ENABLED=false のため無効です")
+            return
+
+        while not self.bot.is_closed():
+            try:
+                now = datetime.now()
+                next_run = self._compute_next_digest_time(now)
+                wait_seconds = (next_run - now).total_seconds()
+
+                logger.debug(
+                    f"digest_worker: 次回実行予定 {next_run.isoformat()} "
+                    f"（{wait_seconds:.0f}秒後）"
+                )
+                await asyncio.sleep(max(wait_seconds, 1.0))
+                await self._send_digest()
+
+            except asyncio.CancelledError:
+                logger.info("digest_worker が停止しました")
+                break
+            except Exception as e:
+                logger.error(f"digest_worker エラー: {e}", exc_info=True)
                 await asyncio.sleep(60)

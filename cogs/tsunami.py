@@ -65,6 +65,7 @@ from core.helpers import (
 from core.audio import AudioMixin
 from core.p2p_image import P2PImageMixin
 from core.notification_log import record_notification
+from core.delivery_stats import record_delivery
 
 logger = logging.getLogger("QTLBot")
 
@@ -487,6 +488,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             sent_msg = await channel.send(embed=embed)
             if not is_test:
+                record_delivery(True, "津波情報")
                 record_notification("津波情報", title)
             # 2026-08-02: CDN反映のリトライ埋め込み方式を、内容検証を
             # 強化した上で再度採用する（core/p2p_image.py の
@@ -533,6 +535,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 else:
                     await self.play_mp3("vxse53")
         except Exception as e:
+            record_delivery(False, "津波情報", str(e))
             logger.error(f"notify_tsunami エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
@@ -704,10 +707,12 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             
             await channel.send(mention, embed=embed)
             if not is_test:
+                record_delivery(True, "津波観測情報")
                 record_notification("津波観測情報", title)
             logger.info(f"津波観測情報を通知しました: {title}")
             
         except Exception as e:
+            record_delivery(False, "津波観測情報", str(e))
             logger.error(f"notify_tsunami_observation エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
@@ -931,6 +936,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             await channel.send(embed=embed)
             if not is_test:
+                record_delivery(True, "津波予報")
                 record_notification("津波予報", title)
             logger.info(f"津波予報/警報通知完了: {title} max_level={max_level}")
 
@@ -946,6 +952,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                     await self.play_mp3(mp3_key)
 
         except Exception as e:
+            record_delivery(False, "津波予報", str(e))
             logger.error(f"notify_tsunami_forecast エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
@@ -1005,10 +1012,12 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             await channel.send(embed=embed)
             if not is_test:
+                record_delivery(True, "震源要素更新")
                 record_notification("震源要素更新", title)
             logger.info(f"震源要素更新通知完了: {title}")
 
         except Exception as e:
+            record_delivery(False, "震源要素更新", str(e))
             logger.error(f"notify_hypocenter_update エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
@@ -1074,6 +1083,7 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             await channel.send(embed=embed)
             if not is_test:
+                record_delivery(True, "南海トラフ")
                 record_notification("南海トラフ", title)
             logger.info(f"南海トラフ地震関連情報通知完了: {title}")
 
@@ -1082,5 +1092,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 await self.speak_local(f"南海トラフ地震臨時情報。{info_serial}が発表されました。", priority=1)
 
         except Exception as e:
+            record_delivery(False, "南海トラフ", str(e))
             logger.error(f"notify_nankai_trough エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")

@@ -65,6 +65,7 @@ from core.audio import AudioClientMixin
 from core.p2p_image import P2PImageMixin
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
+from core.delivery_stats import record_delivery
 
 logger = logging.getLogger("QTLBot")
 
@@ -395,8 +396,18 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         if footer_parts:
             embed.set_footer(text=" | ".join(footer_parts))
 
-        sent_msg = await channel.send(embed=embed)
+        try:
+            sent_msg = await channel.send(embed=embed)
+        except Exception as e:
+            # notify_quake は他のCogと異なりメソッド全体を包むtry/exceptを
+            # 持たない設計のため、送信箇所をピンポイントでtry/exceptし、
+            # 失敗記録のみ行って元の例外はそのまま再送出する
+            # （呼び出し元＝P2PWebSocketHubのディスパッチャが従来通り
+            # 例外を捕捉・ログ記録する挙動を変えないため）。
+            record_delivery(False, "地震情報", str(e))
+            raise
         if not is_test:
+            record_delivery(True, "地震情報")
             record_notification("地震情報", title, name_field)
 
         # ── 地図画像（embed埋め込み） ──

@@ -41,6 +41,7 @@ from core.helpers import (
 )
 from core.audio import AudioMixin
 from core.notification_log import record_notification
+from core.delivery_stats import record_delivery
 
 logger = logging.getLogger("QTLBot")
 
@@ -366,6 +367,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             embed.set_footer(text=f"気象庁 | eventId: {event_id}")
 
             await channel.send(embed=embed)
+            record_delivery(True, "火山情報")
             record_notification("火山情報", head_title)
             logger.info(f"Volcano 通知完了: {head_title} eventId={event_id}")
 
@@ -376,6 +378,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
                 await self.speak_local(speak_text, priority=1)
 
         except Exception as e:
+            record_delivery(False, "火山情報", str(e))
             logger.error(f"_notify_volcano エラー: {e}", exc_info=True)
 
     # ===============================
@@ -472,6 +475,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             )
             embed.set_footer(text=f"気象庁 噴火速報 | eventId: {event_id}")
             await channel.send(embed=embed)
+            record_delivery(True, "噴火速報")
             record_notification("噴火速報", head_title)
             logger.info(f"噴火速報通知完了: {head_title} eventId={event_id}")
 
@@ -479,6 +483,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             await self.speak_local(speak_text, priority=0)
 
         except Exception as e:
+            record_delivery(False, "噴火速報", str(e))
             logger.error(f"_notify_eruption エラー: {e}", exc_info=True)
 
     # ===============================
@@ -612,6 +617,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             )
             embed.set_footer(text=f"気象庁 噴火警報 | eventId: {event_id}")
             await channel.send(embed=embed)
+            record_delivery(True, "噴火警報")
             record_notification("噴火警報", title)
             logger.info(f"噴火警報通知完了: {title} eventId={event_id}")
 
@@ -619,4 +625,5 @@ class VolcanoCog(commands.Cog, AudioMixin):
             await self.speak_local(speak_text, priority=0)
 
         except Exception as e:
+            record_delivery(False, "噴火警報", str(e))
             logger.error(f"_notify_warning エラー: {e}", exc_info=True)

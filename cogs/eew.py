@@ -55,7 +55,9 @@ from core.helpers import (
 )
 from core.audio import AudioClientMixin
 from core.notification_log import record_notification
+from core.delivery_stats import record_delivery
 from core.eew_convert import convert_p2p_eew_to_wolfx, extract_alert_regions
+from core.p2p_image import P2PImageMixin
 from core.ws_helpers import ws_connect_loop
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
@@ -65,7 +67,7 @@ from core.kyoshin_shared import (
 logger = logging.getLogger("QTLBot")
 
 
-class EewCog(commands.Cog, AudioClientMixin):
+class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
     """緊急地震速報（EEW）を扱う Cog。"""
 
     def __init__(self, bot: commands.Bot):
@@ -380,6 +382,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                     embed.set_footer(text="※これはテスト通知です。")
                 await channel.send(embed=embed)
                 if not is_test:
+                    record_delivery(True, "EEW")
                     record_notification("EEW", title, data.get("Hypocenter", ""))
                     self.monitored_event_id = None
                 return
@@ -552,9 +555,30 @@ class EewCog(commands.Cog, AudioClientMixin):
             if is_test:
                 embed.set_footer(text="※これはテスト通知です。")
 
-            await channel.send(embed=embed)
+            try:
+                sent_msg = await channel.send(embed=embed)
+            except Exception as e:
+                record_delivery(False, "EEW", str(e))
+                raise
             if not is_test:
+                record_delivery(True, "EEW")
                 record_notification("EEW", title, hypo if isinstance(hypo, str) else "")
+
+            # ── P2P地震情報の地図画像添付（2026-08-19追加） ──
+            # Wolfx由来のEEW（source="wolfx"、主系統）には地図画像のIDが
+            # 存在しないため対象外。P2P由来（source="p2p_eew"、フォール
+            # バック系統）の場合のみ、地震情報通知（cogs/quake.py）と
+            # 同じ生成方法（cdn.p2pquake.net/app/images/{id}_trim_big.png）
+            # で地図画像を取得し、Embed最下部（set_image）に追加する。
+            # CDN側の生成遅延を考慮したリトライ処理は
+            # core.p2p_image.P2PImageMixin._attach_p2p_image に委譲する
+            # （地震情報通知と全く同じ仕組みを流用）。
+            if not is_test and not is_cancel and source == "p2p_eew":
+                p2p_image_id = data.get("_p2p_image_id")
+                if p2p_image_id:
+                    self.bot.loop.create_task(
+                        self._attach_p2p_image(sent_msg, p2p_image_id)
+                    )
 
             if (is_final or is_cancel) and event_id == self.monitored_event_id:
                 self.monitored_event_id = None
@@ -575,7 +599,8 @@ class EewCog(commands.Cog, AudioClientMixin):
             await self.generate_and_speak_eew(data, cumulative_warn_areas)
             await self.play_eew_sound(data, cumulative_warn_areas)
 
-        except Exception:
+        except Exception as e:
+            record_delivery(False, "EEW", str(e))
             logger.error(f"notify_eew エラー:\n{traceback.format_exc()}")
 
     # ===============================

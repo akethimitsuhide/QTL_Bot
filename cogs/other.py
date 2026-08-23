@@ -53,6 +53,7 @@ from core.helpers import (
 )
 from core.audio import AudioMixin
 from core.notification_log import record_notification
+from core.delivery_stats import record_delivery
 
 logger = logging.getLogger("QTLBot")
 
@@ -320,6 +321,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
             await channel.send(embed=embed)
             if not is_test:
+                record_delivery(True, "長周期地震動")
                 record_notification("長周期地震動", "長周期地震動に関する観測情報", hypo_name)
 
             # 読み上げ用に時刻の「H時MM分頃」部分を抽出
@@ -340,6 +342,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             await self.speak_local(speak_text)
 
         except Exception as e:
+            record_delivery(False, "長周期地震動", str(e))
             logger.error(f"notify_long_period エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
@@ -440,6 +443,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             else:
                 await channel.send(embed=embed)
             if not is_test:
+                record_delivery(True, "気象庁その他")
                 record_notification("気象庁その他", title_text)
 
             speak_text = f"{title_text} が発表されました"
@@ -461,5 +465,6 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             await self.speak_local(speak_text)
 
         except Exception as e:
+            record_delivery(False, "気象庁その他", str(e))
             logger.error(f"notify_quake_advisory エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")

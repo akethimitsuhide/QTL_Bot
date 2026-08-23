@@ -54,6 +54,7 @@ from core.helpers import (
 )
 from core.audio import AudioMixin
 from core.notification_log import record_notification
+from core.delivery_stats import record_delivery
 
 logger = logging.getLogger("QTLBot")
 
@@ -376,6 +377,7 @@ class UsgsCog(commands.Cog, AudioMixin):
             embed.add_field(name="詳細情報", value=f"[USGS]({usgs_url})", inline=False)
             
             await channel.send(embed=embed)
+            record_delivery(True, "USGS")
             record_notification("USGS", title, place)
             
             # 読み上げ
@@ -390,5 +392,6 @@ class UsgsCog(commands.Cog, AudioMixin):
             logger.info(f"USGS地震情報を通知しました: {event_id} / M{mag:.1f}")
         
         except Exception as e:
+            record_delivery(False, "USGS", str(e))
             logger.error(f"notify_usgs_quake エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
