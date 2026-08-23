@@ -21,6 +21,7 @@ Bot全体で3接続になってしまいレート制限に抵触する。
   - 551（地震情報）              → quake ディスパッチャへ
   - 552（津波予報・警報・注意報） → tsunami ディスパッチャへ
   - 556（緊急地震速報（警報））   → eew ディスパッチャへ
+  - 9611（地震感知情報）          → jishin_kanchi ディスパッチャへ（2026-08〜）
   - 555（ピア数情報）等、上記以外のコードは無視・破棄する。
 
 【重複排除（デデュープ）】
@@ -63,6 +64,7 @@ CODE_TO_KEY = {
     551: "quake",
     552: "tsunami",
     556: "eew",
+    9611: "jishin_kanchi",
 }
 
 # デデュープキャッシュの最大保持件数（FIFOで古いものから破棄）。
@@ -86,13 +88,20 @@ class P2PWebSocketHub:
                        停止させるために使う。
         """
         self._is_closed_fn = is_closed_fn
-        # key ("eew" / "quake" / "tsunami") -> async def handler(data) -> None
-        self._dispatchers: dict[str, list] = {"eew": [], "quake": [], "tsunami": []}
-        # code (551/552/556) ごとの直近受信ID（OrderedDictをFIFOキャッシュとして使用）
+        # key ("eew" / "quake" / "tsunami" / "jishin_kanchi" 等) -> async def handler(data) -> None
+        # 【2026-08-19 修正】以前はキー一覧を {"eew": [], "quake": [], "tsunami": []}
+        # と直接ハードコードしていたため、CODE_TO_KEY に新しいcode（例:
+        # 9611→jishin_kanchi）を追加しても、ここが追従しておらず
+        # register("jishin_kanchi", ...) が「未知のディスパッチャキー」
+        # としてValueErrorを送出してしまうバグがあった。CODE_TO_KEY の
+        # 値（ディスパッチャキー）から動的に生成することで、今後
+        # 新しいcodeを追加する際にこの初期化を書き換える必要がなくなる。
+        self._dispatchers: dict[str, list] = {key: [] for key in CODE_TO_KEY.values()}
+        # code (551/552/556/9611等) ごとの直近受信ID（OrderedDictをFIFOキャッシュとして使用）
         self._seen_ids: dict[int, OrderedDict] = {
             code: OrderedDict() for code in CODE_TO_KEY
         }
-        self._recv_count: dict[str, int] = {"eew": 0, "quake": 0, "tsunami": 0}
+        self._recv_count: dict[str, int] = {key: 0 for key in CODE_TO_KEY.values()}
         self._ignored_count = 0
 
     def register(self, key: str, handler) -> None:

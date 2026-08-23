@@ -175,6 +175,15 @@ async def main():
             await bot.add_cog(tsunami_cog)
             logger.info("TsunamiCog を登録しました")
 
+            # ── P2P地震感知情報 Cog（code=9611、2026-08〜） ──
+            # JISHIN_KANCHI_ENABLE=false（デフォルト）の場合、on_ready内で
+            # 検知して通知を送らない（Cog自体は登録される。P2PWebSocketHub
+            # へのディスパッチャ登録も後段でまとめて行う）。
+            from cogs.jishin_kanchi import JishinKanchiCog
+            jishin_kanchi_cog = JishinKanchiCog(bot)
+            await bot.add_cog(jishin_kanchi_cog)
+            logger.info("JishinKanchiCog を登録しました")
+
             # ── P2P地震情報 WebSocket ハブ（2026-08 feature/p2p-websocket-migration） ──
             # EewCog（code=556）・QuakeInfoCog（code=551）・TsunamiCog（code=552）が
             # それぞれ個別に wss://api.p2pquake.net/v2/ws へ接続すると、
@@ -191,12 +200,13 @@ async def main():
             p2p_hub.register("eew", eew_cog.handle_p2p_eew)
             p2p_hub.register("quake", quake_cog.handle_p2p_quake)
             p2p_hub.register("tsunami", tsunami_cog.handle_p2p_tsunami)
+            p2p_hub.register("jishin_kanchi", jishin_kanchi_cog.handle_p2p_jishin_kanchi)
             # 他Cogから !status 等で参照できるよう bot にぶら下げておく
             bot.p2p_hub = p2p_hub
             bot.loop.create_task(p2p_hub.run())
             logger.info(
                 "P2PWebSocketHub を起動しました "
-                "(code=551→quake, 552→tsunami, 556→eew, 接続は1本のみ)"
+                "(code=551→quake, 552→tsunami, 556→eew, 9611→jishin_kanchi, 接続は1本のみ)"
             )
 
             # ── Step3: 火山 Cog ──
