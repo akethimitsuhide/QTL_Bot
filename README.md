@@ -13,6 +13,7 @@
   - 警報対象の府県予報区数（`region_map.json` 変換後）が `EEW_REGION_COLLAPSE_THRESHOLD`（デフォルト10）件以上の場合、`pref_region_map.json` でさらに地方予報区名へ集約して通知・読み上げる（例:「北海道道南,北海道道央,...,千葉」14件 → 「北海道,東北,関東」）
 - **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報の WebSocket から警報のみを常時受信
   - Wolfx と同時並行稼働（EventID による重複排除あり）
+  - 地図画像: P2Pメッセージの `id` から地震情報通知と同じ生成方法で地図画像URLを組み立て、Embed最下部に添付する（Wolfx由来のEEWには画像IDが存在しないため対象外。2026-08-19追加）
 - **地震情報**: P2P 地震情報の API からの確報情報
   - 震度速報（`ScalePrompt`）: 読み上げは `prefecture_map.json` で区域名を都道府県名に変換し、重複を排除して発表（例:「熊本県天草・芦北」「熊本県熊本」→「熊本県」1回のみ）。通知本文の津波記述の下に区域別の震度一覧（■ 震度○ + 区域名）を追記
   - 震源に関する情報（`Destination`）: 震源地の横に度分秒形式の緯度経度を常に付記（例:「熊本県天草・芦北地方（32°33′39.8、130°22′43.2）」）
@@ -26,6 +27,14 @@
 - `pygame.mixer.Sound(buffer=...)` はリサンプリングを行わず、ミキサー初期化時のサンプルレート・チャンネル数をそのままバッファの解釈に使うため、`core/audio.py` の `pygame.mixer.init()` は `core/ews_signal.py` の生成条件（44100Hz・モノラル）に明示的に合わせて初期化している（不一致のまま再生するとピッチ・再生速度が変わってしまう。既存の `pygame.mixer.music`（MP3再生）はファイル再生時に自動リサンプリングされるためこの制約を受けない）
 - `EWS_ENABLE=true` で有効化（デフォルト `false`。オプトイン機能）。地域符号・送信ブロック数・前置後置固定音の長さは環境変数で設定可能（下記「EWS 設定」参照）
 - CLI テスト実行時（`is_test=True`）は実際の警報ではないため対象外
+
+### P2P 地震感知情報（2026-08〜）
+- P2P 地震情報が code=9611 で配信する「地震感知情報」（JMA発表の公式情報ではなく、P2P地震情報が独自に推定する速報値）を受信・通知する（`JishinKanchiCog`。デフォルト無効、`JISHIN_KANCHI_ENABLE=true` で有効化）
+- 全体の信頼度（`confidence`）をレベル1〜4（数値が大きいほど信頼度が低い）に変換して表示。レベルの判定は範囲ではなく既知の定数値との最近傍マッチングで行う（詳細は `core/jishin_kanchi_convert.py`）
+- 地域ごとの信頼度（A〜F、Aが最高）でグルーピングし、信頼度が高い順に地域名・件数を一覧表示。地域コード→地域名の変換には `epsp_area.csv`（[p2pquake/epsp-specifications](https://github.com/p2pquake/epsp-specifications) 配布の `epsp-area.csv` を同梱）を使用
+- 地図画像はP2P地震情報通知と同じ生成方法（`id` から `cdn.p2pquake.net/app/images/{id}_trim_big.png`）でEmbed最下部に添付
+- `JISHIN_KANCHI_MAX_LEVEL`（通知する最大レベル）・`JISHIN_KANCHI_MIN_COUNT`（通知する最小件数）で閾値フィルタリング可能
+- 音声読み上げ（`JISHIN_KANCHI_SPEECH_ENABLE`）・効果音再生（`JISHIN_KANCHI_SOUND_ENABLE`、ファイル名は `JISHIN_KANCHI_SOUND_FILE` で変更可能）をそれぞれ個別に無効化可能
 
 ### P2P 地図画像の添付
 - 地震情報・津波情報の通知には、P2P 地震情報 CDN が生成する震源地図画像を Embed に添付する（`core/p2p_image.py` の `P2PImageMixin`。`QuakeInfoCog` / `TsunamiCog` が多重継承）
@@ -107,6 +116,8 @@
 - `GET /status` で詳細な稼働状況を JSON で取得
 - `GET /status/history` でシステムリソース・受信件数の推移スナップショット履歴を JSON で取得（`STATUS_HISTORY_INTERVAL` 秒ごとに記録、メモリ上のリングバッファのみで保持しBot再起動でリセットされる）。`?format=csv` を付けると同じデータを CSV（UTF-8 BOM付き）でダウンロード可能
 - `GET /status/notifications` で実際にDiscordへ送信した通知（種別・タイトル・時刻）の直近履歴を JSON で取得（最大50件、メモリ上のリングバッファのみで保持）。`?limit=N` で件数を絞り込み可能
+- 配信成功率の可視化: 各Cogの通知送信箇所（`channel.send()`）の成功/失敗を `core/delivery_stats.py` に記録し、直近24時間の成功率を `!status` Embed・`GET /status` の `delivery` フィールドで確認できる
+- 週間/月間ダイジェスト: `DIGEST_ENABLED=true` で有効化。累積受信カウントの差分から「先週/先月の通知件数」を集計し、指定した曜日・時刻（または毎月1日）にEmbedで自動投稿する（`SystemCog.digest_worker`）
 - `GET /dashboard` で上記データを可視化する HTML ページ。ステータスサマリー（Bot状態・稼働時間・Ping・Wolfx EEW接続状態・CPU/メモリ・ディスク使用率を色付きインジケーターで表示）、CPU/メモリ/ディスク使用率・各種受信件数の推移グラフ（Chart.js）、種別フィルタ付きの直近通知履歴テーブル、CSVダウンロードボタン、手動更新ボタンを備える。15〜60秒間隔で自動更新
 - `!status` コマンド（管理者専用）
 - `/qtl_status` スラッシュコマンド（管理者専用）
@@ -233,6 +244,26 @@ python bot.py
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `P2P_IMAGE_ATTACH_ENABLED` | true | P2P 地震情報の地図画像を Embed に添付するか。`false` で CDN ポーリングを無効化し、本文への画像 URL テキスト追記方式にフォールバック（詳細は「P2P 地図画像の添付」参照） |
+
+### P2P 地震感知情報設定
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `JISHIN_KANCHI_ENABLE` | false | 地震感知情報（code=9611）通知の有効化 |
+| `JISHIN_KANCHI_CHANNEL_ID` | QUAKE_CHANNEL_ID（未設定時はCHANNEL_ID） | 地震感知情報専用チャンネル |
+| `JISHIN_KANCHI_MAX_LEVEL` | 4 | 通知する最大レベル（1〜4、数値が大きいほど信頼度が低い）。この値以下のレベルのみ通知する |
+| `JISHIN_KANCHI_MIN_COUNT` | 1 | 通知する最小件数（`count`）。これ未満は通知しない |
+| `JISHIN_KANCHI_SPEECH_ENABLE` | true | 音声読み上げの有効化 |
+| `JISHIN_KANCHI_SOUND_ENABLE` | true | 効果音再生の有効化 |
+| `JISHIN_KANCHI_SOUND_FILE` | vxse53.mp3 | 再生する効果音ファイル名（Bot実行ディレクトリ直下に配置） |
+
+### 週間/月間ダイジェスト設定
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `DIGEST_ENABLED` | false | ダイジェスト機能の有効化 |
+| `DIGEST_INTERVAL` | weekly | `weekly`（毎週） または `monthly`（毎月1日） |
+| `DIGEST_WEEKDAY` | 0 | weekly時のみ使用。投稿曜日（0=月曜〜6=日曜） |
+| `DIGEST_HOUR` | 9 | 投稿時刻（24時間制、0〜23） |
+| `DIGEST_CHANNEL_ID` | CHANNEL_ID | ダイジェスト投稿先チャンネル |
 
 ### EWS（緊急警報放送）設定
 | 変数名 | 既定値 | 説明 |
@@ -820,6 +851,7 @@ QTL_Bot/
 │   ├── eew.py                - EewCog: 緊急地震速報（Wolfx/P2P EEW）専用
 │   ├── quake.py              - QuakeInfoCog: 地震情報（震度速報等）・P2P地震情報ポーリング
 │   ├── tsunami.py            - TsunamiCog: 津波観測・予報
+│   ├── jishin_kanchi.py      - JishinKanchiCog: P2P地震感知情報（code=9611、デフォルト無効）
 │   ├── volcano.py            - VolcanoCog: 火山情報・噴火速報・噴火警報
 │   ├── usgs.py               - UsgsCog: USGS 海外地震情報
 │   ├── other.py              - OtherInfoCog: 長周期地震動・気象庁その他情報
@@ -833,12 +865,19 @@ QTL_Bot/
     ├── ws_helpers.py              - WebSocket自動再接続の共通ループ（EewCog等が使用）
     ├── fetch_backoff.py           - HTTPポーリングのCircuit Breaker（連続失敗時のバックオフ）
     ├── p2p_image.py               - P2PImageMixin（P2P地震情報CDNの地図画像をEmbedに添付。
-    │                                 内容検証付きリトライで QuakeInfoCog/TsunamiCog が共有）
+    │                                 内容検証付きリトライで QuakeInfoCog/TsunamiCog/EewCog/
+    │                                 JishinKanchiCog が共有）
     ├── eew_convert.py             - P2P地震情報（EEW code=556）→ Wolfx形式変換の純粋関数
     │                                 （EewCog._convert_p2p_eew_to_wolfx等から分離。状態非依存）
     ├── notification_log.py        - 実際にDiscordへ送信した通知の履歴記録（全Cog共有の
     │                                 メモリ上リングバッファ、最大50件。Web Dashboardの
     │                                 「直近の通知履歴」表示・GET /status/notifications 用）
+    ├── delivery_stats.py          - 通知送信の成功/失敗を記録する軽量統計モジュール
+    │                                 （全Cog共有。Web Dashboard「配信成功率」表示用）
+    ├── epsp_area.py                - P2P地震情報の地域コード（epsp_area.csv）→地域名変換
+    │                                 （地震感知情報の地域表示に使用）
+    ├── jishin_kanchi_convert.py    - 地震感知情報の信頼度→レベル変換等の純粋関数
+    │                                 （JishinKanchiCogから分離。状態非依存）
     ├── ews_signal.py               - EWS（緊急警報放送）AFSK信号音のビット列組み立て・PCM波形合成
     │                                 （外部ファイル出力なし、生成したPCMをメモリ上のまま再生に渡す）
     ├── kyoshin_shared.py          - 震度色分け・両画像取得・振動レベル取得の共通ロジック
@@ -910,5 +949,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-19（P2P地図画像の検証方式修正・LMoni画像URL時刻ずれ修正・強震モニタ画像取得元変更・EEW連携によるポーリング間隔短縮）
+**最終更新**: 2026-08-21（配信成功率可視化・週間/月間ダイジェスト・EEW地図画像対応・P2P地震感知情報対応を追加）
 **対応 Python**: 3.11+
