@@ -157,6 +157,11 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             "MaxIntensity": max_intensity,
             "WarnArea":     warn_areas,
             "_source":      "P2P地震情報",
+            # P2P地震情報の地図画像URL（cdn.p2pquake.net/app/images/{id}_trim_big.png）
+            # 生成に使うメッセージID。2026-08-19: EEW（警報）の地図画像対応のため追加。
+            # Wolfx由来のEEW（source="wolfx"）にはこのIDは存在せず、P2P由来
+            # （source="p2p_eew"）のときのみ利用可能（cogs/eew.py notify_eew参照）。
+            "_p2p_image_id": p2p_data.get("id"),
         }
 
     except Exception:
