@@ -167,6 +167,7 @@ KYOSHIN_CHANNEL_ID   = int(_getenv_nonempty("KYOSHIN_CHANNEL_ID",   _getenv_none
 ADMIN_CHANNEL_ID     = int(_getenv_nonempty("ADMIN_CHANNEL_ID",   "0"))
 VOLCANO_CHANNEL_ID   = int(_getenv_nonempty("VOLCANO_CHANNEL_ID",   _getenv_nonempty("CHANNEL_ID", "0")))
 USGS_CHANNEL_ID      = int(_getenv_nonempty("USGS_CHANNEL_ID", _getenv_nonempty("QUAKE_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
+DIGEST_CHANNEL_ID    = int(_getenv_nonempty("DIGEST_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0")))
 
 # ===============================
 # USGS 地震情報設定
@@ -482,3 +483,46 @@ APM_SERVICE_NAME       = os.getenv("APM_SERVICE_NAME", "QTL_Bot")
 APM_MACKEREL_API_KEY   = os.getenv("APM_MACKEREL_API_KEY", "")
 APM_OTLP_ENDPOINT      = os.getenv("APM_OTLP_ENDPOINT", "https://otlp-vaxila.mackerelio.com/v1/traces")
 APM_OTLP_API_KEY_HEADER = os.getenv("APM_OTLP_API_KEY_HEADER", "Mackerel-Api-Key")
+
+# ===============================
+# 週間/月間ダイジェスト設定（2026-08〜）
+# ===============================
+# 定期的に「先週/先月の地震活動まとめ」Embedを自動投稿する機能。
+# 各Cogの累積受信カウント（SystemCog._merged_recv_count()）の
+# 前回ダイジェスト実行時からの差分を集計するため、Bot再起動を
+# 挟んでもカウントの二重計上・欠落は基本的に発生しない
+# （再起動でカウンタ自体が0にリセットされた場合のみ、その回の
+# ダイジェストは実態より少なく出ることがある。詳細は
+# cogs/system.py の digest_worker 参照）。
+DIGEST_ENABLED  = _env_bool("DIGEST_ENABLED", False)
+# "weekly" または "monthly"
+DIGEST_INTERVAL = os.getenv("DIGEST_INTERVAL", "weekly")
+# weekly時のみ使用。0=月曜, 1=火曜, ... 6=日曜（Python標準のdatetime.weekday()に準拠）
+DIGEST_WEEKDAY  = _env_int("DIGEST_WEEKDAY", 0)
+# 投稿時刻（24時間制、0〜23）。monthly時は毎月1日のこの時刻に投稿する
+DIGEST_HOUR     = _env_int("DIGEST_HOUR", 9)
+
+# ===============================
+# P2P地震感知情報（code=9611）設定（2026-08〜）
+# ===============================
+# JMA発表の公式情報ではなく、P2P地震情報が独自に「体感報告の集積」等から
+# 推定する非公式な速報値。信頼度（レベル1〜4）が低い場合は誤報の
+# 可能性があるため、閾値で通知を絞れるようにしている。
+JISHIN_KANCHI_ENABLE = _env_bool("JISHIN_KANCHI_ENABLE", False)
+JISHIN_KANCHI_CHANNEL_ID = int(_getenv_nonempty(
+    "JISHIN_KANCHI_CHANNEL_ID", _getenv_nonempty("QUAKE_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))
+))
+# 通知する最大レベル（数値が大きいほど信頼度が低い）。この値以下の
+# レベルのみ通知する。例: 2を指定するとレベル1・2のみ通知し、
+# レベル3・4（信頼度が低い）は抑制する。1〜4で指定（既定4=全レベル通知）。
+JISHIN_KANCHI_MAX_LEVEL = _env_int("JISHIN_KANCHI_MAX_LEVEL", 4)
+# 通知する最小件数（count）。ノイズ的な少数件の感知報告を抑制したい
+# 場合に引き上げる。
+JISHIN_KANCHI_MIN_COUNT = _env_int("JISHIN_KANCHI_MIN_COUNT", 1)
+# 音声読み上げ・効果音再生の有効化（AudioMixin経由）
+JISHIN_KANCHI_SPEECH_ENABLE = _env_bool("JISHIN_KANCHI_SPEECH_ENABLE", True)
+JISHIN_KANCHI_SOUND_ENABLE  = _env_bool("JISHIN_KANCHI_SOUND_ENABLE", True)
+# 再生する効果音ファイル名（mp3、Bot実行ディレクトリ直下に配置する想定。
+# 他の効果音と同じ参照方式）。既定はEEW系と同じvxse53.mp3を流用する
+# （専用音源が用意できるまでの暫定値）。
+JISHIN_KANCHI_SOUND_FILE = os.getenv("JISHIN_KANCHI_SOUND_FILE", "vxse53.mp3")
