@@ -34,6 +34,7 @@ AudioClientMixin経由で共有AudioCogに処理を委譲する。効果音フ�
 JISHIN_KANCHI_SOUND_FILE で設定可能（AudioCogのaudio_filesへ動的登録）。
 """
 import logging
+import time
 from datetime import datetime
 
 import discord
@@ -43,7 +44,8 @@ from core.config import (
     CHANNEL_ID, JISHIN_KANCHI_CHANNEL_ID, JISHIN_KANCHI_ENABLE,
     JISHIN_KANCHI_MAX_LEVEL, JISHIN_KANCHI_MIN_COUNT,
     JISHIN_KANCHI_SPEECH_ENABLE, JISHIN_KANCHI_SOUND_ENABLE,
-    JISHIN_KANCHI_SOUND_FILE,
+    JISHIN_KANCHI_SOUND_FILE, JISHIN_KANCHI_SPEECH_COUNT_STEP,
+    JISHIN_KANCHI_EVENT_STATE_TTL_SEC,
 )
 from core.audio import AudioClientMixin
 from core.p2p_image import P2PImageMixin
@@ -77,6 +79,24 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         # 明記されているため、将来的な追加抑制のフックとして
         # _last_started_at を保持だけしておく）。
         self._last_started_at: str | None = None
+
+        # 【2026-08-23 追加】音声読み上げ・効果音のイベント単位管理。
+        # キー: started_at（イベント識別子）
+        # 値: {"last_spoken_count": 直近に読み上げた時点のcount,
+        #      "last_seen_at": 最終更新時刻（time.monotonic()基準、TTL掃除用）}
+        #
+        # 設計の詳細は core.config.JISHIN_KANCHI_SPEECH_COUNT_STEP の
+        # コメント参照。要点:
+        #   - 効果音は「そのイベントを初めて見た（＝このdictにキーが
+        #     まだ無い）」ときの1回のみ再生する
+        #   - 読み上げは「count - last_spoken_count が
+        #     JISHIN_KANCHI_SPEECH_COUNT_STEP 以上」になるたびに行い、
+        #     読み上げた時点のcountをlast_spoken_countとして更新する
+        #   - 初回検知時は読み上げは行わない（効果音が初報の役割を
+        #     果たすため）。ただしlast_spoken_countは初回のcountで
+        #     初期化しておくことで、次に+50件されたときに正しく
+        #     トリガーされるようにする
+        self._event_states: dict[str, dict] = {}
 
         self._last_recv: dict[str, datetime | None] = {"jishin_kanchi": None}
         self._recv_count: dict[str, int] = {"jishin_kanchi": 0}
@@ -132,6 +152,62 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         except Exception:
             import traceback
             logger.error(f"地震感知情報 処理エラー:\n{traceback.format_exc()}")
+
+    # ===============================
+    # イベント単位の音声読み上げ・効果音制御（2026-08-23追加）
+    # ===============================
+    def _prune_stale_event_states(self, now: float) -> None:
+        """
+        JISHIN_KANCHI_EVENT_STATE_TTL_SEC 秒以上更新の無いイベント状態を
+        削除する（メモリの際限ない増加を防ぐための単純なTTL掃除）。
+        """
+        cutoff = now - JISHIN_KANCHI_EVENT_STATE_TTL_SEC
+        stale_keys = [
+            k for k, v in self._event_states.items()
+            if v["last_seen_at"] < cutoff
+        ]
+        for k in stale_keys:
+            del self._event_states[k]
+
+    def _judge_audio_triggers(self, event_key: str, count: int) -> tuple[bool, bool]:
+        """
+        与えられたイベント（started_atベース）・現在の件数(count)から、
+        (効果音を鳴らすべきか, 音声読み上げをすべきか) のタプルを返す。
+
+        ルール（core.config.JISHIN_KANCHI_SPEECH_COUNT_STEP のコメントも参照）:
+          - 初めて見るイベント（_event_states に未登録）
+            → 効果音: 鳴らす（EEW第一報の効果音と同じ位置づけ）
+            → 読み上げ: しない（このタイミングでのcountをベースラインとして記録）
+          - 既知のイベントの更新
+            → 効果音: 鳴らさない
+            → 読み上げ: 前回読み上げ時点からのcount増加分が
+              JISHIN_KANCHI_SPEECH_COUNT_STEP 以上なら行う
+
+        呼び出しのたびに self._event_states を更新する副作用を持つ
+        （TTL掃除も合わせて行う）。
+        """
+        now = time.monotonic()
+        self._prune_stale_event_states(now)
+
+        state = self._event_states.get(event_key)
+
+        if state is None:
+            # 新規イベント: 効果音のみ、読み上げの基準countを記録
+            self._event_states[event_key] = {
+                "last_spoken_count": count,
+                "last_seen_at": now,
+            }
+            return True, False
+
+        state["last_seen_at"] = now
+        should_play_sound = False
+
+        delta = count - state["last_spoken_count"]
+        should_speak = delta >= JISHIN_KANCHI_SPEECH_COUNT_STEP
+        if should_speak:
+            state["last_spoken_count"] = count
+
+        return should_play_sound, should_speak
 
     # ===============================
     # 通知本体
@@ -229,13 +305,25 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             if image_id:
                 self.bot.loop.create_task(self._attach_p2p_image(sent_msg, image_id))
 
-            # ── 音声読み上げ ──
-            if JISHIN_KANCHI_SPEECH_ENABLE and not is_test:
+            # ── イベント単位の音声トリガー判定 ──
+            # started_atをイベント識別子として使い、EEWのEventIDに相当する
+            # 単位で「効果音は初回のみ」「読み上げは+50件ごと」に間引く
+            # （詳細ロジックは _judge_audio_triggers のdocstring参照）。
+            # is_test時はテスト通知のたびにイベント状態が汚染されないよう
+            # 判定自体を呼ばない（常にFalse扱いとする）。
+            if not is_test:
+                event_key = data.get("started_at") or started_at
+                should_play_sound, should_speak = self._judge_audio_triggers(event_key, count)
+            else:
+                should_play_sound, should_speak = False, False
+
+            # ── 音声読み上げ（+50件ごとの節目でのみ） ──
+            if JISHIN_KANCHI_SPEECH_ENABLE and should_speak:
                 speak_text = f"地震感知情報。信頼度{level_label.split('（')[0]}。{count}件の感知報告があります。"
                 await self.speak_local(speak_text, priority=2)
 
-            # ── 効果音再生 ──
-            if JISHIN_KANCHI_SOUND_ENABLE and not is_test:
+            # ── 効果音再生（イベント初検知時のみ、EEW第一報相当） ──
+            if JISHIN_KANCHI_SOUND_ENABLE and should_play_sound:
                 await self.play_mp3(_SOUND_KEY)
 
         except Exception:
