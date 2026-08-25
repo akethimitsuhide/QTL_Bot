@@ -57,7 +57,7 @@ _CONFIDENCE_MATCH_EPSILON = 1e-5
 # 近い値（浮動小数点の丸め誤差等）も非表示扱いにする。
 _CONFIDENCE_HIDDEN_THRESHOLD = 0.01
 
-# レベル番号 → 表示ラベル（仕様書のユーザー指定表記そのまま）。
+# レベル番号 → 表示ラベル（独自）。
 LEVEL_LABELS: dict[int, str] = {
     1: "レベル1（低い）",
     2: "レベル2（やや低い）",
