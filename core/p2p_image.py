@@ -92,9 +92,30 @@ import logging
 import aiohttp
 import discord
 
-from core.config import P2P_IMAGE_ATTACH_ENABLED
+from core.config import P2P_IMAGE_ATTACH_ENABLED, P2P_IMAGE_CDN_CONCURRENCY
 
 logger = logging.getLogger("QTLBot")
+
+# P2P地震情報CDN（cdn.p2pquake.net）への同時アクセス数を、
+# QuakeInfoCog/TsunamiCog/EewCog/JishinKanchiCog等、P2PImageMixinを
+# 使う全Cogを横断して制限する共有セマフォ。
+#
+# 【2026-08-23 追加の経緯】
+# 大規模地震で短時間に複数のP2P地震情報レポート（震度速報→各地の
+# 震度に関する情報等）が連続発表されると、それぞれが独立した
+# _attach_p2p_image タスクとして並行実行され、同一CDNへ同時多発的に
+# リクエストが飛ぶ。この自己誘発的な負荷集中がCDN側のレート制限や
+# 過負荷を招き、「地図画像の埋め込みが軒並み失敗する」不具合の
+# 実害（実際のログで5件中3件が20回リトライ後も失敗、残り2件も
+# 15〜17回目でようやく成功）につながっていた。
+#
+# セマフォは「実際にCDNへHTTPリクエストを送っている瞬間」だけを
+# 制限する設計とする（各タスクの6秒間隔でのsleep中はセマフォを
+# 保持しない）。ポーリングのライフサイクル全体（最大2分）を1つの
+# タスクが占有し続けると、後続のタスクが長時間ブロックされてしまう
+# ため、実際の通信区間のみを絞ることで、CDN側の瞬間的な同時リクエスト
+# 数を減らしつつ、各タスクの2分間のリトライ猶予自体は維持する。
+_cdn_semaphore = asyncio.Semaphore(P2P_IMAGE_CDN_CONCURRENCY)
 
 # PNGファイルのマジックバイト（シグネチャ、先頭8バイト固定）。
 # CDNが返すレスポンスボディがこれで始まっていない場合、
@@ -209,17 +230,21 @@ class P2PImageMixin:
         for attempt in range(MAX_RETRY):
             await asyncio.sleep(INTERVAL)
             try:
-                async with self.session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug(
-                            f"P2P画像まだなし: HTTP {resp.status} "
-                            f"attempt={attempt+1}/{MAX_RETRY}"
-                        )
-                        continue
-                    body = await resp.read()
+                # CDNへの実リクエスト区間のみをセマフォで保護する
+                # （sleep中は保持しない。理由はモジュール冒頭の
+                # _cdn_semaphore のコメント参照）。
+                async with _cdn_semaphore:
+                    async with self.session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.debug(
+                                f"P2P画像まだなし: HTTP {resp.status} "
+                                f"attempt={attempt+1}/{MAX_RETRY}"
+                            )
+                            continue
+                        body = await resp.read()
 
                 if not self._is_valid_image_response(body):
                     logger.debug(

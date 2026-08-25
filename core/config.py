@@ -467,6 +467,22 @@ P2P_API   = "https://api.p2pquake.net/v2/history"
 # （Bot側でのリトライ・embed編集は行わない）。
 P2P_IMAGE_ATTACH_ENABLED = _env_bool("P2P_IMAGE_ATTACH_ENABLED", True)
 
+# P2P地震情報CDN（cdn.p2pquake.net）への同時アクセス数の上限。
+# QuakeInfoCog/TsunamiCog/EewCog/JishinKanchiCog等、core.p2p_image.
+# P2PImageMixin を使う全Cogを横断した共有の同時実行数制限として使う
+# （core/p2p_image.py 側でモジュールレベルの asyncio.Semaphore を
+# この値で生成する）。
+#
+# 【2026-08-23 追加の経緯】
+# 大規模地震（震度5弱、茨城県南部の地震）発生時、震度速報→各地の
+# 震度に関する情報等、短時間に複数のP2P地震情報レポートが連続発表
+# され、それぞれが独立した画像添付タスクとして並行実行された結果、
+# 同一CDNへの同時多発的なリクエストが実際に発生し、5件中3件が
+# 20回リトライ後も失敗、残り2件も15〜17回目でようやく成功（約90〜
+# 100秒要した）という実害を確認した。同時実行数を制限することで
+# CDNへの負荷を平準化し、個々のリクエストの成功率を上げる狙い。
+P2P_IMAGE_CDN_CONCURRENCY = _env_int("P2P_IMAGE_CDN_CONCURRENCY", 3)
+
 # ===============================
 # APM (Application Performance Monitoring) 設定
 # ===============================
@@ -526,3 +542,28 @@ JISHIN_KANCHI_SOUND_ENABLE  = _env_bool("JISHIN_KANCHI_SOUND_ENABLE", True)
 # 他の効果音と同じ参照方式）。既定はEEW系と同じvxse53.mp3を流用する
 # （専用音源が用意できるまでの暫定値）。
 JISHIN_KANCHI_SOUND_FILE = os.getenv("JISHIN_KANCHI_SOUND_FILE", "vxse53.mp3")
+
+# 【2026-08-23 追加】音声読み上げ・効果音のイベント単位管理。
+#
+# 地震感知情報（code=9611）は同一イベント（started_atで識別される
+# 一連の観測）について、件数(count)が増えるたびに何度も更新
+# メッセージが配信される。これに対して単純に毎回音声読み上げ・
+# 効果音を鳴らすと、実運用で「ずっと読み上げや音声再生が続いて
+# うるさい」という実害が確認された。
+#
+# EEWがEventIDで同一イベントの複数報を管理するのに倣い、
+# started_at（仕様上「イベントを一意に識別するキー」と明記）を
+# イベント識別子として使い、以下のように鳴らす頻度を制限する:
+#   - 効果音（play_mp3）: そのイベントを初めて検知したとき（＝EEWの
+#     第一報での効果音と同じ位置づけ）の1回のみ
+#   - 音声読み上げ（speak_local）: 前回読み上げた時点からcountが
+#     JISHIN_KANCHI_SPEECH_COUNT_STEP件以上増えるたびに1回
+#     （初回検知時点では読み上げない。効果音が既に初報の役割を
+#     果たすため、テキストの読み上げは「大きな進展があったとき」
+#     に限定する）
+JISHIN_KANCHI_SPEECH_COUNT_STEP = _env_int("JISHIN_KANCHI_SPEECH_COUNT_STEP", 50)
+
+# イベント状態（次に読み上げる件数のしきい値等）を保持しておく期限。
+# この秒数以上更新が無いイベントは、内部状態から削除する
+# （メモリの際限ない増加を防ぐための単純なTTLベースの掃除）。
+JISHIN_KANCHI_EVENT_STATE_TTL_SEC = _env_int("JISHIN_KANCHI_EVENT_STATE_TTL_SEC", 3600)
