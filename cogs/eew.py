@@ -84,12 +84,28 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self.session: aiohttp.ClientSession | None = None
         self.headers = {"Accept-Encoding": "identity"}
 
-        # EventIDごとに、これまでに処理した最大Serialを記録する。
-        # Wolfx・P2P地震情報の両方が同一EventIDのEEWを別々のWebSocketから
-        # ほぼ同時に配信してくることがあり、片方にしかこのガードが無いと
-        # 「既に処理済みの初報を、もう片方がまた初報として処理し直し
-        # 矛盾する震度の読み上げが二重に生成される」不具合が起きる。
-        self.eew_max_serial_seen: dict[str, int] = {}
+        # ソースごと（wolfx / p2p_eew）に、EventIDごとの最大Serialを
+        # 個別に記録する。あくまで「同一ソースからの重複/逆行メッセージ」
+        # を弾くための管理であり、ソースをまたいだ重複排除には使わない。
+        #
+        # 【2026-08-23 修正の経緯】
+        # 以前はソースをまたいだ単一の辞書 {event_id: max_serial} を
+        # Wolfx・P2P両方のハンドラで共有していた。これは「同じEventIDの
+        # EEWを両ソースがほぼ同時に配信してきた場合の二重通知防止」を
+        # 意図した設計だったが、実際にはWolfxとP2P地震情報は同一の
+        # EventIDに対して独立にSerial番号を採番しており、両者の値は
+        # 対応しない（例: 実際の茨城県南部の地震で、Wolfx側がSerial=2に
+        # 進んだ直後にP2P側のSerial=1が届いたところ、共有辞書の
+        # 「既知の最大Serial=2」より小さいとみなされ「重複/逆行」として
+        # 弾かれてしまい、以降そのイベントのP2P EEWが一切通知されなく
+        # なるという実害が発生した）。
+        #
+        # ソースごとに辞書を分離することで、各ソース内部での重複/逆行
+        # メッセージの抑制（本来の目的）は維持しつつ、一方のソースの
+        # 採番が他方の処理を誤って抑制する問題を解消する。
+        self.eew_max_serial_seen: dict[str, dict[str, int]] = {
+            "wolfx": {}, "p2p_eew": {},
+        }
         self.recent_eews: dict = {}
         self.recent_eews_max_size = 50
         self.last_eew_data = None
@@ -202,13 +218,14 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                     self._last_recv["wolfx"] = self._wolfx_last_recv
                     self._recv_count["wolfx"] += 1
                     logger.info(f"EEW 検知: EventID={event_id} Serial={serial} → 通知")
-                    if serial > self.eew_max_serial_seen.get(event_id, 0):
-                        self.eew_max_serial_seen[event_id] = serial
+                    wolfx_seen = self.eew_max_serial_seen["wolfx"]
+                    if serial > wolfx_seen.get(event_id, 0):
+                        wolfx_seen[event_id] = serial
                         await self.notify_eew(data, source="wolfx")
                     else:
                         logger.debug(
                             f"EEW 重複/逆行のためスキップ: EventID={event_id} "
-                            f"Serial={serial} (既知の最大Serial={self.eew_max_serial_seen.get(event_id, 0)})"
+                            f"Serial={serial} (既知の最大Serial={wolfx_seen.get(event_id, 0)})"
                         )
                 except Exception:
                     logger.error(f"EEW 処理エラー:\n{traceback.format_exc()}")
@@ -243,13 +260,14 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             self._last_recv["p2p_eew"] = datetime.now()
             self._recv_count["p2p_eew"] += 1
             logger.info(f"P2P EEW 検知: EventID={event_id} Serial={serial}")
-            if serial > self.eew_max_serial_seen.get(event_id, 0):
-                self.eew_max_serial_seen[event_id] = serial
+            p2p_seen = self.eew_max_serial_seen["p2p_eew"]
+            if serial > p2p_seen.get(event_id, 0):
+                p2p_seen[event_id] = serial
                 await self.notify_eew(wolfx_data, source="p2p_eew")
             else:
                 logger.debug(
                     f"P2P EEW 重複/逆行のためスキップ: EventID={event_id} "
-                    f"Serial={serial} (既知の最大Serial={self.eew_max_serial_seen.get(event_id, 0)})"
+                    f"Serial={serial} (既知の最大Serial={p2p_seen.get(event_id, 0)})"
                 )
         except Exception:
             logger.error(f"P2P EEW メッセージ処理エラー:\n{traceback.format_exc()}")
