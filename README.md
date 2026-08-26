@@ -12,7 +12,7 @@
   - 音声読み上げ対応（AquesTalkPi）
   - 警報対象の府県予報区数（`region_map.json` 変換後）が `EEW_REGION_COLLAPSE_THRESHOLD`（デフォルト10）件以上の場合、`pref_region_map.json` でさらに地方予報区名へ集約して通知・読み上げる（例:「北海道道南,北海道道央,...,千葉」14件 → 「北海道,東北,関東」）
 - **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報の WebSocket から警報のみを常時受信
-  - Wolfx と同時並行稼働（EventID による重複排除あり）
+  - Wolfx と同時並行稼働。EventIDごとの最大Serial番号を管理し、同一ソース内での重複/逆行メッセージを排除する（Wolfx・P2Pそれぞれ独立に管理しており、互いの処理状況が他方の通知を抑制することはない。詳細は「EEWの重複排除について」参照）
   - 地図画像: P2Pメッセージの `id` から地震情報通知と同じ生成方法で地図画像URLを組み立て、Embed最下部に添付する（Wolfx由来のEEWには画像IDが存在しないため対象外。2026-08-19追加）
 - **地震情報**: P2P 地震情報の API からの確報情報
   - 震度速報（`ScalePrompt`）: 読み上げは `prefecture_map.json` で区域名を都道府県名に変換し、重複を排除して発表（例:「熊本県天草・芦北」「熊本県熊本」→「熊本県」1回のみ）。通知本文の津波記述の下に区域別の震度一覧（■ 震度○ + 区域名）を追記
@@ -20,6 +20,10 @@
   - 各地の震度に関する情報（`ScaleAndDestination` / `DetailScale`）: 最大震度3以上の場合、読み上げに最大震度を観測した地点名を追加。最大震度〜1階級下までの観測点一覧を追記（震度46＝推定5弱以上は45と同階級として扱う）。1階級下の観測点数が `QUAKE_INTENSITY_COLLAPSE_THRESHOLD`（デフォルト10）件以上の場合、通知文の肥大化を防ぐため都道府県ごとに1地点だけを代表として表示し「（以下略）」を付ける
   - 地図画像: メッセージ送信後にバックグラウンドで P2P 地震情報 CDN をポーリングし、画像が実際に取得可能になった時点で Embed に画像を追加（詳細は下記「P2P 地図画像の添付」参照）
   - 津波の有無（`domesticTsunami`）の表記: P2P 地震情報の `domesticTsunami` は速報段階の推定値であり、`Warning` が返っても実際に気象庁から「津波警報」が正式発表されているとは限らない。誤解を招く断定的な表記を避けるため、`Watch`・`Warning` は通知本文で「津波警報・注意報を発表中」、読み上げで「現在、津波予報等を発表中です。」とまとめて表現する。`NonEffective` は通知「若干の海面変動（被害の心配なし）」、読み上げ「この地震で、若干の海面変動があるかもしれませんが、被害の心配はありません。」。`None` は読み上げで「この地震による津波の心配はありません。」を明示的に付加する（`MajorWarning` は従来通り「大津波警報」）
+
+### EEWの重複排除について
+- Wolfx・P2P地震情報それぞれについて、EventIDごとの最大Serial番号を独立に管理し、同一ソースからの重複/逆行メッセージ（既に処理済みのSerial以下の再送）のみをスキップする（`EewCog.eew_max_serial_seen`、ソースごとに別々の辞書で管理）
+- **2026-08-23修正**: 以前はこの管理をWolfx・P2Pで単一の辞書として共有しており、「同一EventIDのEEWを両ソースがほぼ同時に配信してきた場合の二重通知防止」を意図していた。しかし実際にはWolfxとP2P地震情報は同一EventIDに対して独立にSerial番号を採番しており両者の値は対応しないため、一方のソースが先に高いSerial番号を処理すると、もう一方のソースの正当な更新（低いSerial番号）が誤って「重複/逆行」とみなされ、通知が欠落する不具合があった（実際の茨城県南部の地震で発生を確認）。ソースごとに辞書を分離し、この誤抑制を解消した
 
 ### EWS（緊急警報放送）信号音
 - 津波警報・大津波警報（`domesticTsunami` が `Warning` または `MajorWarning`。津波注意報・津波予報は対象外）が発表・更新された P2P 地震情報を受信した際に、昭和60年郵政省告示第405号に準拠した AFSK 方式の緊急警報信号音（第二種開始信号）を生成・再生する
@@ -35,11 +39,16 @@
 - 地図画像はP2P地震情報通知と同じ生成方法（`id` から `cdn.p2pquake.net/app/images/{id}_trim_big.png`）でEmbed最下部に添付
 - `JISHIN_KANCHI_MAX_LEVEL`（通知する最大レベル）・`JISHIN_KANCHI_MIN_COUNT`（通知する最小件数）で閾値フィルタリング可能
 - 音声読み上げ（`JISHIN_KANCHI_SPEECH_ENABLE`）・効果音再生（`JISHIN_KANCHI_SOUND_ENABLE`、ファイル名は `JISHIN_KANCHI_SOUND_FILE` で変更可能）をそれぞれ個別に無効化可能
+- **音声トリガーの間引き（2026-08-23追加）**: 同一イベント（`started_at` で識別。EEWのEventIDに相当）について更新が届くたびに音声読み上げ・効果音が毎回鳴ると煩わしいため、以下のルールで間引く（テキスト通知＝Embed自体は従来通り毎回送信される）
+  - 効果音: そのイベントを初めて検知したとき（EEWの第一報相当）の1回のみ再生
+  - 音声読み上げ: 前回読み上げ時点からの件数（`count`）増加が `JISHIN_KANCHI_SPEECH_COUNT_STEP`（デフォルト50件）以上になるたびに実行（節目ごとのアナウンス）
+  - イベント単位の管理状態は `JISHIN_KANCHI_EVENT_STATE_TTL_SEC`（デフォルト3600秒）以上更新がなければ自動的に破棄される
 
 ### P2P 地図画像の添付
-- 地震情報・津波情報の通知には、P2P 地震情報 CDN が生成する震源地図画像を Embed に添付する（`core/p2p_image.py` の `P2PImageMixin`。`QuakeInfoCog` / `TsunamiCog` が多重継承）
+- 地震情報・津波情報・EEW（P2P由来）・地震感知情報の通知には、P2P 地震情報 CDN が生成する震源地図画像を Embed に添付する（`core/p2p_image.py` の `P2PImageMixin`。`QuakeInfoCog` / `TsunamiCog` / `EewCog` / `JishinKanchiCog` が多重継承）
 - CDN 側の画像生成には数秒〜数十秒のタイムラグがあるため、通知メッセージ送信後にバックグラウンドで最大約2分間（20回 × 6秒間隔）ポーリングし、画像が実際に利用可能になった時点でメッセージを編集して画像を追加する
 - 判定は HTTP ステータス 200 だけでなく、レスポンスボディが完成した PNG ファイルとして妥当か（先頭のマジックバイト `\x89PNG\r\n\x1a\n` と、末尾の IEND チャンク `\x00\x00\x00\x00IEND...` の両方）まで検証し、CDN が「200 は返すが実体はまだ書き込み中」の状態を誤って成功と判定しないようにしている（2026-08-19: 判定基準を「ファイルサイズが `MIN_VALID_IMAGE_BYTES` 以上か」から「PNG構造として完結しているか」に変更。震度分布を持たない「震源に関する情報」の地図画像は内容がシンプルで正当に軽量になり、旧・サイズ閾値では常に「生成中」と誤判定され地図画像が一切表示されない不具合があったため）
+- **CDNへの同時アクセス制限（2026-08-23追加）**: 大規模地震で短時間に複数のP2P地震情報レポート（震度速報→各地の震度に関する情報等）が連続発表されると、それぞれが独立した画像添付タスクとして並行実行され、同一CDNへの同時多発リクエストにより成功率が大幅に低下する不具合を確認した（実際の震度5弱の地震で5件中3件が失敗、成功した2件も90〜100秒要した事例あり）。`P2PImageMixin` を使う全Cogを横断したモジュールレベルの `asyncio.Semaphore` でCDNへの同時アクセス数を制限し（`P2P_IMAGE_CDN_CONCURRENCY`、デフォルト3）、成功率を改善している。セマフォは実際のHTTPリクエスト送信中のみ確保し、リトライ間の待機（6秒）中は保持しない
 - `P2P_IMAGE_ATTACH_ENABLED=false` にすると、この画像添付処理（CDN ポーリング）自体を無効化し、通知本文に画像 URL をテキストとして含める簡易方式に切り替わる（Discord のリンクプレビュー機能により自動展開。原因切り分け用）
 
 ### 津波情報
@@ -195,6 +204,7 @@ python bot.py
 | `TSUNAMI_CHANNEL_ID` | | CHANNEL_ID | 津波警報専用チャンネル |
 | `VOLCANO_CHANNEL_ID` | | CHANNEL_ID | 火山情報専用チャンネル |
 | `USGS_CHANNEL_ID` | | QUAKE_CHANNEL_ID | USGS 通知専用チャンネル |
+| `JISHIN_KANCHI_CHANNEL_ID` | | QUAKE_CHANNEL_ID | 地震感知情報専用チャンネル |
 | `OTHER_CHANNEL_ID` | | CHANNEL_ID | その他情報（長周期地震動等） |
 | `KYOSHIN_CHANNEL_ID` | | OTHER_CHANNEL_ID | 強震モニタ専用チャンネル |
 | `ADMIN_CHANNEL_ID` | | 0（無効） | エラー通知用管理者チャンネル |
@@ -244,17 +254,19 @@ python bot.py
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `P2P_IMAGE_ATTACH_ENABLED` | true | P2P 地震情報の地図画像を Embed に添付するか。`false` で CDN ポーリングを無効化し、本文への画像 URL テキスト追記方式にフォールバック（詳細は「P2P 地図画像の添付」参照） |
+| `P2P_IMAGE_CDN_CONCURRENCY` | 3 | CDN（cdn.p2pquake.net）への同時アクセス数の上限。`P2PImageMixin` を使う全Cog（QuakeInfoCog/TsunamiCog/EewCog/JishinKanchiCog）を横断して共有制限する |
 
 ### P2P 地震感知情報設定
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `JISHIN_KANCHI_ENABLE` | false | 地震感知情報（code=9611）通知の有効化 |
-| `JISHIN_KANCHI_CHANNEL_ID` | QUAKE_CHANNEL_ID（未設定時はCHANNEL_ID） | 地震感知情報専用チャンネル |
 | `JISHIN_KANCHI_MAX_LEVEL` | 4 | 通知する最大レベル（1〜4、数値が大きいほど信頼度が低い）。この値以下のレベルのみ通知する |
 | `JISHIN_KANCHI_MIN_COUNT` | 1 | 通知する最小件数（`count`）。これ未満は通知しない |
 | `JISHIN_KANCHI_SPEECH_ENABLE` | true | 音声読み上げの有効化 |
 | `JISHIN_KANCHI_SOUND_ENABLE` | true | 効果音再生の有効化 |
 | `JISHIN_KANCHI_SOUND_FILE` | vxse53.mp3 | 再生する効果音ファイル名（Bot実行ディレクトリ直下に配置） |
+| `JISHIN_KANCHI_SPEECH_COUNT_STEP` | 50 | 音声読み上げの間引き閾値。前回読み上げ時点からの件数増加がこの値以上になるたびに読み上げる |
+| `JISHIN_KANCHI_EVENT_STATE_TTL_SEC` | 3600 | イベント単位の音声トリガー管理状態を、最終更新からこの秒数以上経過したら破棄する |
 
 ### 週間/月間ダイジェスト設定
 | 変数名 | 既定値 | 説明 |
@@ -949,5 +961,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-21（配信成功率可視化・週間/月間ダイジェスト・EEW地図画像対応・P2P地震感知情報対応を追加）
+**最終更新**: 2026-08-23（EEWのWolfx/P2P間誤重複防止を修正・P2P地図画像のCDN同時アクセス対策・地震感知情報の音声連打対策・.env.example記載整理）
 **対応 Python**: 3.11+
