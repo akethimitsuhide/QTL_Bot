@@ -25,7 +25,6 @@ close_scratchtts_session() を呼び出して明示的にクローズするこ�
 """
 import asyncio
 import logging
-import math
 import urllib.parse
 import wave
 import io

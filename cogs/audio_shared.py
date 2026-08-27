@@ -30,17 +30,12 @@ tsunami.py / volcano.py / usgs.py / other.py は引き続き従来の AudioMixin
     audio_files                    : キー→ファイル名の対応表
       （EEW用・地震情報用の両方のキーをここに統合する）
 """
-import os
-import time
 import asyncio
 import logging
 
 from discord.ext import commands
 
-from core.config import (
-    AQUESTALK_PATH, AQUESTALK_SPEED, AUDIO_PLAYER,
-    SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
-)
+from core.config import SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE
 from core.audio import AudioMixin
 
 logger = logging.getLogger("QTLBot")

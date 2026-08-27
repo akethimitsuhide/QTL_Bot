@@ -301,7 +301,12 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                 record_notification("地震感知情報", title, f"信頼度{level_label}・{count}件")
 
             # ── 地図画像（地震情報通知と同じ生成方法） ──
-            image_id = data.get("id")
+            # 【2026-08-27 修正】地震感知情報（code=9611）では、地図画像の
+            # 取得には "id" ではなく "_id" フィールドを使う必要があることが
+            # 実機ログで判明した（quake/tsunami の code=551/552 とはキーの
+            # 優先順位が逆）。まず "_id" を優先し、無ければ "id" にフォール
+            # バックする防御的な実装にしておく。
+            image_id = data.get("_id") or data.get("id")
             if image_id:
                 self.bot.loop.create_task(self._attach_p2p_image(sent_msg, image_id))
 

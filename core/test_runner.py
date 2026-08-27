@@ -389,7 +389,7 @@ async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path
     try:
         await method(**kwargs)
         print(f"[TEST] 完了しました（{cog_key}）。Discordの該当チャンネルで通知内容を確認してください。")
-        print(f"[TEST]   （タイトル先頭の「【テスト】」表記・フッターの「※これはテスト通知です。」で識別できます）")
+        print("[TEST]   （タイトル先頭の「【テスト】」表記・フッターの「※これはテスト通知です。」で識別できます）")
         logger.warning(f"★★★ CLIテスト完了 ★★★ 対象: {cog_key}")
         return True
     except Exception as e:

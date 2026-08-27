@@ -47,10 +47,7 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
-from core.helpers import (
-    safe_int, safe_float, safe_bool,
-    truncate_embed_description, format_jma_time,
-)
+from core.helpers import format_jma_time
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -226,7 +223,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
                 self._quake_advisory_initialized = True
 
-        except Exception as e:
+        except Exception:
             logger.error(f"Fetch Quake Advisory エラー:\n{traceback.format_exc()}")
 
 

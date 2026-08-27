@@ -107,8 +107,6 @@ def _align_logfiles_on_startup(base: str, backup_count: int) -> None:
 
 def setup_logging() -> None:
     """ロギングハンドラーをセットアップする（ローテーション対応 + ログ肥大化対策）。"""
-    global logger
-
     # 起動時: mtime が最新のログファイルを qtlbot.log に持ってきてから handler を生成
     _align_logfiles_on_startup("qtlbot.log", LOG_BACKUP_COUNT)
 

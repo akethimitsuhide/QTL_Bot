@@ -58,10 +58,7 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
-from core.helpers import (
-    safe_int, safe_float, safe_bool,
-    truncate_embed_description, format_jma_time,
-)
+from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
 from core.p2p_image import P2PImageMixin
 from core.notification_log import record_notification

@@ -48,10 +48,6 @@ from core.config import (
     FETCH_FAILURE_THRESHOLD, FETCH_BACKOFF_SECONDS,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
-from core.helpers import (
-    safe_int, safe_float, safe_bool,
-    truncate_embed_description, format_jma_time,
-)
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery

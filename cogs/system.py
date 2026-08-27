@@ -34,12 +34,11 @@ import time
 import socket
 import logging
 import asyncio
-import traceback
 from datetime import datetime, timedelta
 from collections import deque
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import aiohttp
 
 from core.config import (
@@ -64,6 +63,16 @@ from core.delivery_stats import get_delivery_stats
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
+
+# 【2026-08-27 修正】以前はこの変数を on_ready() 内で
+# os.getenv("WEB_DASHBOARD_ENABLED", "true") として直接読み込んでおり、
+# .env.example に明記されているデフォルト値「false」と実際のコードの
+# デフォルト値「true」が食い違っていた。そのため .env に
+# WEB_DASHBOARD_ENABLED を書き忘れると、ドキュメント上は無効なはずの
+# Web Dashboard が意図せず起動しポートを待ち受けてしまう不具合があった。
+# 他の WEB_DASHBOARD_* 設定と同様にモジュールレベル定数へ揃え、
+# ドキュメント通り既定値を false に修正した。
+WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "false").strip().lower() == "true"
 
 WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
 
@@ -559,7 +568,7 @@ class SystemCog(commands.Cog):
             cog_names = list(self.bot.cogs.keys())
             embed = discord.Embed(
                 title="QTL_Bot 起動完了",
-                description=f"Bot が起動し、稼働を開始しました。",
+                description="Bot が起動し、稼働を開始しました。",
                 color=discord.Color.green(),
                 timestamp=datetime.now(),
             )
@@ -1504,7 +1513,6 @@ class SystemCog(commands.Cog):
                     mem_mb = metrics["memory_mb"]
                     disk_info = metrics["disk"]
 
-                    last_recv = self._eew_attr("_last_recv", {}) or {}
                     recv_count = self._merged_recv_count()
                     p2p_hub_stats = self._p2p_hub_stats()
                     p2p_recv = p2p_hub_stats.get("recv_count", {}) if p2p_hub_stats else {}

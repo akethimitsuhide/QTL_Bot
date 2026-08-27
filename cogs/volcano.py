@@ -24,10 +24,9 @@ cogs/volcano.py
   （Step4以降、usgs.py 切り出し時に類似パターンが増えたら検討）。
 """
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import aiohttp
 import asyncio
-import traceback
 from datetime import datetime
 import logging
 
@@ -35,10 +34,7 @@ from core.config import (
     CHANNEL_ID, VOLCANO_CHANNEL_ID,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
-from core.helpers import (
-    safe_int, safe_float, safe_bool,
-    truncate_embed_description, format_jma_time,
-)
+from core.helpers import format_jma_time
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery

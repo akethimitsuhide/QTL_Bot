@@ -23,7 +23,6 @@ discord.py の bot.add_cog() は逐次 await されるため、bot.py で
 """
 import logging
 
-import discord
 from discord.ext import commands
 
 from core.config import APM_ENABLED

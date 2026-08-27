@@ -36,7 +36,7 @@
 - P2P 地震情報が code=9611 で配信する「地震感知情報」（JMA発表の公式情報ではなく、P2P地震情報が独自に推定する速報値）を受信・通知する（`JishinKanchiCog`。デフォルト無効、`JISHIN_KANCHI_ENABLE=true` で有効化）
 - 全体の信頼度（`confidence`）をレベル1〜4（数値が大きいほど信頼度が低い）に変換して表示。レベルの判定は範囲ではなく既知の定数値との最近傍マッチングで行う（詳細は `core/jishin_kanchi_convert.py`）
 - 地域ごとの信頼度（A〜F、Aが最高）でグルーピングし、信頼度が高い順に地域名・件数を一覧表示。地域コード→地域名の変換には `epsp_area.csv`（[p2pquake/epsp-specifications](https://github.com/p2pquake/epsp-specifications) 配布の `epsp-area.csv` を同梱）を使用
-- 地図画像はP2P地震情報通知と同じ生成方法（`id` から `cdn.p2pquake.net/app/images/{id}_trim_big.png`）でEmbed最下部に添付
+- 地図画像はP2P地震情報通知と同じ生成方法（`cdn.p2pquake.net/app/images/{id}_trim_big.png`）でEmbed最下部に添付。地震感知情報（code=9611）は quake/tsunami（code=551/552）と異なり、画像IDには `id` ではなく `_id` フィールドの値を使う必要があることが実機ログで判明したため、`_id` を優先し `id` にフォールバックする実装に修正した（2026-08-27）
 - `JISHIN_KANCHI_MAX_LEVEL`（通知する最大レベル）・`JISHIN_KANCHI_MIN_COUNT`（通知する最小件数）で閾値フィルタリング可能
 - 音声読み上げ（`JISHIN_KANCHI_SPEECH_ENABLE`）・効果音再生（`JISHIN_KANCHI_SOUND_ENABLE`、ファイル名は `JISHIN_KANCHI_SOUND_FILE` で変更可能）をそれぞれ個別に無効化可能
 - **音声トリガーの間引き（2026-08-23追加）**: 同一イベント（`started_at` で識別。EEWのEventIDに相当）について更新が届くたびに音声読み上げ・効果音が毎回鳴ると煩わしいため、以下のルールで間引く（テキスト通知＝Embed自体は従来通り毎回送信される）
@@ -353,6 +353,8 @@ python bot.py
 | `STATUS_HISTORY_MAXLEN` | 288 | 保持するスナップショットの最大件数（古いものから自動破棄。デフォルトは300秒間隔で24時間分） |
 
 `WEB_DASHBOARD_HOST=0.0.0.0` にする場合は、`WEB_DASHBOARD_ALLOWED_IPS` で許可するIPを明示的に絞ることを強く推奨する（未設定のまま `0.0.0.0` にすると、ネットワーク環境によっては外部から誰でも `/status` 等にアクセスできる状態になる）。
+
+**【2026-08-27 修正】** `cogs/system.py` 側の実装で `WEB_DASHBOARD_ENABLED` 未設定時のデフォルト値が `true` になっており、上表のドキュメント上のデフォルト（`false`）と食い違っていた。`.env` に `WEB_DASHBOARD_ENABLED` を書き忘れると、意図せず Web Dashboard が起動しポートを待ち受けてしまう不具合だったため、コード側をドキュメント通り `false` に修正した。
 
 ### ステータス表示設定
 | 変数名 | 既定値 | 説明 |
@@ -961,5 +963,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-23（EEWのWolfx/P2P間誤重複防止を修正・P2P地図画像のCDN同時アクセス対策・地震感知情報の音声連打対策・.env.example記載整理）
+**最終更新**: 2026-08-27（地震感知情報の地図画像ID（`_id`優先に修正）・Web Dashboardデフォルト値の食い違いを修正・全ファイルの未使用importをpyflakesで機械チェックし整理）
 **対応 Python**: 3.11+
