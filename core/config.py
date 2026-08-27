@@ -553,14 +553,16 @@ JISHIN_KANCHI_SOUND_FILE = os.getenv("JISHIN_KANCHI_SOUND_FILE", "vxse53.mp3")
 #
 # EEWがEventIDで同一イベントの複数報を管理するのに倣い、
 # started_at（仕様上「イベントを一意に識別するキー」と明記）を
-# イベント識別子として使い、以下のように鳴らす頻度を制限する:
-#   - 効果音（play_mp3）: そのイベントを初めて検知したとき（＝EEWの
-#     第一報での効果音と同じ位置づけ）の1回のみ
-#   - 音声読み上げ（speak_local）: 前回読み上げた時点からcountが
-#     JISHIN_KANCHI_SPEECH_COUNT_STEP件以上増えるたびに1回
-#     （初回検知時点では読み上げない。効果音が既に初報の役割を
-#     果たすため、テキストの読み上げは「大きな進展があったとき」
-#     に限定する）
+# イベント識別子として使う。
+#
+# 【2026-08-27 仕様変更】当初は「効果音は初回のみ・読み上げは
+# count が本設定値以上増えるたびに再トリガー」という別ルールだったが、
+# 件数が伸びるたびに読み上げが繰り返し鳴ってうるさいとの指摘を受け、
+# 音声読み上げ・効果音とも「第一報（started_atを初めて見たとき）の
+# 1回のみ」に統一した（cogs/jishin_kanchi.py の _judge_audio_triggers
+# 参照）。そのため以下の JISHIN_KANCHI_SPEECH_COUNT_STEP は現在どこからも
+# 参照されていない。既存の .env に設定済みの場合でもエラーにならない
+# よう、設定項目自体は後方互換のため残してある（将来的に削除予定）。
 JISHIN_KANCHI_SPEECH_COUNT_STEP = _env_int("JISHIN_KANCHI_SPEECH_COUNT_STEP", 50)
 
 # イベント状態（次に読み上げる件数のしきい値等）を保持しておく期限。

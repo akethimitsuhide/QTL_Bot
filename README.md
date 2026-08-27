@@ -39,10 +39,9 @@
 - 地図画像はP2P地震情報通知と同じ生成方法（`cdn.p2pquake.net/app/images/{id}_trim_big.png`）でEmbed最下部に添付。地震感知情報（code=9611）は quake/tsunami（code=551/552）と異なり、画像IDには `id` ではなく `_id` フィールドの値を使う必要があることが実機ログで判明したため、`_id` を優先し `id` にフォールバックする実装に修正した（2026-08-27）
 - `JISHIN_KANCHI_MAX_LEVEL`（通知する最大レベル）・`JISHIN_KANCHI_MIN_COUNT`（通知する最小件数）で閾値フィルタリング可能
 - 音声読み上げ（`JISHIN_KANCHI_SPEECH_ENABLE`）・効果音再生（`JISHIN_KANCHI_SOUND_ENABLE`、ファイル名は `JISHIN_KANCHI_SOUND_FILE` で変更可能）をそれぞれ個別に無効化可能
-- **音声トリガーの間引き（2026-08-23追加）**: 同一イベント（`started_at` で識別。EEWのEventIDに相当）について更新が届くたびに音声読み上げ・効果音が毎回鳴ると煩わしいため、以下のルールで間引く（テキスト通知＝Embed自体は従来通り毎回送信される）
-  - 効果音: そのイベントを初めて検知したとき（EEWの第一報相当）の1回のみ再生
-  - 音声読み上げ: 前回読み上げ時点からの件数（`count`）増加が `JISHIN_KANCHI_SPEECH_COUNT_STEP`（デフォルト50件）以上になるたびに実行（節目ごとのアナウンス）
+- **音声トリガーは第一報のみ（2026-08-23追加、2026-08-27仕様変更）**: 同一イベント（`started_at` で識別。EEWのEventIDに相当）について更新が届くたびに音声読み上げ・効果音が毎回鳴ると煩わしいため、音声読み上げ・効果音とも「そのイベントを初めて検知したとき（＝第一報、EEWの第一報相当）」の1回のみ再生する（テキスト通知＝Embed自体は従来通り毎回送信される）。以前は読み上げのみ件数（`count`）増加ごとに再トリガーしていたが、繰り返し鳴ってうるさいとの指摘を受けて統一した
   - イベント単位の管理状態は `JISHIN_KANCHI_EVENT_STATE_TTL_SEC`（デフォルト3600秒）以上更新がなければ自動的に破棄される
+  - `JISHIN_KANCHI_SPEECH_COUNT_STEP` は現在どこからも参照されない（既存 `.env` との後方互換のため設定項目のみ残置。将来的に削除予定）
 
 ### P2P 地図画像の添付
 - 地震情報・津波情報・EEW（P2P由来）・地震感知情報の通知には、P2P 地震情報 CDN が生成する震源地図画像を Embed に添付する（`core/p2p_image.py` の `P2PImageMixin`。`QuakeInfoCog` / `TsunamiCog` / `EewCog` / `JishinKanchiCog` が多重継承）
@@ -164,7 +163,14 @@ pip install -r requirements.txt
 5. サーバーに Bot を招待（OAuth2 URL で Administrator 権限付与）
 
 #### 2. 環境変数設定
-`.env.example` をコピーして `.env` を作成し、値を設定してください：
+
+**方法A: 対話式セットアップウィザード（初めての場合はこちらを推奨）**
+```bash
+python3 bot.py --starter
+```
+Bot トークン・チャンネル ID など最低限の項目だけを対話形式で質問し、`.env.example` をベースに `.env` を自動生成します。それ以外の詳細設定（通知フィルターや音声設定など）は `.env.example` に書かれているデフォルト値のまま反映されるため、後から `nano .env` で必要な箇所だけ調整できます。既に `.env` が存在する場合は上書き前に確認し、`.env.bak.<タイムスタンプ>` として自動的にバックアップします。
+
+**方法B: `.env.example` を手動でコピー**
 ```bash
 cp .env.example .env
 # .env をエディタで開いて BOT_TOKEN と CHANNEL_ID を設定
@@ -265,7 +271,7 @@ python bot.py
 | `JISHIN_KANCHI_SPEECH_ENABLE` | true | 音声読み上げの有効化 |
 | `JISHIN_KANCHI_SOUND_ENABLE` | true | 効果音再生の有効化 |
 | `JISHIN_KANCHI_SOUND_FILE` | vxse53.mp3 | 再生する効果音ファイル名（Bot実行ディレクトリ直下に配置） |
-| `JISHIN_KANCHI_SPEECH_COUNT_STEP` | 50 | 音声読み上げの間引き閾値。前回読み上げ時点からの件数増加がこの値以上になるたびに読み上げる |
+| `JISHIN_KANCHI_SPEECH_COUNT_STEP` | 50 | **現在未使用**（2026-08-27〜。音声読み上げは第一報のみに統一されたため。既存`.env`との後方互換のため項目のみ残置） |
 | `JISHIN_KANCHI_EVENT_STATE_TTL_SEC` | 3600 | イベント単位の音声トリガー管理状態を、最終更新からこの秒数以上経過したら破棄する |
 
 ### 週間/月間ダイジェスト設定
@@ -963,5 +969,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-27（地震感知情報の地図画像ID（`_id`優先に修正）・Web Dashboardデフォルト値の食い違いを修正・全ファイルの未使用importをpyflakesで機械チェックし整理）
+**最終更新**: 2026-08-27（地震感知情報の地図画像ID（`_id`優先に修正）・音声トリガーを第一報のみに統一・`--starter`対話式セットアップウィザード追加・Web Dashboardデフォルト値の食い違いを修正・全ファイルの未使用importをpyflakesで機械チェックし整理）
 **対応 Python**: 3.11+

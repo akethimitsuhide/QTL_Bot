@@ -74,12 +74,36 @@ QuakeInfoCog（code=551）・TsunamiCog（code=552）はそれぞれ独立して
 fixture を探索し、存在する対象だけ順次実行する（詳細は
 core/test_runner.py の run_all_cli_tests を参照）。
 
+【簡易セットアップウィザード（2026-08-27 追加, core/env_starter.py）】
+.env.example は全設定を網羅しているため、初見だと何から埋めればよいか
+分かりにくい。そこで対話形式で最低限の項目（Botトークン・チャンネルID等）
+だけを質問し、.env.example をベースに .env を自動生成するウィザードを
+追加した：
+
+    python3 bot.py --starter
+
+.env が存在しない状態でも実行できるよう、core.config（BOT_TOKEN 未設定
+だと起動時に即エラー終了する）を import する前に、モジュールロードの
+最初の段階で --starter の有無を判定して処理する。
+
 【起動手順】
-    python bot.py
+    初めて導入する場合はまず .env を作成する（対話形式ウィザード）:
+        python3 bot.py --starter
+    通常起動:
+        python bot.py
 """
+import sys
+
+# ── --starter は .env が無くても実行できる必要があるため、core.config
+# （BOT_TOKEN 未設定だと _require_env() が即 SystemExit する）を
+# import するより前に、真っ先にコマンドライン引数をチェックする。
+if "--starter" in sys.argv[1:]:
+    from core.env_starter import run_env_starter
+    run_env_starter()
+    sys.exit(0)
+
 import asyncio
 import logging
-import sys
 import traceback
 
 import discord
