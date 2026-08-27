@@ -46,7 +46,7 @@ from core.config import (
     WOLFX_HEARTBEAT_TIMEOUT,
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
     USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX,
-    USGS_REGION_LON_MIN, USGS_REGION_LON_MAX, USGS_NOTIFICATION_COOLDOWN,
+    USGS_REGION_LON_MIN, USGS_REGION_LON_MAX,
     QUAKE_MIN_SCALE, QUAKE_MIN_MAG, QUAKE_MIN_DEPTH, QUAKE_MAX_DEPTH,
     STATUS_SHOW_CPU, STATUS_SHOW_MEM, STATUS_SHOW_DISK, STATUS_SHOW_UPTIME,
     RESOURCE_MONITORING_ENABLED, RESOURCE_CHECK_INTERVAL,
@@ -302,7 +302,7 @@ async function loadAndRender() {
       { label: 'ディスク %', data: history.map(h => h.disk_percent), borderColor: COLORS.disk, tension: 0.2, pointRadius: 0 },
     ], '%');
 
-    const recvKeys = ['wolfx', 'p2p_eew', 'quake', 'tsunami', 'usgs', 'volcano'];
+    const recvKeys = ['wolfx', 'p2p_eew', 'quake', 'tsunami', 'jishin_kanchi', 'usgs', 'volcano', 'kyoshin'];
     const recvDatasets = recvKeys.map(k => ({
       label: k,
       data: history.map(h => (h.recv_count || {})[k] || 0),
@@ -624,6 +624,9 @@ class SystemCog(commands.Cog):
     def _kyoshin_attr(self, name, default=None):
         return get_cog_attr(self.bot, "KyoshinMonitorCog", name, default)
 
+    def _jishin_kanchi_attr(self, name, default=None):
+        return get_cog_attr(self.bot, "JishinKanchiCog", name, default)
+
     def _kyoshin_active_events_suffix(self) -> str:
         """
         KyoshinMonitorCog.monitor.event_manager.events の件数
@@ -670,7 +673,8 @@ class SystemCog(commands.Cog):
         for attr_getter in (self._eew_attr, self._quake_info_attr,
                              self._tsunami_attr,
                              self._volcano_attr, self._usgs_attr,
-                             self._other_attr):
+                             self._other_attr, self._jishin_kanchi_attr,
+                             self._kyoshin_attr):
             d = attr_getter("_last_recv", {}) or {}
             merged.update(d)
         return merged
@@ -680,7 +684,8 @@ class SystemCog(commands.Cog):
         for attr_getter in (self._eew_attr, self._quake_info_attr,
                              self._tsunami_attr,
                              self._volcano_attr, self._usgs_attr,
-                             self._other_attr):
+                             self._other_attr, self._jishin_kanchi_attr,
+                             self._kyoshin_attr):
             d = attr_getter("_recv_count", {}) or {}
             merged.update(d)
         return merged
@@ -974,32 +979,85 @@ class SystemCog(commands.Cog):
 
         api_rows = [
             # (label, key, warn_sec, err_sec, connection_alive)
-            ("地震情報 (P2P)",   "quake",           120, 600, p2p_hub_alive),
-            ("津波情報 (P2P)",   "tsunami",          60, 300, p2p_hub_alive),
-            ("長周期地震動",     "long_period",      120, 600, _loop_is_running(self._other_attr("fetch_long_period"))),
-            ("津波観測情報",     "tsunami_obs",      120, 600, _loop_is_running(self._tsunami_attr("fetch_tsunami_observation"))),
-            ("気象庁その他",     "quake_advisory",   120, 600, _loop_is_running(self._other_attr("fetch_quake_advisory"))),
-            ("火山情報",         "volcano",         120, 600, _loop_is_running(self._volcano_attr("volcano_task"))),
-            ("噴火速報",         "eruption",        120, 600, _loop_is_running(self._volcano_attr("eruption_task"))),
-            ("噴火警報",         "warning",         120, 600, _loop_is_running(self._volcano_attr("warning_task"))),
-            ("USGS 地震情報",    "usgs",            600, 1200, None),
+            ("地震情報 (P2P)",     "quake",           120, 600, p2p_hub_alive),
+            ("津波情報 (P2P)",     "tsunami",          60, 300, p2p_hub_alive),
+            ("地震感知情報 (P2P)", "jishin_kanchi",   120, 600, p2p_hub_alive),
+            ("長周期地震動",       "long_period",      120, 600, _loop_is_running(self._other_attr("fetch_long_period"))),
+            ("津波観測情報",       "tsunami_obs",      120, 600, _loop_is_running(self._tsunami_attr("fetch_tsunami_observation"))),
+            ("気象庁その他",       "quake_advisory",   120, 600, _loop_is_running(self._other_attr("fetch_quake_advisory"))),
+            ("火山情報",           "volcano",         120, 600, _loop_is_running(self._volcano_attr("volcano_task"))),
+            ("噴火速報",           "eruption",        120, 600, _loop_is_running(self._volcano_attr("eruption_task"))),
+            ("噴火警報",           "warning",         120, 600, _loop_is_running(self._volcano_attr("warning_task"))),
+            ("USGS 地震情報",      "usgs",            600, 1200, None),
         ]
         api_lines = []
         for label, key, warn, err, connection_alive in api_rows:
             icon, detail = api_status(key, warn, err, connection_alive=connection_alive)
             api_lines.append(f"{icon} **{label}**: {detail}")
+
+        # 強震モニタ（jma_s系統の画像解析による、EEW発表を待たない常時
+        # 検知。KyoshinMonitorCog）。ENABLE_KYOSHIN で機能自体が無効化
+        # される場合があり、他のイベント駆動系と違って「無効」を明示
+        # する必要があるため、api_rows の一律処理には含めず個別に
+        # 組み立てる。
+        if ENABLE_KYOSHIN:
+            kyoshin_icon, kyoshin_detail = api_status(
+                "kyoshin", 120, 600,
+                connection_alive=_loop_is_running(self._kyoshin_attr("_monitor_task")),
+            )
+            api_lines.append(
+                f"{kyoshin_icon} **強震モニタ（画像解析検知）**: "
+                f"{kyoshin_detail}{self._kyoshin_active_events_suffix()}"
+            )
+        else:
+            api_lines.append("[ - ] **強震モニタ（画像解析検知）**: 無効")
+
+        # 長周期地震動モニタ（cogs/eew.py の vibration_monitor_loop。
+        # EEW発表時のみ一時的に動作し、jma_s/abrspmx_s画像＋振動レベルを
+        # 通知する別機能）。
+        # 【設計メモ】この機能は「EEWが発表されていない」通常時は
+        # 動いていないのが正常であり、他のAPI受信状況のような
+        # 「長時間未受信=接続断」という判定は適用できない
+        # （2026-08-04にquake/tsunami等で修正したのと同じ問題が
+        # そのまま起こるため）。そのため api_status() の2つの判定モード
+        # （経過時間ベース／接続生存ベース）のどちらにも寄せず、
+        # 「EEW監視中か否か」で分岐する専用の表示にする。
+        if ENABLE_KYOSHIN:
+            lp_monitor_active = self._eew_attr("monitored_event_id") is not None
+            lp_last = last_recv.get("long_period_monitor")
+            lp_count = recv_count.get("long_period_monitor", 0)
+            if lp_monitor_active:
+                lp_line = "[OK] **長周期地震動モニタ**: EEW発表中・監視中"
+            elif lp_last is not None:
+                lp_diff = int((now - lp_last).total_seconds())
+                if lp_diff < 60:
+                    lp_ago = f"{lp_diff}秒前"
+                elif lp_diff < 3600:
+                    lp_ago = f"{lp_diff // 60}分{lp_diff % 60}秒前"
+                else:
+                    lp_ago = f"{lp_diff // 3600}時間前"
+                lp_line = (
+                    f"[ - ] **長周期地震動モニタ**: 待機中 "
+                    f"（最終通知: {lp_last.strftime('%H:%M:%S')} {lp_ago}、計{lp_count}件）"
+                )
+            else:
+                lp_line = "[ - ] **長周期地震動モニタ**: 待機中（EEW発表時のみ動作、通知実績なし）"
+            api_lines.append(lp_line)
+        else:
+            api_lines.append("[ - ] **長周期地震動モニタ**: 無効（ENABLE_KYOSHIN=false）")
+
         embed.add_field(name="API 受信状況", value="\n".join(api_lines), inline=False)
 
         # -- タスク稼働状態 --
         p2p_hub_stats = self._p2p_hub_stats()
         if p2p_hub_stats is None:
-            p2p_hub_line = "[ - ] 未起動 **P2PWebSocketHub (統合, 551/552/556)**"
+            p2p_hub_line = "[ - ] 未起動 **P2PWebSocketHub (統合, 551/552/556/9611)**"
         else:
             recv = p2p_hub_stats.get("recv_count", {})
             p2p_hub_line = (
-                f"[OK] 稼働中 **P2PWebSocketHub (統合, 551/552/556)** "
+                f"[OK] 稼働中 **P2PWebSocketHub (統合, 551/552/556/9611)** "
                 f"quake={recv.get('quake', 0)} tsunami={recv.get('tsunami', 0)} "
-                f"eew={recv.get('eew', 0)}"
+                f"eew={recv.get('eew', 0)} jishin_kanchi={recv.get('jishin_kanchi', 0)}"
             )
         task_lines = [
             p2p_hub_line,
@@ -1013,17 +1071,12 @@ class SystemCog(commands.Cog):
             f"{task_status(self._other_attr('fetch_long_period'))} **fetch_long_period**",
             f"{task_status(self._other_attr('fetch_quake_advisory'))} **fetch_quake_advisory**",
             f"{asyncio_task_status(self._kyoshin_attr('_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
-            f"**kyoshin_monitor**{self._kyoshin_active_events_suffix()}",
+            f"**kyoshin_monitor（画像解析検知）**{self._kyoshin_active_events_suffix()}",
+            f"{asyncio_task_status(self._eew_attr('vibration_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
+            f"**vibration_monitor_loop（長周期地震動モニタ、EEW発表時のみ稼働）**",
         ]
         embed.add_field(name="タスク稼働状態", value="\n".join(task_lines), inline=False)
 
-        # -- USGS 設定 --
-        if USGS_ENABLED:
-            usgs_lines = [
-                f"対象地域: 緯度 {USGS_REGION_LAT_MIN}〜{USGS_REGION_LAT_MAX} / 経度 {USGS_REGION_LON_MIN}〜{USGS_REGION_LON_MAX}",
-                f"M下限: {USGS_MAGNITUDE_MIN} / ポーリング間隔: {USGS_FETCH_INTERVAL}秒 / 重複防止: {USGS_NOTIFICATION_COOLDOWN}秒",
-            ]
-            embed.add_field(name="USGS 設定", value="\n".join(usgs_lines), inline=False)
 
         # -- APM (Mackerel連携) --
         apm_cog = self.bot.get_cog("ApmCog")
@@ -1206,6 +1259,7 @@ class SystemCog(commands.Cog):
                     "fetch_long_period": _loop_status(self._other_attr("fetch_long_period")),
                     "fetch_quake_advisory": _loop_status(self._other_attr("fetch_quake_advisory")),
                     "kyoshin_monitor": _task_status(self._kyoshin_attr("_monitor_task")) if ENABLE_KYOSHIN else "disabled",
+                    "vibration_monitor_loop": _task_status(self._eew_attr("vibration_monitor_task")) if ENABLE_KYOSHIN else "disabled",
                 }
                 if p2p_hub_stats is not None:
                     tasks_info["p2p_ws_hub_recv_count"] = p2p_hub_stats.get("recv_count", {})
@@ -1244,6 +1298,7 @@ class SystemCog(commands.Cog):
                         "p2p_eew": last_recv.get("p2p_eew").isoformat() if last_recv.get("p2p_eew") else None,
                         "quake": last_recv.get("quake").isoformat() if last_recv.get("quake") else None,
                         "tsunami": last_recv.get("tsunami").isoformat() if last_recv.get("tsunami") else None,
+                        "jishin_kanchi": last_recv.get("jishin_kanchi").isoformat() if last_recv.get("jishin_kanchi") else None,
                         "volcano": last_recv.get("volcano").isoformat() if last_recv.get("volcano") else None,
                     },
                     "recv_count": {
@@ -1251,16 +1306,20 @@ class SystemCog(commands.Cog):
                         "p2p_eew": recv_count.get("p2p_eew", 0),
                         "quake": recv_count.get("quake", 0),
                         "tsunami": recv_count.get("tsunami", 0),
+                        "jishin_kanchi": recv_count.get("jishin_kanchi", 0),
                         "long_period": recv_count.get("long_period", 0),
                         "tsunami_obs": recv_count.get("tsunami_obs", 0),
                         "volcano": recv_count.get("volcano", 0),
                         "eruption": recv_count.get("eruption", 0),
                         "warning": recv_count.get("warning", 0),
+                        "kyoshin": recv_count.get("kyoshin", 0),
+                        "long_period_monitor": recv_count.get("long_period_monitor", 0),
                         "usgs": recv_count.get("usgs", 0),
                     },
                     "monitoring": {
                         "quake": _api_info("quake"),
                         "tsunami": _api_info("tsunami"),
+                        "jishin_kanchi": _api_info("jishin_kanchi"),
                         "long_period": _api_info("long_period"),
                         "tsunami_obs": _api_info("tsunami_obs"),
                         "quake_advisory": _api_info("quake_advisory"),
@@ -1281,7 +1340,11 @@ class SystemCog(commands.Cog):
                             **_api_info("warning"),
                         },
                         "usgs": usgs_info,
-                        "kyoshin": self._kyoshin_status_dict(),
+                        "kyoshin": {**self._kyoshin_status_dict(), **_api_info("kyoshin")},
+                        "long_period_monitor": {
+                            "active": self._eew_attr("monitored_event_id") is not None,
+                            **_api_info("long_period_monitor"),
+                        },
                     },
                     "tasks": tasks_info,
                     "delivery": get_delivery_stats(window_hours=24.0),

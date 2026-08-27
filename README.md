@@ -21,7 +21,14 @@
   - 地図画像: メッセージ送信後にバックグラウンドで P2P 地震情報 CDN をポーリングし、画像が実際に取得可能になった時点で Embed に画像を追加（詳細は下記「P2P 地図画像の添付」参照）
   - 津波の有無（`domesticTsunami`）の表記: P2P 地震情報の `domesticTsunami` は速報段階の推定値であり、`Warning` が返っても実際に気象庁から「津波警報」が正式発表されているとは限らない。誤解を招く断定的な表記を避けるため、`Watch`・`Warning` は通知本文で「津波警報・注意報を発表中」、読み上げで「現在、津波予報等を発表中です。」とまとめて表現する。`NonEffective` は通知「若干の海面変動（被害の心配なし）」、読み上げ「この地震で、若干の海面変動があるかもしれませんが、被害の心配はありません。」。`None` は読み上げで「この地震による津波の心配はありません。」を明示的に付加する（`MajorWarning` は従来通り「大津波警報」）
 
-### EEWの重複排除について
+### 複数の緊急地震速報が同時に発表されている場合
+- 複数の異なる地震について有効なEEW（`EewCog.recent_eews`にTTL300秒以内で保持されている件数が2件以上）を検知すると、通常の単独EEW通知の直前に「複数の緊急地震速報が発表されています」というサマリーEmbedを送信する
+- サマリーEmbedには、保持中の各EEWについて「タイトル（第N報／最終報）・震源地・予想最大震度・マグニチュード・深さ」を新しい順に列挙した後、以下を続けて表示する
+  1. **⚠強い揺れに警戒してください。** 等の注意喚起（いずれかのEEWが該当条件を満たせば表示）
+  2. **【強い揺れが予想される地域】**（`REGION_MAP`変換後の地方単位。複数EEWの警報対象地域を`merged_warn_regions`として和集合にまとめたもの）
+  3. **【地域ごとの予想震度】**（2026-08-27追加。市区町村・地域単位で、単独EEW通知と同じ「震度X程度」「震度X〜Y程度」形式のグルーピング。複数EEWを横断してマージし、同一地域が複数のEEWで異なる予想震度になっている場合はより大きい方を採用する。ロジックは`core/eew_convert.py`の`build_forecast_groups`/`merge_forecast_groups`/`format_forecast_section`に共通化されており、単独EEW通知の「地域ごとの予想震度」と全く同じ関数を使う）
+- Discord Embedの4096文字制限に対応した切り詰め処理を適用（地域数が多い場合は末尾に「（地域が多いため一部省略）」を付記）
+
 - Wolfx・P2P地震情報それぞれについて、EventIDごとの最大Serial番号を独立に管理し、同一ソースからの重複/逆行メッセージ（既に処理済みのSerial以下の再送）のみをスキップする（`EewCog.eew_max_serial_seen`、ソースごとに別々の辞書で管理）
 - **2026-08-23修正**: 以前はこの管理をWolfx・P2Pで単一の辞書として共有しており、「同一EventIDのEEWを両ソースがほぼ同時に配信してきた場合の二重通知防止」を意図していた。しかし実際にはWolfxとP2P地震情報は同一EventIDに対して独立にSerial番号を採番しており両者の値は対応しないため、一方のソースが先に高いSerial番号を処理すると、もう一方のソースの正当な更新（低いSerial番号）が誤って「重複/逆行」とみなされ、通知が欠落する不具合があった（実際の茨城県南部の地震で発生を確認）。ソースごとに辞書を分離し、この誤抑制を解消した
 
@@ -434,6 +441,7 @@ curl http://localhost:8080/status | jq
   "monitoring": {
     "quake":          { "last_recv_time": "...", "recv_count": 12 },
     "tsunami":        { "last_recv_time": null,  "recv_count": 0  },
+    "jishin_kanchi":  { "last_recv_time": "...", "recv_count": 8  },
     "long_period":    { "last_recv_time": "...", "recv_count": 2  },
     "tsunami_obs":    { "last_recv_time": null,  "recv_count": 0  },
     "quake_advisory": { "last_recv_time": "...", "recv_count": 5  },
@@ -468,12 +476,19 @@ curl http://localhost:8080/status | jq
     "kyoshin": {
       "enabled": true,
       "active_event_count": 0,
-      "active_event_ids": []
+      "active_event_ids": [],
+      "last_recv_time": "...",
+      "recv_count": 3
+    },
+    "long_period_monitor": {
+      "active": false,
+      "last_recv_time": "...",
+      "recv_count": 1
     }
   },
   "tasks": {
     "p2p_ws_hub": "running",
-    "p2p_ws_hub_recv_count": { "eew": 0, "quake": 12, "tsunami": 0 },
+    "p2p_ws_hub_recv_count": { "eew": 0, "quake": 12, "tsunami": 0, "jishin_kanchi": 8 },
     "fetch_tsunami_observation": "running",
     "fetch_quake_advisory": "running",
     "fetch_usgs_quake": "running",
@@ -483,15 +498,21 @@ curl http://localhost:8080/status | jq
     "eruption_poller": "running",
     "warning_poller": "running",
     "fetch_long_period": "running",
-    "kyoshin_monitor": "running"
+    "kyoshin_monitor": "running",
+    "vibration_monitor_loop": "stopped"
   }
 }
 ```
 
-> `quake`（地震情報）・`tsunami`（津波情報）・`eew`（緊急地震速報）は、`core/p2p_ws_hub.py` の
-> `P2PWebSocketHub` が単一の WebSocket 接続から一元的に受信・振り分けを行う
+> `quake`（地震情報）・`tsunami`（津波情報）・`eew`（緊急地震速報）・`jishin_kanchi`（地震感知情報）は、
+> `core/p2p_ws_hub.py` の `P2PWebSocketHub` が単一の WebSocket 接続から一元的に受信・振り分けを行う
 > （2026-08 の REST ポーリング → WebSocket 移行以降。`tasks.p2p_ws_hub` の稼働状態と
 > `tasks.p2p_ws_hub_recv_count` の各種別ごとの受信件数を参照）。
+>
+> `kyoshin`（強震モニタ画像解析検知。KyoshinMonitorCogによる常時検知）と
+> `long_period_monitor`（長周期地震動モニタ。EewCogのvibration_monitor_loopによる
+> EEW発表時のみの一時的な検知）は名前が似ているが別機能。前者は`ENABLE_KYOSHIN`が
+> 有効な限り常時稼働し、後者はEEWが発表されている間だけ`active: true`になる。
 
 ### GET /health/full（API 疎通確認）
 
@@ -728,7 +749,7 @@ python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
 | `!status` | プレフィックス | 管理者 | Bot 稼働状態を Embed で表示 |
 | `/qtl_status` | スラッシュ | 管理者 | `!status` と同じ内容（スラッシュコマンド版） |
 
-表示内容：システムリソース / EEW 状態 / API 受信状況 / タスク稼働状態 / USGS 設定 / フィルター設定
+表示内容：システムリソース / EEW 状態 / API 受信状況（地震・津波・地震感知情報・長周期地震動・火山・USGS・強震モニタ画像解析検知・長周期地震動モニタ 等） / タスク稼働状態 / フィルター設定
 
 ---
 
@@ -969,5 +990,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-27（地震感知情報の地図画像ID（`_id`優先に修正）・音声トリガーを第一報のみに統一・`--starter`対話式セットアップウィザード追加・Web Dashboardデフォルト値の食い違いを修正・全ファイルの未使用importをpyflakesで機械チェックし整理）
+**最終更新**: 2026-08-27（`!status`/`/qtl_status`のAPI受信状況・タスク稼働状態に地震感知情報・強震モニタ画像解析検知・長周期地震動モニタを追加、USGS設定フィールドを削除／複数EEWサマリー通知に地域ごとの予想震度を追加／地震感知情報の地図画像ID（`_id`優先に修正）／音声トリガーを第一報のみに統一／`--starter`対話式セットアップウィザード追加／Web Dashboardデフォルト値の食い違いを修正／全ファイルの未使用importをpyflakesで機械チェックし整理）
 **対応 Python**: 3.11+

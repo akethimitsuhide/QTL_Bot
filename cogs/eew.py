@@ -39,7 +39,6 @@ import asyncio
 import traceback
 import time
 from datetime import datetime
-from collections import defaultdict
 import logging
 
 from core.config import (
@@ -56,7 +55,10 @@ from core.helpers import (
 from core.audio import AudioClientMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
-from core.eew_convert import convert_p2p_eew_to_wolfx, extract_alert_regions
+from core.eew_convert import (
+    convert_p2p_eew_to_wolfx, extract_alert_regions,
+    build_forecast_groups, format_forecast_section, merge_forecast_groups,
+)
 from core.p2p_image import P2PImageMixin
 from core.ws_helpers import ws_connect_loop
 from core.kyoshin_shared import (
@@ -128,6 +130,12 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self._last_recv: dict[str, datetime | None] = {
             "wolfx":   None,
             "p2p_eew": None,
+            # 【2026-08-27 追加】EEW発表時の長周期地震動モニタ
+            # （vibration_monitor_loop。jma_s/abrspmx_s画像＋振動レベル）
+            # の通知送信回数・時刻を !status / /qtl_status で確認できる
+            # ようにするため追加。KyoshinMonitorCog側の常時画像解析検知
+            # （"kyoshin"キー）とは独立した別機能のため、キー名も分ける。
+            "long_period_monitor": None,
         }
         self._recv_count: dict[str, int] = {k: 0 for k in self._last_recv}
 
@@ -455,7 +463,26 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                     for region in sorted(merged_warn_regions):
                         summary_desc += f"■ {region}　"
 
-                embed_summary.description = summary_desc.strip()
+                # 【2026-08-27 追加】単一EEW通知と同様、地域ごとの予想震度も
+                # 「強い揺れが予想される地域」の下に表示する。複数EEWを
+                # 横断してマージし、同じ地域が複数のEEWで異なる予想震度に
+                # なっている場合はより大きい方を採用する（merge_forecast_groups参照）。
+                warn_areas_list = [
+                    (d.get("WarnArea", []), d.get("isAssumption", False))
+                    for _, (d, _) in sorted_eews
+                ]
+                merged_forecast_groups = merge_forecast_groups(warn_areas_list, INT_MAP)
+                summary_desc += format_forecast_section(merged_forecast_groups, INT_MAP)
+
+                # Discord API の制限（4096文字）に対応した正確な切り詰め
+                # （単一EEW通知のdescriptionと同様。複数EEW×地域ごとの
+                # 予想震度は行数が非常に多くなり得るため必須）
+                summary_desc = truncate_embed_description(
+                    summary_desc.strip(),
+                    max_chars=4096,
+                    suffix="\n\n（地域が多いため一部省略）"
+                )
+                embed_summary.description = summary_desc
                 await channel.send(embed=embed_summary)
 
             title_text = data.get('Title', '緊急地震速報')
@@ -524,44 +551,9 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                     description += f"■ {region}　"
 
             if warn_areas:
-                forecast_groups = defaultdict(list)
-                def shindo_rank(s):
-                    if s in INT_MAP.values():
-                        for num, txt in INT_MAP.items():
-                            if txt == s: return num
-                    return 0
-
                 is_assumption = data.get("isAssumption", False)
-
-                for area in warn_areas:
-                    chiiki = area.get("Chiiki")
-                    if not chiiki: continue
-                    shindo1 = area.get("Shindo1", "不明")
-                    shindo2 = area.get("Shindo2", shindo1)
-
-                    if is_assumption:
-                        if shindo1 != "不明":
-                            label = f"震度{shindo1}程度"
-                            forecast_groups[label].append(chiiki)
-                        continue
-
-                    if shindo1 != "不明":
-                        if shindo1 == shindo2:
-                            label = f"震度{shindo1}程度"
-                        else:
-                            r1 = shindo_rank(shindo1)
-                            r2 = shindo_rank(shindo2)
-                            high, low = (shindo1, shindo2) if r1 >= r2 else (shindo2, shindo1)
-                            label = f"震度{high}〜{low}程度"
-                        forecast_groups[label].append(chiiki)
-
-                if forecast_groups:
-                    description += "\n\n**【地域ごとの予想震度】**"
-                    sorted_labels = sorted(forecast_groups.keys(), key=lambda lbl: max(shindo_rank(s.strip("震度程度〜")) for s in lbl.split("〜")), reverse=True)
-                    for label in sorted_labels:
-                        areas = sorted(forecast_groups[label])
-                        area_text = "\n".join(f"　{a}" for a in areas)
-                        description += f"\n■ {label}\n{area_text}"
+                forecast_groups = build_forecast_groups(warn_areas, INT_MAP, is_assumption=is_assumption)
+                description += format_forecast_section(forecast_groups, INT_MAP)
 
             description = truncate_embed_description(
                 description,
@@ -861,6 +853,8 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                         embed.set_thumbnail(url=lmoni_url)
 
                     await channel.send(embed=embed)
+                    self._last_recv["long_period_monitor"] = datetime.now()
+                    self._recv_count["long_period_monitor"] += 1
 
                 await asyncio.sleep(POLL_INTERVAL_SEC)
 

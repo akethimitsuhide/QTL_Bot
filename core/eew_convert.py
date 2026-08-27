@@ -18,6 +18,7 @@ EewCog._convert_p2p_eew_to_wolfx() / EewCog._extract_alert_regions()
 """
 import logging
 import traceback
+from collections import defaultdict
 
 from core.helpers import safe_int, safe_float
 
@@ -184,3 +185,112 @@ def extract_alert_regions(data: dict, region_map: dict) -> set:
         if chiiki and area.get("Type", "").lower() in ("警報", "到達済"):
             alert_regions.add(region_map.get(chiiki, "その他"))
     return alert_regions
+
+
+def shindo_rank(value: str, int_map: dict) -> int:
+    """
+    "1"〜"7"・"5弱"・"6強"等の震度文字列を、大小比較用の数値ランクに
+    変換する（int_mapのキーがそのままランクとして使える）。
+
+    int_map は core.constants.INT_MAP を呼び出し元から渡す
+    （extract_alert_regions と同じ理由でモジュールを独立させるため）。
+    見つからない場合は 0（最小扱い）を返す。
+    """
+    if value in int_map.values():
+        for num, txt in int_map.items():
+            if txt == value:
+                return num
+    return 0
+
+
+def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool = False) -> dict:
+    """
+    WarnArea配列から「震度X程度」「震度X〜Y程度」ラベルごとに地域名を
+    グルーピングした dict（ラベル → [地域名, ...]）を返す。
+
+    【2026-08-27 追加】単一EEW通知（notify_eew）と複数EEWサマリー通知
+    （「複数の緊急地震速報が発表されています」）の両方で全く同じ
+    グルーピングロジックが必要になったため、重複を避けてここに共通化した。
+    """
+    forecast_groups: dict = defaultdict(list)
+    for area in warn_areas:
+        chiiki = area.get("Chiiki")
+        if not chiiki:
+            continue
+        shindo1 = area.get("Shindo1", "不明")
+        shindo2 = area.get("Shindo2", shindo1)
+
+        if is_assumption:
+            if shindo1 != "不明":
+                forecast_groups[f"震度{shindo1}程度"].append(chiiki)
+            continue
+
+        if shindo1 != "不明":
+            if shindo1 == shindo2:
+                label = f"震度{shindo1}程度"
+            else:
+                r1, r2 = shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map)
+                high, low = (shindo1, shindo2) if r1 >= r2 else (shindo2, shindo1)
+                label = f"震度{high}〜{low}程度"
+            forecast_groups[label].append(chiiki)
+    return dict(forecast_groups)
+
+
+def sorted_forecast_labels(forecast_groups: dict, int_map: dict) -> list:
+    """forecast_groups のラベルを、震度が高い順にソートして返す。"""
+    return sorted(
+        forecast_groups.keys(),
+        key=lambda lbl: max(shindo_rank(s.strip("震度程度〜"), int_map) for s in lbl.split("〜")),
+        reverse=True,
+    )
+
+
+def format_forecast_section(forecast_groups: dict, int_map: dict) -> str:
+    """
+    forecast_groups を Embed description に連結できる
+    「【地域ごとの予想震度】」セクションのテキストに整形する。
+    forecast_groups が空の場合は空文字列を返す（呼び出し側で
+    description に無条件で連結できるようにするため）。
+    """
+    if not forecast_groups:
+        return ""
+    lines = ["\n\n**【地域ごとの予想震度】**"]
+    for label in sorted_forecast_labels(forecast_groups, int_map):
+        areas = sorted(forecast_groups[label])
+        area_text = "\n".join(f"　{a}" for a in areas)
+        lines.append(f"\n■ {label}\n{area_text}")
+    return "".join(lines)
+
+
+def merge_forecast_groups(warn_areas_list: list, int_map: dict) -> dict:
+    """
+    複数のEEW（それぞれの WarnArea 配列 + isAssumption フラグ）を横断して、
+    地域ごとの予想震度をマージする。
+
+    【2026-08-27 追加】「複数の緊急地震速報が発表されています」サマリー
+    通知で、既存の「強い揺れが予想される地域」（merged_warn_regions、
+    地方単位の粗い集合）と同様に、より詳細な「地域ごとの予想震度」
+    （市区町村・地域単位）も複数EEWを横断して1つにまとめて表示するために
+    追加した。
+
+    同じ地域が複数のEEWで異なる予想震度になっている場合は、より大きい
+    方の震度を採用する（同一地域名が複数の震度見出しに重複して
+    表示されるのを防ぐため）。
+
+    warn_areas_list: [(warn_areas, is_assumption), ...] のリスト
+        （呼び出し側で sorted_eews の各要素から組み立てて渡す）
+    """
+    best_by_chiiki: dict = {}  # chiiki -> (rank, label)
+    for warn_areas, is_assumption in warn_areas_list:
+        groups = build_forecast_groups(warn_areas, int_map, is_assumption=is_assumption)
+        for label, chiikis in groups.items():
+            rank = max(shindo_rank(s.strip("震度程度〜"), int_map) for s in label.split("〜"))
+            for chiiki in chiikis:
+                prev = best_by_chiiki.get(chiiki)
+                if prev is None or rank > prev[0]:
+                    best_by_chiiki[chiiki] = (rank, label)
+
+    merged: dict = defaultdict(list)
+    for chiiki, (_, label) in best_by_chiiki.items():
+        merged[label].append(chiiki)
+    return dict(merged)

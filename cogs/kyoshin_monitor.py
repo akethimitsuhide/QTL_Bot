@@ -180,6 +180,13 @@ class KyoshinMonitorCog(commands.Cog):
         self._last_image_url: str | None = None
         self._dual_image_fetcher = DualImageFetcher()
 
+        # !status / /qtl_status・Web Dashboard から他Cogと統一的に参照
+        # できるよう、他の受信系Cogと同じ _last_recv / _recv_count の
+        # 形式で「実際に検知通知をDiscordへ送信した」回数・時刻を記録する
+        # （2026-08-27 追加）。
+        self._last_recv: dict[str, datetime | None] = {"kyoshin": None}
+        self._recv_count: dict[str, int] = {"kyoshin": 0}
+
         self.monitor = KyoshinImageMonitor(
             get_readings=self._fetch_current_shindo_map,
             send_kyoshin_image=self._send_kyoshin_image,
@@ -569,6 +576,8 @@ class KyoshinMonitorCog(commands.Cog):
         embed.set_footer(text="防災科研 強震モニタ (jma_s / abrspmx_s) の画像解析による自動検知")
 
         await channel.send(embed=embed)
+        self._last_recv["kyoshin"] = datetime.now()
+        self._recv_count["kyoshin"] += 1
 
     async def _on_event_ended(self, event_id: str) -> None:
         logger.info(f"KyoshinMonitorCog: イベント {event_id[:8]} の揺れ検知が終了しました")
