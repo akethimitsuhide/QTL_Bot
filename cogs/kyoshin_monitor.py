@@ -84,6 +84,7 @@ import asyncio
 import io
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -103,6 +104,7 @@ from core.config import (
     KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
     KYOSHIN_STATIONS_SOURCE_URL, KYOSHIN_STATIONS_CACHE_PATH,
     KYOSHIN_STATIONS_REFRESH_SEC, KYOSHIN_NEIGHBOR_K,
+    KYOSHIN_SLOW_FETCH_THRESHOLD_SEC,
 )
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
@@ -364,12 +366,29 @@ class KyoshinMonitorCog(commands.Cog):
             # しない（防災科研への負荷軽減。_is_eew_active docstring参照）。
             return {}
 
+        # 【2026-08-29 追加】このメソッドは KYOSHIN_POLL_INTERVAL_SEC
+        # （既定1.0秒）ごとに24時間365日呼ばれる、強震モニタ機能の
+        # 定常的な負荷の中心部分。ダウンロード（ネットワークI/O）と
+        # デコード＋観測点サンプリング（CPUバウンド）を分けて計測し、
+        # Raspberry Pi等での実測に基づいた最適化判断ができるようにする
+        # （憶測でポーリング間隔やアルゴリズムを変更しないための材料）。
+        # 通常はDEBUGログにのみ出力し、KYOSHIN_SLOW_FETCH_THRESHOLD_SEC
+        # （既定0.5秒）を超えた場合のみ、運用中でも気づけるようWARNING
+        # ログも出す。
+        t_download_start = time.perf_counter()
         image_bytes, url = await self._download_latest_image()
+        download_elapsed = time.perf_counter() - t_download_start
+
         if image_bytes is None:
+            logger.debug(
+                f"KyoshinMonitorCog: 画像取得に失敗しました "
+                f"(download={download_elapsed*1000:.1f}ms)"
+            )
             return {}
 
         self._last_image_url = url
 
+        t_decode_start = time.perf_counter()
         try:
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception as e:
@@ -388,6 +407,24 @@ class KyoshinMonitorCog(commands.Cog):
                 continue
             r, g, b = pixels[x, y]
             shindo_map[code] = self._shindo_from_rgb(r, g, b)
+        decode_sampling_elapsed = time.perf_counter() - t_decode_start
+
+        total_elapsed = download_elapsed + decode_sampling_elapsed
+        log_msg = (
+            f"KyoshinMonitorCog: shindo_map生成 "
+            f"download={download_elapsed*1000:.1f}ms "
+            f"decode+sampling={decode_sampling_elapsed*1000:.1f}ms "
+            f"合計={total_elapsed*1000:.1f}ms "
+            f"(観測点{len(shindo_map)}件, ポーリング間隔={KYOSHIN_POLL_INTERVAL_SEC}秒)"
+        )
+        if decode_sampling_elapsed >= KYOSHIN_SLOW_FETCH_THRESHOLD_SEC:
+            logger.warning(
+                f"{log_msg} — decode+samplingがKYOSHIN_SLOW_FETCH_THRESHOLD_SEC"
+                f"（{KYOSHIN_SLOW_FETCH_THRESHOLD_SEC}秒）を超過しました。"
+                f"CPU負荷や高速化の要否を検討する材料としてください。"
+            )
+        else:
+            logger.debug(log_msg)
 
         if KYOSHIN_DEBUG_SAVE_IMAGE:
             active_count = sum(
