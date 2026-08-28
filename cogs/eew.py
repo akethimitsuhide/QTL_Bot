@@ -828,7 +828,20 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                     if jma_s_url:
                         jma_s_bytes = await image_fetcher.fetch_jma_s_bytes(self.session)
                         if jma_s_bytes:
-                            max_shindo = estimate_max_shindo_from_image(jma_s_bytes)
+                            # 【2026-08-29 修正】estimate_max_shindo_from_image は
+                            # KyoshinImageAnalyzer による全画素の色相解析（Pure Pythonの
+                            # ピクセルループ）を内部で行うCPUバウンド処理であり、これを
+                            # イベントループ上で同期呼び出ししていた。EEW発表中は本ループが
+                            # 2秒間隔・最大5分間動き続けるため、その間Discordのハートビート
+                            # 送信・音声キューの消費・他Cogの非同期処理までブロックしうる。
+                            # よりによって「EEW発表中」という最も通知の即時性が求められる
+                            # 場面でイベントループが詰まるのは本末転倒なため、
+                            # cogs/kyoshin_monitor.py._register_stations と同様に
+                            # run_in_executor でワーカースレッドへオフロードする。
+                            loop = asyncio.get_running_loop()
+                            max_shindo = await loop.run_in_executor(
+                                None, estimate_max_shindo_from_image, jma_s_bytes
+                            )
                     color = shindo_to_color(max_shindo)
 
                     if level is not None:
