@@ -86,6 +86,15 @@ core/test_runner.py の run_all_cli_tests を参照）。
 だと起動時に即エラー終了する）を import する前に、モジュールロードの
 最初の段階で --starter の有無を判定して処理する。
 
+【.env 整合性チェック（2026-08-27 追加, core/env_audit.py）】
+.env.example 系ファイルとコード内の実際の参照箇所が食い違っていないか
+（廃止した設定の消し忘れ・追記漏れ等）を機械的にチェックする：
+
+    python3 bot.py --check_env
+
+こちらも .env が存在しない状態で実行できる必要があるため、--starter と
+同様に core.config を import する前に判定する。
+
 【起動手順】
     初めて導入する場合はまず .env を作成する（対話形式ウィザード）:
         python3 bot.py --starter
@@ -94,12 +103,17 @@ core/test_runner.py の run_all_cli_tests を参照）。
 """
 import sys
 
-# ── --starter は .env が無くても実行できる必要があるため、core.config
-# （BOT_TOKEN 未設定だと _require_env() が即 SystemExit する）を
-# import するより前に、真っ先にコマンドライン引数をチェックする。
+# ── --starter / --check_env は .env が無くても実行できる必要があるため、
+# core.config（BOT_TOKEN 未設定だと _require_env() が即 SystemExit する）
+# を import するより前に、真っ先にコマンドライン引数をチェックする。
 if "--starter" in sys.argv[1:]:
     from core.env_starter import run_env_starter
     run_env_starter()
+    sys.exit(0)
+
+if "--check_env" in sys.argv[1:]:
+    from core.env_audit import run_env_check
+    run_env_check()
     sys.exit(0)
 
 import asyncio

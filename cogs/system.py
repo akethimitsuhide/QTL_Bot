@@ -43,6 +43,9 @@ import aiohttp
 
 from core.config import (
     CHANNEL_ID, ADMIN_CHANNEL_ID,
+    EEW_CHANNEL_ID, P2P_EEW_CHANNEL_ID, QUAKE_CHANNEL_ID, TSUNAMI_CHANNEL_ID,
+    OTHER_CHANNEL_ID, VOLCANO_CHANNEL_ID, KYOSHIN_CHANNEL_ID, USGS_CHANNEL_ID,
+    JISHIN_KANCHI_CHANNEL_ID,
     WOLFX_HEARTBEAT_TIMEOUT,
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
     USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX,
@@ -1095,6 +1098,41 @@ class SystemCog(commands.Cog):
             if delivery["failure"] > 0:
                 delivery_lines.append(f"⚠️ 失敗: {delivery['failure']}件")
             embed.add_field(name="配信成功率", value="\n".join(delivery_lines), inline=False)
+
+        # -- 通知先チャンネルマッピング（.env整理案⑤、2026-08-27追加） --
+        # EEW_CHANNEL_ID等9種類の *_CHANNEL_ID は、未設定時に多段で
+        # CHANNEL_ID等へフォールバックする設計のため、.envを読むだけでは
+        # 「結局どのチャンネルに何が送られるか」が分かりにくい。
+        # core.config側で既に解決済みの最終的なチャンネルIDを、
+        # 送信先チャンネルごとにグルーピングして一覧表示する。
+        channel_purpose_map = [
+            ("デフォルト", CHANNEL_ID),
+            ("EEW", EEW_CHANNEL_ID),
+            ("P2P EEW", P2P_EEW_CHANNEL_ID),
+            ("地震情報", QUAKE_CHANNEL_ID),
+            ("津波情報", TSUNAMI_CHANNEL_ID),
+            ("火山情報", VOLCANO_CHANNEL_ID),
+            ("その他（長周期地震動等）", OTHER_CHANNEL_ID),
+            ("強震モニタ", KYOSHIN_CHANNEL_ID),
+            ("USGS地震情報", USGS_CHANNEL_ID),
+            ("地震感知情報", JISHIN_KANCHI_CHANNEL_ID),
+            ("週間/月間ダイジェスト", DIGEST_CHANNEL_ID),
+            ("エラー通知（管理者）", ADMIN_CHANNEL_ID),
+        ]
+        by_channel: dict = {}
+        for purpose, cid in channel_purpose_map:
+            by_channel.setdefault(cid, []).append(purpose)
+
+        channel_lines = []
+        for cid, purposes in sorted(by_channel.items(), key=lambda kv: -len(kv[1])):
+            if cid == 0:
+                dest = "[未設定]"
+            else:
+                dest = f"<#{cid}>"
+                if self.bot.get_channel(cid) is None:
+                    dest += " ⚠️参照不可"
+            channel_lines.append(f"{dest} ← {', '.join(purposes)}")
+        embed.add_field(name="通知先チャンネルマッピング", value="\n".join(channel_lines), inline=False)
 
         # -- フィルター設定 --
         if STATUS_SHOW_UPTIME:

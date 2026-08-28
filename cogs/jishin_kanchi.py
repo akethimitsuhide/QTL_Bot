@@ -170,12 +170,12 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         (効果音を鳴らすべきか, 音声読み上げをすべきか) のタプルを返す。
 
         【2026-08-27 変更】以前は「効果音は初回のみ・読み上げは
-        count が JISHIN_KANCHI_SPEECH_COUNT_STEP 件以上増えるたびに実行」
-        という別ルールだったが、実運用で件数が伸びるたびに読み上げが
-        繰り返し鳴ってうるさいとの指摘を受け、音声読み上げ・効果音とも
-        「第一報（started_at を初めて見たとき）の1回のみ」に統一した。
-        JISHIN_KANCHI_SPEECH_COUNT_STEP は本メソッドでは使用しなくなった
-        （設定項目自体は後方互換のため core.config に残してある）。
+        count が一定件数以上増えるたびに実行」という別ルールだったが、
+        実運用で件数が伸びるたびに読み上げが繰り返し鳴ってうるさい
+        との指摘を受け、音声読み上げ・効果音とも「第一報（started_at
+        を初めて見たとき）の1回のみ」に統一した。この変更に伴い旧仕様
+        専用だった JISHIN_KANCHI_SPEECH_COUNT_STEP は core.config から
+        完全に削除した（.env整理案①、2026-08-27）。
 
         ルール:
           - 初めて見るイベント（_event_states に未登録）

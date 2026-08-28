@@ -16,7 +16,8 @@ QTL_Bot の全環境変数・グローバル設定値を1箇所に集約する�
 """
 import os
 import logging
-from dotenv import load_dotenv
+
+from core.env_loader import load_env_files
 
 # ===============================
 # ロガー（設定値読み込み時のログ出力用）
@@ -28,7 +29,11 @@ logger = logging.getLogger("QTLBot")
 # ===============================
 # .env 読み込み
 # ===============================
-load_dotenv()
+# 【2026-08-27 変更】.env整理案⑩により、.env本体に加えてカテゴリ別
+# ファイル（.env.kyoshin 等、存在すれば）も自動的に追加読み込みする
+# ようになった。読み込み処理自体は core/env_loader.py に集約している
+# （詳細・優先順位のルールはそちらのdocstring参照）。
+load_env_files()
 
 
 # ===============================
@@ -298,7 +303,6 @@ EWS_POSTTONE_SEC   = float(os.getenv("EWS_POSTTONE_SEC", "0.2"))
 # という単一の値(last_rise_at)だけで判定するよう単純化した。
 # 旧KYOSHIN_HIGH_VALUE_BYPASS_SHINDO・旧KYOSHIN_STALE_AFTER_SECは廃止し、
 # 単一のKYOSHIN_EVENT_TIMEOUT_SECに統合した。
-KYOSHIN_GRID_SIZE            = _env_int("KYOSHIN_GRID_SIZE", 10)              # px。旧・画像ピクセルグリッド疑似観測点方式で使用（2026-08 実観測点方式へ切替のため廃止。後方互換のため定義のみ残す）
 KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 秒。NIED側の配信遅延を見込んで遡る基準秒数
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
@@ -313,8 +317,6 @@ KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 
 # 出た時点で通常のポーリングを自動的に再開する。
 KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "1.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
 KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "1.0")) # 秒。イベント継続中の画像通知の再送間隔
-
-KYOSHIN_MIN_ACTIVE_PIXELS    = _env_int("KYOSHIN_MIN_ACTIVE_PIXELS", 2)       # 個。旧・画像ピクセルグリッド疑似観測点方式で使用（2026-08 実観測点方式へ切替のため廃止。後方互換のため定義のみ残す）
 
 # HSVマスク処理で「揺れ候補ピクセル」とみなす実震度の下限値。
 # core.kyoshin_shared.estimate_max_shindo_from_image
@@ -543,27 +545,15 @@ JISHIN_KANCHI_SOUND_ENABLE  = _env_bool("JISHIN_KANCHI_SOUND_ENABLE", True)
 # （専用音源が用意できるまでの暫定値）。
 JISHIN_KANCHI_SOUND_FILE = os.getenv("JISHIN_KANCHI_SOUND_FILE", "vxse53.mp3")
 
-# 【2026-08-23 追加】音声読み上げ・効果音のイベント単位管理。
-#
-# 地震感知情報（code=9611）は同一イベント（started_atで識別される
-# 一連の観測）について、件数(count)が増えるたびに何度も更新
-# メッセージが配信される。これに対して単純に毎回音声読み上げ・
-# 効果音を鳴らすと、実運用で「ずっと読み上げや音声再生が続いて
-# うるさい」という実害が確認された。
-#
-# EEWがEventIDで同一イベントの複数報を管理するのに倣い、
-# started_at（仕様上「イベントを一意に識別するキー」と明記）を
-# イベント識別子として使う。
-#
-# 【2026-08-27 仕様変更】当初は「効果音は初回のみ・読み上げは
-# count が本設定値以上増えるたびに再トリガー」という別ルールだったが、
-# 件数が伸びるたびに読み上げが繰り返し鳴ってうるさいとの指摘を受け、
-# 音声読み上げ・効果音とも「第一報（started_atを初めて見たとき）の
-# 1回のみ」に統一した（cogs/jishin_kanchi.py の _judge_audio_triggers
-# 参照）。そのため以下の JISHIN_KANCHI_SPEECH_COUNT_STEP は現在どこからも
-# 参照されていない。既存の .env に設定済みの場合でもエラーにならない
-# よう、設定項目自体は後方互換のため残してある（将来的に削除予定）。
-JISHIN_KANCHI_SPEECH_COUNT_STEP = _env_int("JISHIN_KANCHI_SPEECH_COUNT_STEP", 50)
+# 【2026-08-23 追加、2026-08-27 仕様変更で完全廃止】
+# 以前は「読み上げは件数(count)が本設定値以上増えるたびに再トリガー」
+# という仕様だったが、繰り返し鳴ってうるさいとの指摘を受け、音声読み
+# 上げ・効果音とも「第一報（started_atを初めて見たとき）の1回のみ」に
+# 統一した（cogs/jishin_kanchi.py の _judge_audio_triggers 参照）。
+# 旧仕様専用のJISHIN_KANCHI_SPEECH_COUNT_STEPはどこからも参照されなく
+# なったため、2026-08-27に完全削除した（.env整理案①）。既存の .env に
+# この変数が残っていても python-dotenv は未知のキーを単に無視するだけ
+# なのでエラーにはならない。
 
 # イベント状態（次に読み上げる件数のしきい値等）を保持しておく期限。
 # この秒数以上更新が無いイベントは、内部状態から削除する

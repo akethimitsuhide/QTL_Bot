@@ -206,6 +206,21 @@ python bot.py
 
 ## 環境変数リファレンス
 
+### ファイル構成（2026-08-27〜）
+QTL_Bot の設定は次の2種類のファイルで構成される。
+
+| ファイル | 役割 | 通常運用での要否 |
+|:---|:---|:---|
+| `.env`（`.env.example`をコピー） | Discordトークン・チャンネルID・通知フィルター等、本体設定 | 必須 |
+| `.env.kyoshin`（`.env.kyoshin.example`をコピー） | 強震モニタの誤検知対策アルゴリズム調整値（上級者向け） | 通常は不要（無くても既定値で動作する） |
+
+`.env` 本体の読み込み後、`.env.kyoshin` が存在すれば自動的に追加読み込みされる（`core/env_loader.py`）。同じ変数を両方に書いた場合は `.env` 本体側が優先される。`python3 bot.py --starter` で対話的に作成する場合、強震モニタの詳細チューニングを希望した場合のみ `.env.kyoshin` の作成も案内される。
+
+設定内容がコードの実際の参照箇所と食い違っていないか（廃止した変数の消し忘れ・追記漏れ等）を機械的にチェックしたい場合:
+```bash
+python3 bot.py --check_env
+```
+
 ### Discord 設定
 | 変数名 | 必須 | 既定値 | 説明 |
 |:---|:---:|:---|:---|
@@ -221,6 +236,8 @@ python bot.py
 | `OTHER_CHANNEL_ID` | | CHANNEL_ID | その他情報（長周期地震動等） |
 | `KYOSHIN_CHANNEL_ID` | | OTHER_CHANNEL_ID | 強震モニタ専用チャンネル |
 | `ADMIN_CHANNEL_ID` | | 0（無効） | エラー通知用管理者チャンネル |
+
+多段フォールバックの解決結果（結局どのチャンネルに何が送られるか）は、`.env`を読むよりも `!status`/`/qtl_status` の「通知先チャンネルマッピング」欄で確認する方が確実（`.env整理案⑤`、2026-08-27追加。同じ宛先になっているものはグルーピングして表示される）。
 
 ### 通知フィルター設定
 | 変数名 | 既定値 | 説明 |
@@ -306,28 +323,36 @@ python bot.py
 | `KYOSHIN_STATIONS_SOURCE_URL` | ingen084氏のリポジトリURL | 実観測点データ（`intensity-points.json`）の取得元。通常変更不要 |
 | `KYOSHIN_STATIONS_CACHE_PATH` | kyoshin_stations_cache.json | 観測点データのキャッシュファイルパス（`.gitignore`対象） |
 | `KYOSHIN_STATIONS_REFRESH_SEC` | 3600 | 観測点データの再取得間隔（秒）。起動時はキャッシュ優先、以後この間隔で追従する |
-| `KYOSHIN_NEIGHBOR_K` | 6 | 近隣観測点として扱う件数（地理的K近傍）。`KYOSHIN_NEIGHBOR_TRIGGER_COUNT`より大きい値にすること |
+| `KYOSHIN_NEIGHBOR_K` | 6 | 近隣観測点として扱う件数（地理的K近傍）。`.env.kyoshin`の`KYOSHIN_NEIGHBOR_TRIGGER_COUNT`より大きい値にすること |
 | `KYOSHIN_IMAGE_DELAY_SEC` | 6 | `latest.json` 取得失敗時のフォールバック探索で遡る基準秒数 |
 | `KYOSHIN_IMAGE_STEP_SEC` | 3 | フォールバック探索で画像が見つからない場合に遡るステップ幅（秒） |
 | `KYOSHIN_IMAGE_MAX_RETRY` | 4 | フォールバック探索の最大リトライ回数 |
 | `KYOSHIN_POLL_INTERVAL_SEC` | 1.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒）。EEW発表中（`EewCog.monitored_event_id`が設定されている間）はポーリング自体をスキップし、`EewCog.vibration_monitor_loop`に画像取得を一本化する（防災科研への負荷軽減） |
 | `KYOSHIN_NOTIFY_INTERVAL_SEC` | 1.0 | イベント継続中の通知再送間隔（秒）。EEW発表中は同様に通知をスキップする |
-| `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補とみなす実震度の下限。`core.kyoshin_shared.estimate_max_shindo_from_image`（EEW発表時トリガーの振動モニタ機能）が使用 |
+| `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
+| `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
+| `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
+| `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
+| `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
+| `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
+
+**【2026-08-27】誤検知対策アルゴリズム調整値は `.env.kyoshin` に分離**
+以下の6個は、実機ログを見ながらチューニングする上級者向けパラメータのため、`.env.example`（本体）ではなく `.env.kyoshin.example` に分離されている（`.env整理案③・⑩`）。何も設定しなくても以下と同じデフォルト値で動作するため、通常運用では `.env.kyoshin` を作る必要はない。詳細チューニングをしたい場合のみ `cp .env.kyoshin.example .env.kyoshin` して編集する（`python3 bot.py --starter` の詳細設定メニューからも作成できる）。
+
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補とみなす実震度の下限 |
 | `KYOSHIN_RISE_THRESHOLD` | 1.0 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する。実観測点方式（1ピクセルサンプリング、平滑化なし）移行後の誤検知対策として0.5から引き上げ済み（一時的な緩和措置） |
 | `KYOSHIN_BASELINE_WINDOW_START_SEC` | 10.0 | 基準値計算に使う過去サンプルの開始位置（秒前） |
 | `KYOSHIN_BASELINE_WINDOW_END_SEC` | 25.0 | 基準値計算に使う過去サンプルの終了位置（秒前） |
 | `KYOSHIN_HISTORY_WINDOW_SEC` | 25.0 | 観測点ごとに保持する震度履歴の長さ（秒）。BASELINE_WINDOW_END_SEC以上を推奨 |
 | `KYOSHIN_NEIGHBOR_TRIGGER_COUNT` | 3 | 上昇トリガー確定に必要な、K近傍のうち同時に上昇トリガーが立っている観測点数。実観測点のK近傍は画像上で数ピクセルしか離れていないことが多く色ノイズが相関しやすいため、2から引き上げ済み（一時的な緩和措置） |
-| `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
-| `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
-| `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
-| `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
 
-> `KYOSHIN_GRID_SIZE` / `KYOSHIN_MIN_ACTIVE_PIXELS` は旧・画像ピクセルグリッド疑似観測点方式（〜2026-08）で使用していた設定で、実観測点データ方式への移行に伴い現在は未使用（後方互換のため定義のみ残っている）。
-| `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
-| `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
+**【2026-08-27 完全削除】** `KYOSHIN_GRID_SIZE` / `KYOSHIN_MIN_ACTIVE_PIXELS` は旧・画像ピクセルグリッド疑似観測点方式（〜2026-08）で使用していた設定で、実観測点データ方式への移行に伴い未使用化していたが、`.env整理案①`によりコード側の定義自体を完全に削除した（既存`.env`にこれらの変数が残っていてもエラーにはならない）。
 
 ### 音声設定
+`python3 bot.py --starter` で音声読み上げを設定すると、選ばなかった方のエンジンの設定行は `.env` 内で自動的にコメントアウトされる（`.env整理案④`、2026-08-27追加）。手動で `.env` を編集する場合は、使わない方のブロックは無視して構わない（読み込まれても`TTS_ENGINE`で選ばれていない方は使用されない）。
+
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `TTS_ENGINE` | aquestalk | 読み上げエンジン（`aquestalk` / `scratchtts`） |
@@ -749,7 +774,7 @@ python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
 | `!status` | プレフィックス | 管理者 | Bot 稼働状態を Embed で表示 |
 | `/qtl_status` | スラッシュ | 管理者 | `!status` と同じ内容（スラッシュコマンド版） |
 
-表示内容：システムリソース / EEW 状態 / API 受信状況（地震・津波・地震感知情報・長周期地震動・火山・USGS・強震モニタ画像解析検知・長周期地震動モニタ 等） / タスク稼働状態 / フィルター設定
+表示内容：システムリソース / EEW 状態 / API 受信状況（地震・津波・地震感知情報・長周期地震動・火山・USGS・強震モニタ画像解析検知・長周期地震動モニタ 等） / タスク稼働状態 / 通知先チャンネルマッピング / フィルター設定
 
 ---
 
@@ -900,6 +925,12 @@ QTL_Bot/
 │   └── kyoshin_monitor.py    - KyoshinMonitorCog: 強震モニタ画像解析による揺れ検知
 └── core/
     ├── config.py                  - 環境変数読み込み・定数定義
+    ├── env_loader.py              - .env本体＋カテゴリ別envファイル（.env.kyoshin等）の
+    │                                 読み込み一元管理（2026-08-27〜、.env整理案⑩）
+    ├── env_starter.py             - `python3 bot.py --starter` 対話式セットアップウィザード
+    │                                 （2026-08-27〜）
+    ├── env_audit.py               - `python3 bot.py --check_env` .env整合性チェック
+    │                                 （2026-08-27〜、.env整理案⑦）
     ├── logging_setup.py           - ログ設定（RotatingFileHandler・重複抑制）
     ├── audio.py                   - AudioMixin（キュー実体を持つCog用）/ AudioClientMixin（AudioCog参照用）
     ├── tts_engines.py             - TTSエンジン（AquesTalkPi/ScratchTTS）の切り替え・音声合成
@@ -990,5 +1021,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-27（`!status`/`/qtl_status`のAPI受信状況・タスク稼働状態に地震感知情報・強震モニタ画像解析検知・長周期地震動モニタを追加、USGS設定フィールドを削除／複数EEWサマリー通知に地域ごとの予想震度を追加／地震感知情報の地図画像ID（`_id`優先に修正）／音声トリガーを第一報のみに統一／`--starter`対話式セットアップウィザード追加／Web Dashboardデフォルト値の食い違いを修正／全ファイルの未使用importをpyflakesで機械チェックし整理）
+**最終更新**: 2026-08-27（`.env`整理：完全に未使用の変数(`KYOSHIN_GRID_SIZE`等)をconfig.pyごと削除／強震モニタの誤検知対策アルゴリズム調整値6個を`.env.kyoshin`に分離しカテゴリ別envファイル読み込み機構(`core/env_loader.py`)を新設／`.env.example`内の無関係セクションを独立化／`--starter`にTTS未選択エンジンの自動間引き・詳細設定メニューを追加／`--check_env`による.env整合性チェックを新設／`!status`に通知先チャンネルマッピング表示を追加／`!status`/`/qtl_status`のAPI受信状況・タスク稼働状態に地震感知情報・強震モニタ画像解析検知・長周期地震動モニタを追加、USGS設定フィールドを削除／複数EEWサマリー通知に地域ごとの予想震度を追加／地震感知情報の地図画像ID（`_id`優先に修正）／音声トリガーを第一報のみに統一）
 **対応 Python**: 3.11+
