@@ -91,6 +91,21 @@ LOG_LEVEL_CONSOLE         = os.getenv("LOG_LEVEL_CONSOLE", LOG_LEVEL)
 LOG_DUPLICATE_THRESHOLD   = int(os.getenv("LOG_DUPLICATE_THRESHOLD", "60"))
 LOG_SUPPRESS_HTTP_SUCCESS = os.getenv("LOG_SUPPRESS_HTTP_SUCCESS", "true").lower() == "true"
 
+# 【2026-08-29 追加】ログファイルの出力先パス。
+# 従来は core/logging_setup.py 内で "qtlbot.log"（相対パス）を直接
+# 指定していたため、systemdサービス化等で WorkingDirectory の設定を
+# 誤ると、意図しないディレクトリにログが書き込まれる（最悪、権限エラーで
+# ログ自体が書けなくなる）事故が起こりうる状態だった。
+# LOG_FILE_PATH が未設定の場合は、プロジェクトルート
+# （このファイルの1階層上 = core/ の親ディレクトリ）基準の絶対パスを
+# デフォルト値とすることで、実行時のカレントディレクトリに依存しない
+# 挙動を保証する。値が空文字列（.env に `LOG_FILE_PATH=` とだけ書かれた
+# 状態）の場合も「未設定」として扱うため _getenv_nonempty を使う。
+_PROJECT_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_FILE_PATH = _getenv_nonempty(
+    "LOG_FILE_PATH", os.path.join(_PROJECT_ROOT_DIR, "qtlbot.log")
+)
+
 # ===============================
 # Discord 基本設定
 # ===============================
@@ -432,6 +447,17 @@ KYOSHIN_MIN_STATIONS_SHINDO1 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO1", 2)
 # 圧迫するため、通常運用では false を推奨。
 KYOSHIN_DEBUG_SAVE_IMAGE     = _env_bool("KYOSHIN_DEBUG_SAVE_IMAGE", False)
 KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_debug_images")
+
+# 【2026-08-29 追加】強震モニタのポーリング処理（画像ダウンロード・
+# デコード・観測点ピクセルサンプリング）にかかった時間を計測し、
+# この秒数を超えた場合のみ WARNING ログを出す閾値。
+# KYOSHIN_POLL_INTERVAL_SEC（既定1.0秒）ごとに毎回実行される処理
+# であり、Raspberry Pi等の低スペック環境で処理時間がポーリング間隔に
+# 近づく・超えることがないかを、実測に基づいて把握するために追加した
+# （cogs/kyoshin_monitor.py._fetch_current_shindo_map 参照）。
+# 毎回DEBUGログには常時出力するため、閾値を超えた場合のみ運用上
+# 気づきやすいWARNINGレベルでも出す、という2段構えにしている。
+KYOSHIN_SLOW_FETCH_THRESHOLD_SEC = float(os.getenv("KYOSHIN_SLOW_FETCH_THRESHOLD_SEC", "0.5"))
 
 # ===============================
 # EEW / API エラー挙動設定

@@ -21,6 +21,7 @@ from core.config import (
     LOG_MAX_BYTES, LOG_BACKUP_COUNT,
     LOG_LEVEL_FILE, LOG_LEVEL_CONSOLE,
     LOG_DUPLICATE_THRESHOLD, LOG_SUPPRESS_HTTP_SUCCESS,
+    LOG_FILE_PATH,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -107,8 +108,17 @@ def _align_logfiles_on_startup(base: str, backup_count: int) -> None:
 
 def setup_logging() -> None:
     """ロギングハンドラーをセットアップする（ローテーション対応 + ログ肥大化対策）。"""
-    # 起動時: mtime が最新のログファイルを qtlbot.log に持ってきてから handler を生成
-    _align_logfiles_on_startup("qtlbot.log", LOG_BACKUP_COUNT)
+    # 【2026-08-29 修正】従来は "qtlbot.log" という相対パスを直接
+    # 埋め込んでいたため、systemdサービス化等で WorkingDirectory の
+    # 設定を誤ると意図しないディレクトリにログが書かれる（最悪、
+    # 権限エラーでログ自体が書けない）事故が起こりうる状態だった。
+    # core.config.LOG_FILE_PATH は、未設定時はプロジェクトルート基準の
+    # 絶対パスをデフォルトとしつつ、.env の LOG_FILE_PATH で明示的に
+    # 上書きできるようにしたもの（ログの出力先を変えたい運用にも対応）。
+    log_path = LOG_FILE_PATH
+
+    # 起動時: mtime が最新のログファイルを log_path に持ってきてから handler を生成
+    _align_logfiles_on_startup(log_path, LOG_BACKUP_COUNT)
 
     file_level    = getattr(logging, LOG_LEVEL_FILE.upper(), logging.DEBUG)
     console_level = getattr(logging, LOG_LEVEL_CONSOLE.upper(), logging.INFO)
@@ -120,7 +130,7 @@ def setup_logging() -> None:
 
     # ── ファイルハンドラー（詳細・ローテーション）──
     _file_inner = RotatingFileHandler(
-        "qtlbot.log",
+        log_path,
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
@@ -149,6 +159,6 @@ def setup_logging() -> None:
 
     logger.info(
         f"ロギングをセットアップしました "
-        f"(FILE={LOG_LEVEL_FILE}/CONSOLE={LOG_LEVEL_CONSOLE}, "
+        f"(path={log_path}, FILE={LOG_LEVEL_FILE}/CONSOLE={LOG_LEVEL_CONSOLE}, "
         f"maxSize={LOG_MAX_BYTES}bytes, dup抑制={LOG_DUPLICATE_THRESHOLD}s)"
     )
