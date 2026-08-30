@@ -65,7 +65,28 @@ QuakeInfoCog（code=551）・TsunamiCog（code=552）はそれぞれ独立して
     python3 bot.py --test_ews                  # EWS信号音（MajorWarning相当）を再生
     python3 bot.py --test_ews Warning           # EWS信号音（Warning相当）を再生
     python3 bot.py --test_all tests/fixtures/   # TEST_TARGETS全対象を一括実行
+    python3 bot.py --test_auto path/to/downloaded.json  # 中身の形式を自動判定して実行
     （その他の対応Cogは core/test_runner.py の TEST_TARGETS を参照）
+
+【2026-08-30 追加: --test_auto（自動判定）と対応Cogの拡充】
+気象庁から実際にダウンロードしたXML変換JSON（例: 津波警報・注意報・
+予報＝VTSE41形式）を、形式の似ている別の --test_<cog>（例: P2P地震
+情報APIのcode=552形式を期待する --test_tsunami）に誤って渡してしまい、
+正しく読み込めない事例が発生した。情報ソースによってJSONの形式が
+細かく異なるため、どの --test_<cog> を使えばよいかをファイルの中身
+から自動判定できるよう --test_auto を追加した（判定ロジックは
+core/test_runner.py の sniff_test_target 参照。区別がつかない場合は
+自動実行せず候補を提示するに留める）。
+
+あわせて、これまでCLIテスト対象が存在しなかった以下も追加した:
+    python3 bot.py --test_jishin_kanchi tests/fixtures/jishin_kanchi_sample.json
+    python3 bot.py --test_nankai_trough tests/fixtures/nankai_trough_sample.json
+    python3 bot.py --test_hypocenter_update tests/fixtures/hypocenter_update_sample.json
+
+また、tsunami_observation / tsunami_forecast の expected_fields が
+P2P地震情報API形式（"areas"）のまま誤って設定されており、正しい
+入力JSONを渡しても「フィールド不足」という誤った警告が出ていた
+不具合も修正した。
 
 実際にDiscordへ接続し、対象Cogの notify_* 関数を is_test=True で呼び出す
 （＝実チャンネルに「【テスト】」接頭辞付きの通知が実際に送信され、
@@ -125,7 +146,7 @@ from discord.ext import commands
 
 from core.config import BOT_TOKEN
 from core.logging_setup import setup_logging
-from core.test_runner import parse_test_args, run_cli_test, run_all_cli_tests
+from core.test_runner import parse_test_args, run_cli_test, run_all_cli_tests, run_auto_cli_test
 
 logger = logging.getLogger("QTLBot")
 
@@ -157,6 +178,11 @@ if _test_target is not None:
         if cog_key == "__all__":
             # --test_all: json_path にはfixtureディレクトリのパスが入る
             await run_all_cli_tests(bot, json_path)
+        elif cog_key == "__auto__":
+            # --test_auto: json_path には判定対象のJSONファイルパスが入る
+            # （2026-08-30 追加。core/test_runner.py の
+            #  run_auto_cli_test / sniff_test_target 参照）
+            await run_auto_cli_test(bot, json_path)
         else:
             await run_cli_test(bot, cog_key, json_path)
 
@@ -172,6 +198,8 @@ async def main():
         cog_key, json_path = _test_target
         if cog_key == "__all__":
             target_desc = f"--test_all {json_path}（全対象一括実行）"
+        elif cog_key == "__auto__":
+            target_desc = f"--test_auto {json_path}（自動判定実行）"
         else:
             target_desc = f"--test_{cog_key} {json_path}"
         logger.warning(f"★★★ CLIテストモードで起動します ★★★ 対象: {target_desc}")

@@ -21,8 +21,23 @@ QTL_Botには自動テストが存在せず、EEW・地震情報・津波・火�
     python3 bot.py --test_volcano sample_volcano.json
     python3 bot.py --test_usgs sample_usgs.json
     python3 bot.py --test_other sample_other.json
+    python3 bot.py --test_auto sample_unknown.json  # 形式を自動判定して実行（2026-08-30追加）
 
 対応する引数と、内部で呼び出す Cog / メソッドの対応は TEST_TARGETS を参照。
+
+【--test_auto による自動判定実行】
+    python3 bot.py --test_auto path/to/downloaded.json
+
+情報ソースによってJSONの形式が細かく異なり、どの --test_<cog> を
+使えばよいか一見して分かりにくい（特に気象庁XML由来のControl/Head/
+Body形式は、津波観測情報・津波予報・南海トラフ情報等で外側の形を
+共有している）。実際に、津波警報・注意報・予報（VTSE41）形式の
+JSONを --test_tsunami（P2P地震情報API形式用）に渡してしまい、
+正しく読み込めなかった事例があったため追加した。
+sniff_test_target() がJSONの構造（Body配下の具体的なキー等）から
+候補を判定し、1件に絞れた場合のみ自動実行する。0件（未知の形式）
+または2件以上（区別不能）の場合は自動実行せず、その旨を表示して
+ユーザーに判断を委ねる。
 
 【--test_all による一括実行】
     python3 bot.py --test_all tests/fixtures/
@@ -86,9 +101,19 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     ディレクトリパスが入る点に注意）。
     実際にどの対象を実行するか（<cog_key>_sample.json の探索・
     存在確認）は run_all_cli_tests() 側で行う。
+
+    【--test_auto <json_path>】
+    【2026-08-30 追加】どの --test_<cog> を使えばよいか判断が難しい
+    JSONファイル（気象庁から実際にダウンロードしたXML変換JSON等）を
+    渡すと、中身の構造（フィンガープリント）から対象を自動判定して
+    実行する。実際に「津波警報・注意報・予報（VTSE41）形式のJSONを
+    --test_tsunami に渡してしまい、正しく読み込めなかった」という
+    事例があったための追加（sniff_test_target 参照）。
+    検出時は特別な cog_key "__auto__" を使う。
     """
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--test_all", metavar="FIXTURES_DIR", default=None)
+    parser.add_argument("--test_auto", metavar="JSON_PATH", default=None)
     for cog_key, target in TEST_TARGETS.items():
         if target.get("requires_json", True):
             parser.add_argument(f"--test_{cog_key}", metavar="JSON_PATH", default=None)
@@ -108,6 +133,10 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     if known_args.test_all is not None:
         CLI_TEST_MODE = True
         return "__all__", known_args.test_all
+
+    if known_args.test_auto is not None:
+        CLI_TEST_MODE = True
+        return "__auto__", known_args.test_auto
 
     for cog_key, target in TEST_TARGETS.items():
         json_path = getattr(known_args, f"test_{cog_key}", None)
@@ -188,13 +217,32 @@ TEST_TARGETS = {
         "cog_name": "TsunamiCog",
         "method": "notify_tsunami_observation",
         "data_kwarg": "detail",
-        "expected_fields": ["areas"],
+        # 【2026-08-30 修正】以前は ["areas"] だったが、これは
+        # notify_tsunami（P2P地震情報APIのcode=552形式）が使う
+        # トップレベルキーであり、notify_tsunami_observation が実際に
+        # 受け取る気象庁XML由来のControl/Head/Body形式には存在しない。
+        # コピペミスと見られ、正しい入力JSONを渡してもこの検証のせいで
+        # 「フィールド不足」という誤った警告が出ていた
+        # （sniff_test_target のフィンガープリントも参照）。
+        "expected_fields": ["Control", "Head", "Body"],
     },
     "tsunami_forecast": {
         "cog_name": "TsunamiCog",
         "method": "notify_tsunami_forecast",
         "data_kwarg": "detail",
-        "expected_fields": ["areas"],
+        # 【2026-08-30 修正】tsunami_observation と同じ理由で ["areas"] は
+        # 誤り。実際にはControl/Head/Body形式（例: VTSE41 津波警報・
+        # 注意報・予報）を受け取る。
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "jishin_kanchi": {
+        # 【2026-08-30 追加】P2P地震感知情報（code=9611）専用のCLIテスト
+        # 対象が存在しなかったための追加。cogs/jishin_kanchi.py 側の
+        # notify_jishin_kanchi は is_test=True 対応済みだが、これまで
+        # --test_jishin_kanchi で個別に動作確認する手段が無かった。
+        "cog_name": "JishinKanchiCog",
+        "method": "notify_jishin_kanchi",
+        "expected_fields": ["confidence", "started_at"],
     },
     "volcano": {
         "cog_name": "VolcanoCog",
@@ -243,6 +291,25 @@ TEST_TARGETS = {
         "data_kwarg": "list_item",
         "expected_fields": [],
     },
+    "nankai_trough": {
+        # 【2026-08-30 追加】南海トラフ地震臨時情報専用のCLIテスト対象が
+        # 存在しなかったための追加。cogs/tsunami.py.notify_nankai_trough
+        # 参照（tsunami API経由、Body.EarthquakeInfo を含むControl/Head/
+        # Body形式）。
+        "cog_name": "TsunamiCog",
+        "method": "notify_nankai_trough",
+        "data_kwarg": "detail",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "hypocenter_update": {
+        # 【2026-08-30 追加】「顕著な地震の震源要素更新のお知らせ」専用の
+        # CLIテスト対象が存在しなかったための追加。
+        # cogs/tsunami.py.notify_hypocenter_update 参照。
+        "cog_name": "TsunamiCog",
+        "method": "notify_hypocenter_update",
+        "data_kwarg": "detail",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
     "ews": {
         "cog_name": "QuakeInfoCog",
         "method": "_play_ews_signal",
@@ -259,6 +326,128 @@ TEST_TARGETS = {
         "expected_fields": [],
     },
 }
+
+
+def sniff_test_target(data) -> list[str]:
+    """
+    【2026-08-30 追加】JSONデータの構造的特徴（フィンガープリント）から、
+    どの --test_<cog_key> に対応する形式かを推定する。
+
+    背景: 気象庁からダウンロードした実際のXML変換JSON（例: 津波警報・
+    注意報・予報＝VTSE41形式）を、形式の似ている別の --test_<cog>
+    （例: P2P地震情報APIのcode=552形式を期待する --test_tsunami）に
+    誤って渡してしまい、正しく読み込めない事例が発生した。
+    validate_expected_fields によるトップレベルキーの警告だけでは、
+    そもそも「どの --test_<cog> を使うべきか」までは教えてくれない
+    ため、逆に「このJSONはどの形式か」を判定する本関数を新設した。
+
+    注意点: 気象庁XML由来のControl/Head/Body形式は、津波観測情報・
+    津波予報・南海トラフ情報・震源要素更新のお知らせ等、複数の
+    --test_<cog> で共有されている外側の形であり、トップレベルの
+    キーの有無だけでは区別できない。そのため Body 以下の具体的な
+    キー（Body.Tsunami.Observation の有無等）まで見て判定する。
+    各ルールの根拠は対応する notify_* 関数の実際のフィールド
+    アクセス箇所（cogs/tsunami.py, cogs/quake.py, cogs/volcano.py 等）
+    から書き起こしたものであり、推測ではない。
+
+    戻り値: マッチした cog_key のリスト。空リストなら該当なし
+    （未知の形式、または今後 --test_ 対象が追加された形式）。
+    複数該当する場合は、区別する決め手がない、または本当に複数の
+    条件に当てはまる可能性があることを意味する
+    （呼び出し元の run_auto_cli_test 側で、1件に絞れない場合は
+    自動実行せずユーザーに選択を委ねる）。
+    """
+    if not isinstance(data, dict):
+        return []
+
+    matches: list[str] = []
+
+    # ── EEW（Wolfx/P2P code=556 変換後の共通フラット形式）──
+    # cogs/eew.py: data.get("EventID"), data.get("MaxIntensity") 等、
+    # トップレベルの大文字キーで直接アクセスする独自形式。
+    if "EventID" in data and "MaxIntensity" in data:
+        matches.append("eew")
+
+    # ── 地震情報（P2P地震情報APIのcode=551形式）──
+    # cogs/quake.py notify_quake: data.get("issue"), data.get("earthquake")
+    if "issue" in data and "earthquake" in data:
+        matches.append("quake")
+
+    # ── 津波（P2P地震情報APIのcode=552形式）──
+    # cogs/tsunami.py notify_tsunami: data.get("issue"), data.get("areas")
+    # quakeと"issue"を共有するため、"earthquake"が無いことも確認する。
+    if "issue" in data and "areas" in data and "earthquake" not in data:
+        matches.append("tsunami")
+
+    # ── 地震感知情報（P2P地震情報APIのcode=9611形式）──
+    # cogs/jishin_kanchi.py notify_jishin_kanchi:
+    # data.get("confidence"), data.get("started_at"), data.get("area_confidences")
+    if "confidence" in data and "started_at" in data:
+        matches.append("jishin_kanchi")
+
+    # ── USGS（GeoJSON Feature形式）──
+    # cogs/usgs.py notify_usgs_quake: feature.get("properties"), feature.get("geometry")
+    if "properties" in data and "geometry" in data:
+        matches.append("usgs")
+
+    # ── 火山情報系（フラットなcamelCase形式。気象庁XMLをVolcanoCog内で
+    #    事前に変換したもので、Control/Head/Bodyそのものではない）──
+    # volcano: cogs/volcano.py _notify_volcano
+    #   headTitle, volcanoActivity, volcanoPrevention 等
+    if "headTitle" in data and ("volcanoActivity" in data or "volcanoPrevention" in data):
+        matches.append("volcano")
+    # volcano_eruption: cogs/volcano.py _notify_eruption（噴火速報。
+    #   headTitleは持つがvolcanoActivity等は持たない）
+    elif "headTitle" in data and "infoType" in data:
+        matches.append("volcano_eruption")
+    # volcano_warning: cogs/volcano.py _notify_warning（headTitleを
+    #   持たず、代わりにvolcanoInfosを持つ）
+    if "volcanoInfos" in data and "headTitle" not in data:
+        matches.append("volcano_warning")
+
+    # ── 気象庁XML由来のControl/Head/Body形式（複数の --test_<cog> で
+    #    外側の形を共有するため、Body配下の具体的なキーまで見て区別する）──
+    body = data.get("Body")
+    if isinstance(data.get("Control"), dict) and isinstance(data.get("Head"), dict) and isinstance(body, dict):
+        tsunami_body = body.get("Tsunami")
+        tsunami_body = tsunami_body if isinstance(tsunami_body, dict) else {}
+
+        if isinstance(tsunami_body.get("Observation"), dict):
+            # tsunami_observation: cogs/tsunami.py notify_tsunami_observation
+            # （Forecastを併せ持つ場合もあるが、Observationがあれば
+            #   優先的にこちらと判定する。実際のVTSE51/52がこの形）
+            matches.append("tsunami_observation")
+        elif isinstance(tsunami_body.get("Forecast"), (dict, list)):
+            # tsunami_forecast: cogs/tsunami.py notify_tsunami_forecast
+            # （Observationを持たずForecastのみ＝VTSE41系）
+            matches.append("tsunami_forecast")
+
+        if isinstance(body.get("EarthquakeInfo"), dict):
+            # nankai_trough: cogs/tsunami.py notify_nankai_trough
+            matches.append("nankai_trough")
+        elif isinstance(body.get("Earthquake"), (dict, list)) and not tsunami_body:
+            # hypocenter_update: cogs/tsunami.py notify_hypocenter_update
+            # （Tsunamiを持たずEarthquakeのみ＝震源要素更新のお知らせ）
+            matches.append("hypocenter_update")
+
+    # ── JMA list.json の1エントリ形式（"json"キーで詳細JSONのファイル名を
+    #    指すだけの、上記のどの形式よりも小さい構造）──
+    # other_long_period / other_quake_advisory はどちらもこの形式を
+    # 共有しており、内容（ttlフィールドのテキスト）でしか区別できない。
+    # ttlが無い、または判定できない場合は両方を候補として返す
+    # （呼び出し元で自動実行せず、ユーザーに選択を委ねる）。
+    if "json" in data and not matches:
+        ttl = str(data.get("ttl", ""))
+        if "長周期地震動" in ttl:
+            matches.append("other_long_period")
+        elif any(kw in ttl for kw in ("後発地震注意情報", "南海トラフ", "震源要素更新")):
+            matches.append("other_quake_advisory")
+        else:
+            # ttlで判別できない場合は両方候補として提示する
+            matches.append("other_long_period")
+            matches.append("other_quake_advisory")
+
+    return matches
 
 
 def validate_expected_fields(cog_key: str, data: dict) -> None:
@@ -522,3 +711,84 @@ async def run_all_cli_tests(bot, fixtures_dir: str) -> None:
 
     await asyncio.sleep(3)
     await bot.close()
+
+
+async def run_auto_cli_test(bot, json_path: str) -> None:
+    """
+    --test_auto <json_path> で指定された自動判定テストを実行する。
+
+    【2026-08-30 追加の経緯】
+    気象庁からダウンロードした実際のXML変換JSON（例: 津波警報・注意報・
+    予報＝VTSE41形式）を、形式の似ている別の --test_<cog>（例:
+    P2P地震情報APIのcode=552形式を期待する --test_tsunami）に誤って
+    渡してしまい、正しく読み込めない事例が発生した。情報ソースごとに
+    形式が異なる中で、どの --test_<cog> を使えばよいかをファイルの
+    中身から判断できるようにするための機能。
+
+    sniff_test_target() でJSONの構造から候補となる cog_key を推定し、
+    - 候補が0件: 未知の形式。既存のどの --test_<cog> にも一致しない
+      旨を表示し、何もせず終了する（誤った対象を推測で実行しない）。
+    - 候補が1件: その cog_key で自動的にテストを実行する
+      （通常の --test_<cog_key> と同じ処理を内部的に呼び出す）。
+    - 候補が2件以上: 区別する決め手がない状態。全候補を表示し、
+      どちらの --test_<cog> を明示的に使うべきかをユーザーに委ねる
+      （自動実行はしない。誤った対象で実行してしまうことを避ける
+      ため）。
+
+    Bot が on_ready 済みで呼び出すこと。実行後は明示的にプロセスを
+    終了する。
+    """
+    banner = "=" * 60
+    print(banner)
+    print(f"[TEST] これは自動判定テスト実行です（--test_auto） — 入力: {json_path}")
+    print(banner)
+    logger.warning(f"★★★ CLIテストモード（自動判定）で実行中 ★★★ 入力={json_path}")
+
+    try:
+        data = load_test_json(json_path, exit_on_error=False)
+    except (FileNotFoundError, json.JSONDecodeError):
+        await bot.close()
+        sys.exit(1)
+
+    candidates = sniff_test_target(data)
+
+    if not candidates:
+        print("[TEST] 判定不能: このJSONの構造に一致する --test_<cog> が見つかりませんでした")
+        print("[TEST]   既存のどの形式（EEW/地震情報/津波/地震感知情報/火山/USGS等）にも")
+        print("[TEST]   一致しないようです。sniff_test_target() のフィンガープリントに")
+        print("[TEST]   該当ルールが無い新しい形式である可能性があります。")
+        print(f"[TEST]   トップレベルキー: {list(data.keys()) if isinstance(data, dict) else '（dict以外）'}")
+        logger.warning(f"CLIテスト（自動判定）失敗: 候補が見つかりません（トップレベルキー: {list(data.keys()) if isinstance(data, dict) else data}）")
+        print(banner)
+        await bot.close()
+        sys.exit(1)
+
+    if len(candidates) > 1:
+        print(f"[TEST] 判定保留: 複数の候補が見つかりました（{', '.join(candidates)}）")
+        print("[TEST]   このJSONだけでは一意に絞り込めないため、自動実行はしません。")
+        print("[TEST]   以下のいずれかを明示的に指定して実行してください:")
+        for c in candidates:
+            print(f"[TEST]     python3 bot.py --test_{c} {json_path}")
+        logger.warning(f"CLIテスト（自動判定）: 候補複数のため保留 candidates={candidates}")
+        print(banner)
+        await bot.close()
+        sys.exit(1)
+
+    cog_key = candidates[0]
+    target = TEST_TARGETS[cog_key]
+    print(f"[TEST] 判定結果: --test_{cog_key} 相当と判断しました "
+          f"({target['cog_name']}.{target['method']})")
+    logger.warning(f"CLIテスト（自動判定）: {cog_key} と判定 ({target['cog_name']}.{target['method']})")
+
+    cog, method = _resolve_cog_and_method(bot, cog_key, target)
+    if cog is None or method is None:
+        print(banner)
+        await bot.close()
+        sys.exit(1)
+
+    try:
+        await _invoke_test_target(cog_key, target, cog, method, json_path)
+    finally:
+        print(banner)
+        await asyncio.sleep(3)
+        await bot.close()
