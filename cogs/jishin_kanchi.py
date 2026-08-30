@@ -46,6 +46,7 @@ from core.config import (
     JISHIN_KANCHI_SPEECH_ENABLE, JISHIN_KANCHI_SOUND_ENABLE,
     JISHIN_KANCHI_SOUND_FILE,
     JISHIN_KANCHI_EVENT_STATE_TTL_SEC,
+    JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC,
 )
 from core.audio import AudioClientMixin
 from core.p2p_image import P2PImageMixin
@@ -72,39 +73,51 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self.jishin_kanchi_channel = None
         self.session = None  # P2PImageMixin._attach_p2p_image が要求する
 
-        # 直近に処理したイベントのstarted_atを記憶し、同一イベントの
-        # 更新（updated_atのみ変化）で毎回テキスト通知（Embed送信）が
-        # 飛ぶのを抑制する用途は現状設けていない（更新のたびに最新の
-        # 件数・地域状況を伝える価値があるため、意図的に間引かない）。
-        # started_atは仕様上「イベントを一意に識別するキー」と明記
-        # されているため、将来的な追加抑制のフックとして
-        # _last_started_at を保持だけしておく）。
-        #
-        # 【2026-08-30 追記】一方で「地図画像の添付タスク」については、
-        # 更新のたびに新規タスクを起動し続けると、感知報告が多く
-        # 集まる地震（大規模・関東等）で core.p2p_image._cdn_semaphore
-        # を占有し尽くし、cogs/quake.py側の画像取得まで巻き添えで
-        # 失敗させる実害が確認されたため、_event_states（下記）を使って
-        # 「イベントの第一報のみ」に間引くようにした
-        # （notify_jishin_kanchi 内のコメント、_judge_audio_triggers
-        # 参照）。テキスト通知自体の頻度はこの変更の対象外。
+        # 直近に処理したイベントのstarted_atを記憶する用途で追加した
+        # 属性。started_atは仕様上「イベントを一意に識別するキー」と
+        # 明記されているため、将来的な追加抑制のフックとして
+        # _last_started_at を保持だけしておく（現状これ自体は参照
+        # されておらず、実際のイベント単位の状態管理は下記
+        # _event_states と _judge_event_notification が担っている）。
         self._last_started_at: str | None = None
 
         # 【2026-08-23 追加、2026-08-27 仕様変更、2026-08-30 用途拡張】
-        # 音声読み上げ・効果音・画像添付タスクの、イベント単位管理。
+        # テキスト通知（Embed送信）・音声読み上げ・効果音・画像添付
+        # タスクの、イベント単位の一元管理。
         # キー: started_at（イベント識別子＝第一報の識別子）
-        # 値: {"last_seen_at": 最終更新時刻（time.monotonic()基準、TTL掃除用）}
+        # 値: {
+        #   "last_seen_at":     最終更新時刻（time.monotonic()基準、
+        #                       TTL掃除用）,
+        #   "last_notified_at": 直近に実際にEmbedを送信した時刻
+        #                       （time.monotonic()基準、更新間隔の
+        #                       間引き判定用）,
+        # }
         #
         # 【2026-08-27】以前は効果音のみ初回限定・読み上げはcount+50件
         # ごとに再トリガーしていたが、実運用で読み上げが繰り返し鳴って
         # うるさいとの指摘を受け、音声読み上げ・効果音とも「第一報
-        # （started_atを初めて見たとき）の1回のみ」に統一した
-        # （詳細は _judge_audio_triggers 参照）。
+        # （started_atを初めて見たとき）の1回のみ」に統一した。
         #
-        # 【2026-08-30】画像添付タスクの起動可否も、この「第一報かどうか」
-        # の判定結果（_judge_audio_triggersの戻り値）をそのまま流用する
-        # ようにした。CDNセマフォ占有によるquake.py側への巻き添え障害
-        # 対策（notify_jishin_kanchi 内のコメント参照）。
+        # 【2026-08-30 (1)】感知報告が短時間に大量発生する地震（大規模・
+        # 関東等）で、更新のたびに新規の画像添付タスク（_attach_p2p_image）
+        # が起動し続け、core.p2p_image._cdn_semaphore
+        # （P2P_IMAGE_CDN_CONCURRENCY、既定3）を占有し尽くし、
+        # cogs/quake.py側の画像取得まで巻き添えで失敗させる実害が
+        # 確認された。画像添付タスクの起動可否も「第一報かどうか」の
+        # 判定結果（is_first_report）に統一した。
+        #
+        # 【2026-08-30 (2)】同じ理由で、テキスト通知（Embed送信）自体も
+        # 更新のたびに毎回送信されており、チャンネルが短時間に数十件の
+        # 同種メッセージで埋まる実害が確認されたため、
+        # JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC（既定10秒）未満の
+        # 更新は送信自体をスキップするようにした。
+        #
+        # これらのイベント単位の判定はすべて _judge_event_notification
+        # （旧名 _judge_audio_triggers）に一本化されている。判定基準を
+        # 分散させると、呼び出し順序の違いにより「初見イベントなのに
+        # 既知扱いされる」等の不整合を生みやすいため、単一の判定関数の
+        # 戻り値をテキスト送信・音声・効果音・画像添付のすべてが
+        # 参照する設計にしている。
         self._event_states: dict[str, dict] = {}
 
         self._last_recv: dict[str, datetime | None] = {"jishin_kanchi": None}
@@ -178,11 +191,23 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         for k in stale_keys:
             del self._event_states[k]
 
-    def _judge_audio_triggers(self, event_key: str) -> tuple[bool, bool]:
+    def _judge_event_notification(self, event_key: str) -> tuple[bool, bool]:
         """
         与えられたイベント（started_at＝第一報の識別子）について、
-        このイベントを初めて検知したかどうかで
-        (効果音を鳴らすべきか, 音声読み上げをすべきか) のタプルを返す。
+        今回の更新に対し
+        (このEmbedを実際に送信すべきか, このイベントの第一報かどうか)
+        のタプルを返す。
+
+        【役割の変遷】
+        当初（2026-08-23）は音声読み上げ・効果音のみをイベント単位で
+        間引く _judge_audio_triggers という名前のメソッドだったが、
+        2026-08-30 に「テキスト通知（Embed送信）自体の間引き」機能を
+        統合し、本メソッドに改称・拡張した（下記【2026-08-30】参照）。
+        地図画像添付（cogs/jishin_kanchi.py.notify_jishin_kanchi 側）も
+        本メソッドの戻り値（is_first_report）をそのまま判定基準として
+        流用している。イベント状態の判定基準を1箇所に一本化すること
+        で、判定順序の違いによる不整合（初見イベントなのに既知扱い
+        される等）を避けている。
 
         【2026-08-27 変更】以前は「効果音は初回のみ・読み上げは
         count が一定件数以上増えるたびに実行」という別ルールだったが、
@@ -192,12 +217,29 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         専用だった JISHIN_KANCHI_SPEECH_COUNT_STEP は core.config から
         完全に削除した（.env整理案①、2026-08-27）。
 
+        【2026-08-30 追加】感知報告が増えるたびにP2P側から更新レコード
+        （updated_at・_idが変化した新規メッセージ）が配信され続ける
+        ため、従来はテキスト通知（Embed送信）自体は間引かれず毎回
+        送信されていた。実運用で、大規模・関東の地震（＝感知報告が
+        短時間に大量発生する地震）において、同じチャンネルに数十件
+        規模の「地震感知情報」Embedが数秒おきに連続投稿される実害が
+        確認されたため、JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC
+        （既定10秒、.envで調整可能）による間引きを追加した。
+
         ルール:
           - 初めて見るイベント（_event_states に未登録）
-            → 効果音・音声読み上げとも鳴らす（EEW第一報相当）
-          - 既知のイベントの更新（countのみ増加）
-            → 効果音・音声読み上げとも鳴らさない
-              （テキスト通知＝Embed自体は従来通り毎回送信される）
+            → 必ず送信する。音声・効果音・画像添付もすべて許可
+              （is_first_report=True）。
+          - 既知のイベントの更新で、前回の実際の送信から
+            JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC 秒以上経過している
+            → 送信する（should_send_now=True）が、第一報ではないため
+              音声・効果音・画像添付は行わない（is_first_report=False）。
+          - 既知のイベントの更新で、間隔がまだ満たない
+            → 送信自体をスキップする（should_send_now=False）。
+              このタイミングで届いた更新の情報は捨てられるが、次に
+              間隔条件を満たす更新が届いた時点で、その時点までの
+              最新の件数・地域状況がまとめて送信されるため、情報と
+              しては後続の更新に自然に引き継がれる。
 
         呼び出しのたびに self._event_states を更新する副作用を持つ
         （TTL掃除も合わせて行う）。
@@ -205,14 +247,26 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         now = time.monotonic()
         self._prune_stale_event_states(now)
 
-        if event_key in self._event_states:
-            # 既知のイベント（更新）→ 音声・効果音とも鳴らさない
-            self._event_states[event_key]["last_seen_at"] = now
+        state = self._event_states.get(event_key)
+        if state is None:
+            # 第一報: 送信・音声・効果音・画像添付のすべてを許可する
+            self._event_states[event_key] = {
+                "last_seen_at": now,
+                "last_notified_at": now,
+            }
+            return True, True
+
+        state["last_seen_at"] = now
+
+        elapsed_since_last_notify = now - state["last_notified_at"]
+        if elapsed_since_last_notify < JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC:
+            # 間引き対象: 前回送信からの経過時間が閾値未満のためスキップ
             return False, False
 
-        # 初めて見るイベント（第一報）→ 効果音・音声読み上げとも1回だけ鳴らす
-        self._event_states[event_key] = {"last_seen_at": now}
-        return True, True
+        # 間隔条件を満たした更新: 送信はするが、第一報ではないため
+        # 音声・効果音・画像添付は行わない
+        state["last_notified_at"] = now
+        return True, False
 
     # ===============================
     # 通知本体
@@ -252,6 +306,25 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             started_at = format_p2p_time(data.get("started_at"))
             updated_at = format_p2p_time(data.get("updated_at"))
             level_label = confidence_to_level_label(confidence)
+
+            # ── イベント単位の送信可否判定（第一報かどうか）──
+            # 【2026-08-30 追加】ここで一括判定することで、埋め込み本文の
+            # 構築（地域ごとの状況の集計等）自体も間引き対象の更新では
+            # 省略できる。is_test時は従来通りイベント状態を汚染せず、
+            # かつテスト時は常に送信・音声・画像添付を行う。
+            event_key = data.get("started_at") or started_at
+            if not is_test:
+                should_send_now, is_first_report = self._judge_event_notification(event_key)
+                if not should_send_now:
+                    logger.debug(
+                        f"地震感知情報: 更新間隔"
+                        f"（JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC="
+                        f"{JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC}秒）未満のため"
+                        f"送信をスキップします (event_key={event_key}, count={count})"
+                    )
+                    return
+            else:
+                is_first_report = True
 
             title = "地震感知情報"
             if is_test:
@@ -305,75 +378,38 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                 record_delivery(True, "地震感知情報")
                 record_notification("地震感知情報", title, f"信頼度{level_label}・{count}件")
 
-            # ── イベント単位の判定（音声トリガー + 画像添付の可否）──
-            # 【2026-08-30 変更の経緯】
-            # 地震感知情報（code=9611）は、感知報告が増えるたびに
-            # updated_at と _id が変化した「新しいレコード」として
-            # P2P側から配信され続ける。core.p2p_ws_hub.P2PWebSocketHub
-            # の重複排除はレコードid単位のため、これらは正当に別idの
-            # 新着メッセージとして扱われ、毎回 notify_jishin_kanchi が
-            # 呼ばれる（本メソッド冒頭のコメント、および
-            # _judge_audio_triggers docstring 参照）。
-            #
-            # 従来、画像添付（_attach_p2p_image タスクの起動）は
-            # この「更新のたび」に毎回新規に行われていた。実機ログで、
-            # 関東で広く感知された地震において、短時間（数十秒）に
-            # 70件近い異なる image_id で _attach_p2p_image タスクが
-            # 同時多発し、core.p2p_image._cdn_semaphore
-            # （P2P_IMAGE_CDN_CONCURRENCY、既定3）を占有し尽くす事態が
-            # 確認された。この結果、地震感知情報自身の画像取得が
-            # 軒並み失敗しただけでなく、同じCDNを共有する cogs/quake.py
-            # 側の正当な画像取得までセマフォ待ちで大幅に遅延していた
-            # （本来6秒程度で成功するはずの初回リクエストが、実際には
-            # 103秒後まで成功しなかった実測ログが根拠）。これは大規模・
-            # 関東の地震で地図画像が表示されない不具合の直接原因の
-            # 一つだった。
-            #
-            # 音声・効果音は既に _judge_audio_triggers によって
-            # 「イベント（started_at）の第一報のみ」に間引かれている。
-            # 画像添付についても全く同じ基準（同一イベントの更新では
-            # 添付タスクを起動しない）で間引くのが自然なため、
-            # _judge_audio_triggers が返す「第一報かどうか」の判定結果
-            # （should_speak）をそのまま画像添付の可否にも流用する
-            # （新たに別系統の状態管理を持つと、判定順序次第で
-            # 「初見イベントなのに既知扱いされる」等の不整合を生みやすい
-            # ため、単一の判定基準に一本化した）。
-            #
-            # テキスト通知（Embed送信）自体の頻度は変更しない
-            # （更新のたびに最新の件数・地域状況を伝える価値があるため）。
-            #
-            # is_test時は従来通りイベント状態を汚染せず、かつ動作確認の
-            # ためテスト時は常に画像添付を試みる。
-            if not is_test:
-                event_key = data.get("started_at") or started_at
-                should_play_sound, should_speak = self._judge_audio_triggers(event_key)
-                should_attach_image = should_speak
-            else:
-                should_play_sound, should_speak = False, False
-                should_attach_image = True
-
-            # ── 地図画像（地震情報通知と同じ生成方法） ──
+            # ── 地図画像（地震情報通知と同じ生成方法）──
             # 【2026-08-27 修正】地震感知情報（code=9611）では、地図画像の
             # 取得には "id" ではなく "_id" フィールドを使う必要があることが
             # 実機ログで判明した（quake/tsunami の code=551/552 とはキーの
             # 優先順位が逆）。まず "_id" を優先し、無ければ "id" にフォール
             # バックする防御的な実装にしておく。
+            #
+            # 【2026-08-30 追加】画像添付タスクの起動は is_first_report
+            # （このイベントの第一報かどうか。上の _judge_event_notification
+            # 参照）が True の場合のみ行う。従来は更新のたびに毎回新規の
+            # _attach_p2p_image タスクを起動していたため、感知報告が
+            # 短時間に大量発生する地震（大規模・関東等）で、
+            # core.p2p_image._cdn_semaphore（P2P_IMAGE_CDN_CONCURRENCY、
+            # 既定3）を占有し尽くし、cogs/quake.py側の正当な画像取得まで
+            # 巻き添えで失敗させる実害が確認されたための対策
+            # （実機ログ根拠: 本来6秒程度で成功するはずの画像取得が
+            # 103秒後まで成功しなかった）。
             image_id = data.get("_id") or data.get("id")
-            if image_id and should_attach_image:
+            if image_id and is_first_report:
                 self.bot.loop.create_task(self._attach_p2p_image(sent_msg, image_id))
-            elif image_id and not should_attach_image:
+            elif image_id and not is_first_report:
                 logger.debug(
                     f"地震感知情報: 同一イベントの更新のため画像添付をスキップします "
                     f"(image_id={image_id})"
                 )
 
-            # ── 音声読み上げ（第一報のときのみ） ──
-            if JISHIN_KANCHI_SPEECH_ENABLE and should_speak:
+            # ── 音声読み上げ・効果音（第一報のときのみ）──
+            if JISHIN_KANCHI_SPEECH_ENABLE and is_first_report:
                 speak_text = f"地震感知情報。信頼度{level_label.split('（')[0]}。{count}件の感知報告があります。"
                 await self.speak_local(speak_text, priority=2)
 
-            # ── 効果音再生（イベント初検知時のみ、EEW第一報相当） ──
-            if JISHIN_KANCHI_SOUND_ENABLE and should_play_sound:
+            if JISHIN_KANCHI_SOUND_ENABLE and is_first_report:
                 await self.play_mp3(_SOUND_KEY)
 
         except Exception:

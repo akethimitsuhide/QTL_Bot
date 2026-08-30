@@ -585,3 +585,24 @@ JISHIN_KANCHI_SOUND_FILE = os.getenv("JISHIN_KANCHI_SOUND_FILE", "vxse53.mp3")
 # この秒数以上更新が無いイベントは、内部状態から削除する
 # （メモリの際限ない増加を防ぐための単純なTTLベースの掃除）。
 JISHIN_KANCHI_EVENT_STATE_TTL_SEC = _env_int("JISHIN_KANCHI_EVENT_STATE_TTL_SEC", 3600)
+
+# 【2026-08-30 追加】同一イベント（started_at）のテキスト通知（Embed
+# 送信）を実際に行う最短間隔（秒）。第一報は必ず送信するが、2回目以降の
+# 更新は、前回実際に送信してからこの秒数未満しか経っていない場合は
+# 送信自体をスキップする。
+#
+# 追加の経緯: 感知報告が増えるたびにP2P側から更新レコードが配信され
+# 続けるが、これに間引きをかけていなかったため、大規模・関東の地震
+# （＝感知報告が短時間に大量発生する地震）で、同じチャンネルに
+# 数十件規模の「地震感知情報」Embedが数秒おきに連続投稿される実害が
+# 確認された（cogs/jishin_kanchi.py._judge_event_notification 参照）。
+# これは地図画像添付タスクの同時多発によるCDNセマフォ占有問題
+# （2026-08-30の別修正で対応済み）とは独立した、チャンネルの
+# 可読性・通知の煩雑さに関する問題であり、本設定で間引く。
+#
+# 値を大きくするほど更新頻度は下がる（＝チャンネルは静かになるが、
+# 最新の件数への反映が遅れる）。0以下を指定すると事実上無効化
+# （毎回送信＝従来動作）になる。
+JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC = float(
+    os.getenv("JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC", "10")
+)
