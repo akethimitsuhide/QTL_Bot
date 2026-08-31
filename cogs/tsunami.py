@@ -390,7 +390,11 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
             # cancelled=True のときも読み上げブロックから安全に参照できるよう、
             # cancelled 分岐の外（try直下）で初期化しておく
-            grade_height_map: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+            # 【2026-08-31 修正】値の型を list[str]（area_nameのみ）から
+            # list[dict]（name/immediate/firstHeight情報を含む）に変更。
+            # 公式仕様（P2P地震情報 津波予報API）のfirstHeight/immediate
+            # フィールドを反映するため（詳細は下記のループ内コメント参照）。
+            grade_height_map: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
             max_grade = "Unknown"
 
             title = "津波情報"
@@ -404,12 +408,31 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             if cancelled:
                 description += "すべての津波予報が解除されました。"
             else:
-                # {grade: {height_desc: [area_name]}} の2段階グループ化
+                # 【2026-08-31 修正】以前は area_name の文字列のみを保持する
+                # {grade: {height_desc: [area_name, ...]}} という2段階
+                # グループ化だったため、公式仕様（ユーザー提供のP2P地震情報
+                # 津波予報API仕様書）にある firstHeight（到達予想時刻・
+                # 状況）・immediate（ただちに来襲）が実装から欠落していた。
+                # 元のbot.py（分割前）にはこれらの情報を反映する処理が
+                # 存在しており、cogs/tsunami.py への分割時に取りこぼされた
+                # リグレッションだったことが判明したため、area_name だけ
+                # でなく immediate/firstHeight も保持するよう修正する。
+                # {grade: {height_desc: [{"name":..., "immediate":...,
+                #                          "first_cond":..., "first_time":...}, ...]}}
                 for area in areas:
                     name  = area.get("name", "不明")
                     grade = area.get("grade", "Unknown")
                     max_h = area.get("maxHeight", {}).get("description", "")
-                    grade_height_map[grade][max_h].append(name)
+                    immediate = bool(area.get("immediate", False))
+                    first_height = area.get("firstHeight") or {}
+                    first_cond = first_height.get("condition", "")
+                    first_time = first_height.get("arrivalTime", "")
+                    grade_height_map[grade][max_h].append({
+                        "name": name,
+                        "immediate": immediate,
+                        "first_cond": first_cond,
+                        "first_time": first_time,
+                    })
                     if grade in ("MajorWarning", "Warning"):
                         max_grade = grade
 
@@ -435,11 +458,21 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                     for height_desc in sorted(
                         height_dict.keys(), key=_tsunami_height_key, reverse=True
                     ):
-                        area_names = height_dict[height_desc]
+                        area_entries = height_dict[height_desc]
                         if height_desc:
                             description += f"予想高さ {height_desc}\n"
-                        for n in area_names:
-                            description += f"　{n}\n"
+                        for entry in area_entries:
+                            line = f"　{entry['name']}"
+                            annotations = []
+                            if entry["immediate"]:
+                                annotations.append("ただちに来襲")
+                            if entry["first_cond"]:
+                                annotations.append(entry["first_cond"])
+                            if entry["first_time"]:
+                                annotations.append(f"到達予想: {entry['first_time']}")
+                            if annotations:
+                                line += "　（" + "・".join(annotations) + "）"
+                            description += line + "\n"
 
                 # ===== 追加: コメント情報（Warning Comment）=====
                 warning_comment = data.get("comments", {}).get("warningComment", {}).get("text", "")
@@ -508,9 +541,13 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 )
                 grade_label = TSUNAMI_MAP.get(top_grade, top_grade)
                 # top_grade に属する地域名を height_desc をまたいで集約
+                # 【2026-08-31 修正】grade_height_map の値が area_name の
+                # 文字列から、immediate/firstHeight情報を含む辞書
+                # （{"name":..., "immediate":..., ...}）に変わったため、
+                # ここでも "name" キーを取り出すよう対応する。
                 area_names = []
-                for names in grade_height_map[top_grade].values():
-                    area_names.extend(names)
+                for entries in grade_height_map[top_grade].values():
+                    area_names.extend(e["name"] for e in entries)
                 if len(area_names) == 1:
                     area_text = area_names[0]
                 elif len(area_names) <= 3:
