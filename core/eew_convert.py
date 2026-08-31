@@ -65,11 +65,31 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
         hypo  = eq.get("hypocenter", {}) or {}
         areas = p2p_data.get("areas", []) or []
 
-        # PLUM 法判定
-        is_plum = (
-            eq.get("condition") == "仮定震源要素"
-            or any(str(a.get("kindCode", "")) == "19" for a in areas)
-        )
+        # 【2026-08-31 修正】PLUM法判定
+        #
+        # 以前は「eq.condition == 仮定震源要素」（震源そのものが未確定＝
+        # 全体がPLUM法によるもの）に加えて「いずれかのareaのkindCode
+        # が19（そのエリアの震度推定にPLUM法を使用）」もOR条件に
+        # 含めていたが、これは誤りだった。kindCode=19は「そのエリア
+        # 個別の震度推定手法」を表すフラグであり、周辺の一部エリアで
+        # 局所的にPLUM法が使われていても、震源・マグニチュード自体は
+        # 既に確定している（実測に基づく）ケースが実際に存在する
+        # （特に規模の大きい地震で、辺縁部のエリアだけがPLUM法による
+        # 簡易推定になりやすい）。
+        #
+        # この誤ったOR条件により、実際には震源・マグニチュードが
+        # 確定しているにもかかわらず、eq.conditionでは検出されない
+        # ケースで、notify_eew側の isAssumption 分岐が発動し、
+        # 「マグニチュード： M推定なし」「深さ： 推定なし」という
+        # 誤表示になっていた（実機ログで確認: KUMAMOTO_7_2.json の
+        # テストで発生）。
+        #
+        # 震源全体がPLUM法によるものかどうかは、地震オブジェクト
+        # 直下の condition フィールドのみで判定する。個別エリアの
+        # kindCode=19 は、そのエリアの震度表示・警報種別
+        # （kind_type_map、下記）にのみ反映させれば十分であり、
+        # 全体のマグニチュード/震源表示を隠す理由にはならない。
+        is_plum = eq.get("condition") == "仮定震源要素"
 
         # scaleFrom の Enum に 99 は存在しない（scaleTo のみ）
         scale_map = {
