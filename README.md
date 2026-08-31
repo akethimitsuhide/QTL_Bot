@@ -46,7 +46,10 @@
 - 地図画像はP2P地震情報通知と同じ生成方法（`cdn.p2pquake.net/app/images/{id}_trim_big.png`）でEmbed最下部に添付。地震感知情報（code=9611）は quake/tsunami（code=551/552）と異なり、画像IDには `id` ではなく `_id` フィールドの値を使う必要があることが実機ログで判明したため、`_id` を優先し `id` にフォールバックする実装に修正した（2026-08-27）
 - `JISHIN_KANCHI_MAX_LEVEL`（通知する最大レベル）・`JISHIN_KANCHI_MIN_COUNT`（通知する最小件数）で閾値フィルタリング可能
 - 音声読み上げ（`JISHIN_KANCHI_SPEECH_ENABLE`）・効果音再生（`JISHIN_KANCHI_SOUND_ENABLE`、ファイル名は `JISHIN_KANCHI_SOUND_FILE` で変更可能）をそれぞれ個別に無効化可能
-- **音声トリガーは第一報のみ（2026-08-23追加、2026-08-27仕様変更）**: 同一イベント（`started_at` で識別。EEWのEventIDに相当）について更新が届くたびに音声読み上げ・効果音が毎回鳴ると煩わしいため、音声読み上げ・効果音とも「そのイベントを初めて検知したとき（＝第一報、EEWの第一報相当）」の1回のみ再生する（テキスト通知＝Embed自体は従来通り毎回送信される）。以前は読み上げのみ件数（`count`）増加ごとに再トリガーしていたが、繰り返し鳴ってうるさいとの指摘を受けて統一した
+- **音声トリガー・地図画像添付は第一報のみ（2026-08-23追加、2026-08-27仕様変更、2026-08-30に画像添付も統合）**: 同一イベント（`started_at` で識別。EEWのEventIDに相当）について更新が届くたびに音声読み上げ・効果音が毎回鳴ると煩わしいため、音声読み上げ・効果音とも「そのイベントを初めて検知したとき（＝第一報、EEWの第一報相当）」の1回のみ再生する。以前は読み上げのみ件数（`count`）増加ごとに再トリガーしていたが、繰り返し鳴ってうるさいとの指摘を受けて統一した
+  - **地図画像の添付タスクも第一報のみに間引く（2026-08-30追加）**: 感知報告が増えるたびにP2P側から `_id` が異なる新しい更新レコードが配信され続けるため、従来は更新のたびに新規の画像取得タスクを起動していた。実機ログで、関東で広く感知された地震において短時間に70件近い異なる `_id` で画像取得タスクが同時多発し、`P2P_IMAGE_CDN_CONCURRENCY`（下記「P2P 地図画像の添付」参照）のセマフォを占有し尽くし、`QuakeInfoCog` 側の正当な画像取得まで巻き添えで大幅に遅延・失敗させる不具合を実機ログで確認した（本来6秒程度で成功するはずの画像取得が103秒後まで成功しなかった）。これが大規模・関東の地震で地図画像が表示されない不具合の直接原因の一つだったため、画像添付タスクの起動可否も「第一報かどうか」の判定に統一した
+- **テキスト通知（Embed送信）は最短10秒間隔に間引き（2026-08-30追加）**: 画像添付とは異なり、テキスト通知自体は従来更新のたびに毎回新規メッセージが送信されていたため、感知報告が短時間に大量発生する地震では同じチャンネルに数十件規模の「地震感知情報」Embedが数秒おきに連続投稿される実害が確認された。`JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC`（既定10秒）を新設し、前回の実際の送信からこの秒数未満の更新は送信自体をスキップするようにした。第一報は必ず送信する。間引かれた更新の情報は、次に間隔条件を満たした更新が届いた時点でその時点までの最新の件数・地域状況としてまとめて送信されるため、実質的には後続の更新に引き継がれる
+  - 上記の「第一報かどうか」「送信すべきか」の判定はすべて `JishinKanchiCog._judge_event_notification`（旧名 `_judge_audio_triggers`）に一本化されており、テキスト送信・音声・効果音・画像添付のすべてが同じ判定結果を参照する
   - イベント単位の管理状態は `JISHIN_KANCHI_EVENT_STATE_TTL_SEC`（デフォルト3600秒）以上更新がなければ自動的に破棄される
   - `JISHIN_KANCHI_SPEECH_COUNT_STEP` は現在どこからも参照されない（既存 `.env` との後方互換のため設定項目のみ残置。将来的に削除予定）
 
@@ -296,7 +299,8 @@ python3 bot.py --check_env
 | `JISHIN_KANCHI_SOUND_ENABLE` | true | 効果音再生の有効化 |
 | `JISHIN_KANCHI_SOUND_FILE` | vxse53.mp3 | 再生する効果音ファイル名（Bot実行ディレクトリ直下に配置） |
 | `JISHIN_KANCHI_SPEECH_COUNT_STEP` | 50 | **現在未使用**（2026-08-27〜。音声読み上げは第一報のみに統一されたため。既存`.env`との後方互換のため項目のみ残置） |
-| `JISHIN_KANCHI_EVENT_STATE_TTL_SEC` | 3600 | イベント単位の音声トリガー管理状態を、最終更新からこの秒数以上経過したら破棄する |
+| `JISHIN_KANCHI_EVENT_STATE_TTL_SEC` | 3600 | イベント単位の状態管理（音声トリガー・画像添付・テキスト送信間引きの判定に共通利用）を、最終更新からこの秒数以上経過したら破棄する |
+| `JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC` | 10 | **2026-08-30追加**。同一イベントのテキスト通知（Embed送信）を実際に行う最短間隔（秒）。第一報は必ず送信するが、2回目以降の更新は前回の実際の送信からこの秒数未満しか経っていない場合は送信自体をスキップする（詳細は「P2P 地震感知情報」参照）。0以下を指定すると事実上無効化（毎回送信）される |
 
 ### 週間/月間ダイジェスト設定
 | 変数名 | 既定値 | 説明 |
@@ -335,6 +339,7 @@ python3 bot.py --check_env
 | `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
+| `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | **2026-08-29追加**。`_fetch_current_shindo_map`（画像ダウンロード・デコード・観測点サンプリング。`KYOSHIN_POLL_INTERVAL_SEC`ごとに常時実行される）のうち、デコード+サンプリング部分の所要時間がこの秒数を超えた場合にWARNINGログを出す。通常はDEBUGログに毎回の所要時間が出るのみ。Raspberry Pi等でのCPU負荷を実測ベースで把握するための計測用設定であり、通常運用では変更不要 |
 
 **【2026-08-27】誤検知対策アルゴリズム調整値は `.env.kyoshin` に分離**
 以下の6個は、実機ログを見ながらチューニングする上級者向けパラメータのため、`.env.example`（本体）ではなく `.env.kyoshin.example` に分離されている（`.env整理案③・⑩`）。何も設定しなくても以下と同じデフォルト値で動作するため、通常運用では `.env.kyoshin` を作る必要はない。詳細チューニングをしたい場合のみ `cp .env.kyoshin.example .env.kyoshin` して編集する（`python3 bot.py --starter` の詳細設定メニューからも作成できる）。
@@ -375,6 +380,7 @@ python3 bot.py --check_env
 | `LOG_LEVEL` | INFO | ログレベル（後方互換。FILE/CONSOLE 未設定時の既定値として使用） |
 | `LOG_LEVEL_FILE` | LOG_LEVEL | ファイルへの出力ログレベル |
 | `LOG_LEVEL_CONSOLE` | LOG_LEVEL | コンソールへの出力ログレベル |
+| `LOG_FILE_PATH` | （空＝プロジェクトルート/qtlbot.log） | ログファイルの出力先パス。**2026-08-29追加**。未設定時は `bot.py` と同じディレクトリ基準の絶対パスが使われるため、実行時のカレントディレクトリ（systemdの`WorkingDirectory`設定等）に依存しない。`/var/log/qtlbot/qtlbot.log` 等、別の場所に出力したい場合のみ絶対パスを指定する |
 | `LOG_MAX_BYTES` | 10485760 | ログファイルの最大サイズ（バイト、デフォルト 10MB） |
 | `LOG_BACKUP_COUNT` | 7 | ローテーション保持ファイル数 |
 | `LOG_DUPLICATE_THRESHOLD` | 60 | 同一メッセージの重複抑制時間（秒）。ERROR 以上は常に出力 |
@@ -644,6 +650,34 @@ python3 bot.py --test_<対象> <JSONファイルパス>
 Botは通常通り起動し、全Cogの `on_ready` が完了した後に指定したテストを1回実行し、
 完了後に自動的にプロセスを終了する。
 
+### 自動判定実行（`--test_auto`）
+
+情報ソースによってJSONの形式が細かく異なり、どの `--test_<対象>` を使えば
+よいか一見して分かりにくい場合がある（特に気象庁XML由来の
+`Control`/`Head`/`Body` 形式は、津波観測情報・津波予報・南海トラフ情報等で
+外側の形を共有しており、区別しにくい）。実際に、津波警報・注意報・予報
+（VTSE41形式）のJSONを `--test_tsunami`（P2P地震情報API形式用）に誤って
+渡してしまい、正しく読み込めなかった事例があったため、**2026-08-30に
+`--test_auto` を追加した**。
+
+```bash
+python3 bot.py --test_auto path/to/downloaded.json
+```
+
+`core/test_runner.py` の `sniff_test_target()` がJSONの構造（`Body`配下の
+具体的なキーの有無等、各`notify_*`関数の実際のフィールドアクセス箇所に
+基づくフィンガープリント）から対象を判定し、以下のように振る舞う。
+
+- **候補が1件に絞れた場合**: その `--test_<対象>` 相当の処理を自動的に実行する
+- **候補が0件（未知の形式）の場合**: 「判定不能」と表示し、何も実行しない
+- **候補が2件以上（区別不能）の場合**: 全候補を表示し、どの `--test_<対象>`
+  を使うべきかの判断をユーザーに委ねる（誤った対象で実行してしまうことを
+  避けるため、この場合は自動実行しない）
+
+```
+[TEST] 判定結果: --test_tsunami_forecast 相当と判断しました (TsunamiCog.notify_tsunami_forecast)
+```
+
 ### 一括実行（`--test_all`）
 
 デプロイ前の一括疎通確認用に、`TEST_TARGETS` に登録された全対象を順に
@@ -672,7 +706,7 @@ python3 bot.py --test_all tests/fixtures/
 [TEST]   ✅ OK   volcano
 [TEST]   ✅ OK   usgs
 [TEST]   ✅ OK   ews
-[TEST] 合計: 12 件 / OK=6 NG=0 SKIP=6
+[TEST] 合計: 15 件 / OK=6 NG=0 SKIP=9
 ============================================================
 ```
 
@@ -722,6 +756,9 @@ CLIテストモード（`--test_*` 付きで起動した場合）では、Web Da
 | `tsunami` | `TsunamiCog.notify_tsunami` | `tests/fixtures/tsunami_sample.json` |
 | `tsunami_observation` | `TsunamiCog.notify_tsunami_observation` | （気象庁 VTSE51 形式のJSONを用意） |
 | `tsunami_forecast` | `TsunamiCog.notify_tsunami_forecast` | （気象庁 VTSE41 形式のJSONを用意） |
+| `nankai_trough` | `TsunamiCog.notify_nankai_trough` | （南海トラフ地震臨時情報の詳細JSON。**2026-08-30追加**） |
+| `hypocenter_update` | `TsunamiCog.notify_hypocenter_update` | （顕著な地震の震源要素更新のお知らせの詳細JSON。**2026-08-30追加**） |
+| `jishin_kanchi` | `JishinKanchiCog.notify_jishin_kanchi` | （P2P地震感知情報 code=9611 形式のJSON。**2026-08-30追加**。これまでCLIテスト対象が存在しなかった） |
 | `volcano` | `VolcanoCog._notify_volcano` | `tests/fixtures/volcano_sample.json` |
 | `volcano_eruption` | `VolcanoCog._notify_eruption` | （eruption.json の1エントリ形式） |
 | `volcano_warning` | `VolcanoCog._notify_warning` | （warning.json の1エントリ形式） |
@@ -729,12 +766,20 @@ CLIテストモード（`--test_*` 付きで起動した場合）では、Web Da
 | `other_long_period` | `OtherInfoCog.notify_long_period` | （長周期地震動情報の list item 形式） |
 | `other_quake_advisory` | `OtherInfoCog.notify_quake_advisory` | （その他地震情報の list item 形式） |
 
+**【2026-08-30 修正】** `tsunami_observation` / `tsunami_forecast` の
+`validate_expected_fields()` チェック対象フィールドが、P2P地震情報API形式
+（`"areas"`）のまま誤って設定されており、実際に期待される気象庁XML由来
+（`Control`/`Head`/`Body`形式）の正しいJSONを渡しても「フィールド不足」
+という誤った警告が出ていた不具合を修正した（`["Control", "Head", "Body"]`
+に修正）。
+
 実行例：
 
 ```bash
 python3 bot.py --test_eew tests/fixtures/eew_sample.json
 python3 bot.py --test_quake tests/fixtures/quake_sample.json
 python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
+python3 bot.py --test_jishin_kanchi tests/fixtures/jishin_kanchi_sample.json
 ```
 
 ### テストであることの明記
@@ -931,6 +976,9 @@ QTL_Bot/
     │                                 （2026-08-27〜）
     ├── env_audit.py               - `python3 bot.py --check_env` .env整合性チェック
     │                                 （2026-08-27〜、.env整理案⑦）
+    ├── test_runner.py             - `python3 bot.py --test_<対象>` CLIテスト実行機能
+    │                                 （TEST_TARGETS定義・入力JSON検証・自動判定
+    │                                 sniff_test_target。2026-08-30に--test_auto追加）
     ├── logging_setup.py           - ログ設定（RotatingFileHandler・重複抑制）
     ├── audio.py                   - AudioMixin（キュー実体を持つCog用）/ AudioClientMixin（AudioCog参照用）
     ├── tts_engines.py             - TTSエンジン（AquesTalkPi/ScratchTTS）の切り替え・音声合成
@@ -1021,5 +1069,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-27（`.env`整理：完全に未使用の変数(`KYOSHIN_GRID_SIZE`等)をconfig.pyごと削除／強震モニタの誤検知対策アルゴリズム調整値6個を`.env.kyoshin`に分離しカテゴリ別envファイル読み込み機構(`core/env_loader.py`)を新設／`.env.example`内の無関係セクションを独立化／`--starter`にTTS未選択エンジンの自動間引き・詳細設定メニューを追加／`--check_env`による.env整合性チェックを新設／`!status`に通知先チャンネルマッピング表示を追加／`!status`/`/qtl_status`のAPI受信状況・タスク稼働状態に地震感知情報・強震モニタ画像解析検知・長周期地震動モニタを追加、USGS設定フィールドを削除／複数EEWサマリー通知に地域ごとの予想震度を追加／地震感知情報の地図画像ID（`_id`優先に修正）／音声トリガーを第一報のみに統一）
+**最終更新**: 2026-08-30（EEW発表中の強震モニタ画像解析（`estimate_max_shindo_from_image`）をイベントループ非ブロッキング化（`run_in_executor`）／ログファイルパスを`.env`の`LOG_FILE_PATH`で設定可能化（未設定時はプロジェクトルート基準の絶対パス）／強震モニタのポーリング処理に計測ログを追加（`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`）／地震感知情報の地図画像添付・テキスト通知（Embed送信）を「イベントの第一報のみ／最短`JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC`秒間隔」に間引き、大規模・関東の地震でP2P地図画像CDNセマフォが占有され地震情報側の画像取得まで巻き添えで失敗する不具合を解消／CLIテストに`--test_auto`（JSON構造の自動判定実行）を追加、`jishin_kanchi`・`nankai_trough`・`hypocenter_update`のテスト対象を新規追加、`tsunami_observation`/`tsunami_forecast`の入力検証フィールド誤りを修正）
 **対応 Python**: 3.11+
