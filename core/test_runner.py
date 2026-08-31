@@ -350,10 +350,25 @@ TEST_TARGETS = {
         "expected_fields": [],
     },
     "other_quake_advisory": {
+        # list_item形式（quake/data/list.jsonの1エントリ。"json"キーで
+        # 詳細JSONのファイル名を指すだけの小さい構造）専用。
+        # 本番のポーリングループが受け取る形と同じ。
         "cog_name": "OtherInfoCog",
         "method": "notify_quake_advisory",
         "data_kwarg": "list_item",
         "expected_fields": [],
+    },
+    "other_quake_advisory_detail": {
+        # 【2026-08-31 追加】気象庁HPから直接ダウンロードした完全な
+        # 詳細JSON（Control/Head/Body形式）専用。list_item形式とは
+        # 異なり "json" キー（ファイル名）を持たないため、
+        # notify_quake_advisory の detail_data 引数に直接渡す
+        # 必要がある（list_item に渡すと "json" キーが見つからず
+        # 即座にreturnしてしまい、何も通知されない）。
+        "cog_name": "OtherInfoCog",
+        "method": "notify_quake_advisory",
+        "data_kwarg": "detail_data",
+        "expected_fields": ["Control", "Head", "Body"],
     },
     "nankai_trough": {
         # 【2026-08-30 追加】南海トラフ地震臨時情報専用のCLIテスト対象が
@@ -513,13 +528,73 @@ def sniff_test_target(data) -> list[str]:
             # （Observationを持たずForecastのみ＝VTSE41系）
             matches.append("tsunami_forecast")
 
+        # 【2026-08-31 修正】"Body.EarthquakeInfo" 及び "Body.Earthquake"
+        # は、複数の情報種別が同じキーを共有しており、キーの有無だけでは
+        # 区別できないことが実機ログで判明した。
+        #
+        # 具体的には、気象庁は「南海トラフ地震臨時情報」「顕著な地震の
+        # 震源要素更新のお知らせ」を tsunami/data/list.json と
+        # quake/data/list.json の2つのエンドポイントに重複して掲載して
+        # おり（cogs/other.py 冒頭のdocstring「Step6時点の設計メモ」
+        # 参照）、どちらの経路のJSONも Body の形が同一になる:
+        #   - tsunami/list.json経由 → cogs/tsunami.py の
+        #     notify_nankai_trough / notify_hypocenter_update が処理
+        #     （通知先: tsunami_channel）
+        #   - quake/list.json経由   → cogs/other.py の
+        #     notify_quake_advisory が処理（通知先: other_channel）
+        # さらに「北海道・三陸沖後発地震注意情報」も同じ
+        # Body.EarthquakeInfo 形式を使うが、こちらは quake/list.json
+        # 経由でのみ配信され、cogs/other.py にしかハンドラが無い
+        # （cogs/tsunami.py には対応するメソッドが存在しない）。
+        #
+        # 以前は「EarthquakeInfoがあれば無条件にnankai_troughと判定」
+        # していたため、「北海道・三陸沖後発地震注意情報」のJSONを
+        # --test_auto に渡すと誤って nankai_trough（TsunamiCog、
+        # tsunami_channel）と判定され、本来 other_channel に届くはずの
+        # 通知が津波情報チャンネルに送られてしまう不具合があった。
+        #
+        # そのため、実際の本番ディスパッチと同じ基準（Head.Title の
+        # テキスト内容）でさらに絞り込む。「南海トラフ」「顕著な地震の
+        # 震源要素更新」は上記の通り本番でも両方の経路が独立して動作
+        # しうる（意図された重複）ため、どちらか一方に決め打ちせず
+        # 両方を候補として提示し、ユーザーに選んでもらう
+        # （誤った対象で実行してしまうことを避けるため）。
+        head_title = ""
+        control_title = ""
+        if isinstance(data.get("Head"), dict):
+            head_title = str(data["Head"].get("Title", ""))
+        if isinstance(data.get("Control"), dict):
+            control_title = str(data["Control"].get("Title", ""))
+        title_text = head_title or control_title
+
         if isinstance(body.get("EarthquakeInfo"), dict):
-            # nankai_trough: cogs/tsunami.py notify_nankai_trough
-            matches.append("nankai_trough")
+            if "北海道" in title_text or "三陸沖" in title_text or "後発地震" in title_text:
+                # cogs/tsunami.py にハンドラが無い、
+                # other_quake_advisory_detail（OtherInfoCog,
+                # other_channel）専用の情報種別
+                matches.append("other_quake_advisory_detail")
+            elif "南海トラフ" in title_text:
+                # 意図された重複配信。どちらのチャンネルで確認したいか
+                # ユーザーに委ねる。
+                matches.append("nankai_trough")
+                matches.append("other_quake_advisory_detail")
+            else:
+                # タイトルから判別できない場合は、決め打ちせず両方
+                # 候補として提示する（誤判定でtsunami_channelに
+                # 送ってしまうことを避けるため、nankai_troughを単独で
+                # 確定させない）。
+                matches.append("nankai_trough")
+                matches.append("other_quake_advisory_detail")
         elif isinstance(body.get("Earthquake"), (dict, list)) and not tsunami_body:
-            # hypocenter_update: cogs/tsunami.py notify_hypocenter_update
-            # （Tsunamiを持たずEarthquakeのみ＝震源要素更新のお知らせ）
-            matches.append("hypocenter_update")
+            if "顕著な地震の震源要素更新" in title_text:
+                # 意図された重複配信（上記と同様の理由で両方提示）
+                matches.append("hypocenter_update")
+                matches.append("other_quake_advisory_detail")
+            else:
+                # hypocenter_update: cogs/tsunami.py notify_hypocenter_update
+                # （Tsunamiを持たずEarthquakeのみ＝震源要素更新のお知らせ。
+                #   タイトルが取得できない/一致しない場合のフォールバック）
+                matches.append("hypocenter_update")
 
     # ── JMA list.json の1エントリ形式（"json"キーで詳細JSONのファイル名を
     #    指すだけの、上記のどの形式よりも小さい構造）──
@@ -695,6 +770,74 @@ async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path
         return False
 
 
+async def _wait_for_audio_drain(bot, cog=None, max_wait: float = 25.0) -> None:
+    """
+    【2026-08-31 追加】音声読み上げ・MP3チャイム再生が完了するまで待機する。
+
+    経緯: 従来は各CLIテスト関数の末尾で固定 asyncio.sleep(3) の後に
+    bot.close() していたが、実機ログで「play_mp3: 再生開始」のログは
+    出るのに「play_mp3: 再生完了」のログが一度も出ないまま数秒後に
+    シャットダウンしているケースが確認された（津波警報のチャイム音＝
+    「ピロピロ音」が鳴らなかったという報告と一致）。
+    AquesTalkPiによる音声合成＋aplay再生や、pygameによるMP3再生は、
+    テキストが長い・ファイルが大きいと3秒以上かかることがあり、
+    固定3秒の待機では単純に間に合わず、再生の途中でプロセスごと
+    強制終了されてしまっていた。
+
+    core/audio.py の speech_worker / mp3_worker はどちらも、実際に
+    再生が完了した後で queue.task_done() を呼んでいる
+    （speech_queue.task_done() は play_proc.communicate() 完了後、
+    mp3_queue.task_done() は _play_mp3_blocking() 完了後）。
+    そのため asyncio.Queue.join()（＝put_nowewait したすべての項目に
+    ついて task_done() が呼ばれるまで待つ）を使えば、「キューに積んだ
+    音声・チャイムの再生が実際に完了するまで」を正確に待てる
+    （単に qsize()==0 を見るよりも正確。qsize() はワーカーが
+    queue.get() で取り出した瞬間にゼロになるが、そのアイテムの
+    実際の再生はまだ完了していないため）。
+
+    対象Cogは2種類ある（core/audio.py 冒頭のdocstring参照）:
+      - AudioMixin を直接継承するCog（tsunami/volcano/usgs/other等）
+        → cog.speech_queue / cog.mp3_queue を直接持つ
+      - AudioClientMixin を継承するCog（eew/quake）
+        → 自身のキューは持たず、AudioCog（bot.get_cog("AudioCog")）に
+          委譲している
+    どちらのケースにも対応できるよう、テスト対象Cog自身とAudioCogの
+    両方のキューをチェックする。
+
+    max_wait 秒以内にキューが空にならなかった場合は、待つのを諦めて
+    警告ログを出し、通常通りシャットダウンする（無限に待ち続けて
+    テストプロセスがハングすることを避けるための安全弁）。
+    """
+    queues = []
+    audio_cog = bot.get_cog("AudioCog")
+    for c in (cog, audio_cog):
+        if c is None:
+            continue
+        sq = getattr(c, "speech_queue", None)
+        mq = getattr(c, "mp3_queue", None)
+        if sq is not None:
+            queues.append(sq)
+        if mq is not None:
+            queues.append(mq)
+
+    if not queues:
+        # 対象Cogがそもそも音声機能を持たない（volcano_warning等）場合は
+        # 従来通りの短い待機のみ行う
+        await asyncio.sleep(3)
+        return
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(q.join() for q in queues)),
+            timeout=max_wait,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"CLIテスト: 音声・MP3再生が{max_wait}秒以内に完了しませんでした。"
+            f"再生の途中でプロセスを終了する可能性があります。"
+        )
+
+
 async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
     """
     --test_<cog> で指定されたテストを実行する。
@@ -740,8 +883,9 @@ async def run_cli_test(bot, cog_key: str, json_path: str) -> None:
         await _invoke_test_target(cog_key, target, cog, method, json_path)
     finally:
         print(banner)
-        # 音声キュー等の非同期処理が積まれている場合に備え、少し待ってから終了する
-        await asyncio.sleep(3)
+        # 【2026-08-31 修正】固定3秒のsleepから、実際の再生完了を
+        # queue.join()で確認する方式に変更（_wait_for_audio_drain参照）。
+        await _wait_for_audio_drain(bot, cog)
         await bot.close()
 
 
@@ -817,7 +961,19 @@ async def run_all_cli_tests(bot, fixtures_dir: str) -> None:
         f"OK={ok_count} NG={ng_count} SKIP={skip_count} / {results}"
     )
 
-    await asyncio.sleep(3)
+    # 【2026-08-31 修正】一括実行では複数のCogが音声・MP3キューを持ちうる
+    # ため、AudioCog（eew/quake分）に加え、実行した各対象Cogの
+    # キューも合わせて待機する。cog=None を渡すと _wait_for_audio_drain
+    # は AudioCog のみをチェックするため、tsunami/volcano/usgs/other等
+    # 独自キューを持つCogについては個別に集めて渡す。
+    tested_cogs = []
+    for cog_key in TEST_TARGETS:
+        target = TEST_TARGETS[cog_key]
+        c = bot.get_cog(target["cog_name"])
+        if c is not None and c not in tested_cogs:
+            tested_cogs.append(c)
+    for c in tested_cogs:
+        await _wait_for_audio_drain(bot, c, max_wait=10.0)
     await bot.close()
 
 
@@ -898,5 +1054,7 @@ async def run_auto_cli_test(bot, json_path: str) -> None:
         await _invoke_test_target(cog_key, target, cog, method, json_path)
     finally:
         print(banner)
-        await asyncio.sleep(3)
+        # 【2026-08-31 修正】固定3秒のsleepから、実際の再生完了を
+        # queue.join()で確認する方式に変更（_wait_for_audio_drain参照）。
+        await _wait_for_audio_drain(bot, cog)
         await bot.close()
