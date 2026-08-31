@@ -706,7 +706,7 @@ python3 bot.py --test_all tests/fixtures/
 [TEST]   ✅ OK   volcano
 [TEST]   ✅ OK   usgs
 [TEST]   ✅ OK   ews
-[TEST] 合計: 15 件 / OK=6 NG=0 SKIP=9
+[TEST] 合計: 16 件 / OK=6 NG=0 SKIP=10
 ============================================================
 ```
 
@@ -751,7 +751,8 @@ CLIテストモード（`--test_*` 付きで起動した場合）では、Web Da
 
 | 対象 | 呼び出し先 | サンプルJSON |
 |:---|:---|:---|
-| `eew` | `EewCog.notify_eew` | `tests/fixtures/eew_sample.json` |
+| `eew` | `EewCog.notify_eew` | `tests/fixtures/eew_sample.json`（Wolfx形式＝変換済みフラット形式） |
+| `eew_p2p` | `EewCog.notify_eew`（`core.eew_convert.convert_p2p_eew_to_wolfx`で変換後） | （P2P地震情報の緊急地震速報＝生のcode=556形式。**2026-08-30追加**） |
 | `quake` | `QuakeInfoCog.notify_quake` | `tests/fixtures/quake_sample.json` |
 | `tsunami` | `TsunamiCog.notify_tsunami` | `tests/fixtures/tsunami_sample.json` |
 | `tsunami_observation` | `TsunamiCog.notify_tsunami_observation` | （気象庁 VTSE51 形式のJSONを用意） |
@@ -772,6 +773,29 @@ CLIテストモード（`--test_*` 付きで起動した場合）では、Web Da
 （`Control`/`Head`/`Body`形式）の正しいJSONを渡しても「フィールド不足」
 という誤った警告が出ていた不具合を修正した（`["Control", "Head", "Body"]`
 に修正）。
+
+**【2026-08-30 追加】`--test_eew_p2p`（生のP2P EEW形式への対応）**
+
+P2P地震情報の緊急地震速報（生のcode=556形式。トップレベルに `issue`
+（`eventId`/`serial`を持つ）・`earthquake`・`areas` を持つ）は、
+`--test_eew` が期待するWolfx形式（変換済みのフラットな `EventID`/
+`MaxIntensity` 形式）とは全く異なる。実機でダウンロードした過去データを
+`--test_eew` にそのまま渡すと、フィールドが一致せず「不明の緊急地震速報」
+という結果になる不具合があった。また `--test_auto` でも、生のP2P EEWは
+`issue`+`earthquake` を共有するため地震情報（quake）と誤判定されていた。
+
+本番のWebSocketハンドラは、受信した生データを
+`core/eew_convert.py` の `convert_p2p_eew_to_wolfx()` で変換してから
+`notify_eew()` に渡している。`--test_eew_p2p` はこの変換ステップを
+CLIテストにも組み込み、本番と全く同じ変換関数を通してから通知するように
+した。`sniff_test_target()` も、各コードの `issue` オブジェクトが実際に
+持つキー（EEWは `eventId`、地震情報は `type`、津波は `earthquake` を
+持たない等）まで見て判定するよう修正し、`--test_auto` でも正しく
+`eew_p2p` と判定されるようにした。
+
+この仕組み（`TEST_TARGETS` の `data_converter` フック）は汎用的な拡張点
+として設計されており、今後別の情報ソースで「生データ→変換してから通知
+関数に渡す」ケースが見つかった場合も同様に対応できる。
 
 実行例：
 
@@ -1069,5 +1093,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-30（EEW発表中の強震モニタ画像解析（`estimate_max_shindo_from_image`）をイベントループ非ブロッキング化（`run_in_executor`）／ログファイルパスを`.env`の`LOG_FILE_PATH`で設定可能化（未設定時はプロジェクトルート基準の絶対パス）／強震モニタのポーリング処理に計測ログを追加（`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`）／地震感知情報の地図画像添付・テキスト通知（Embed送信）を「イベントの第一報のみ／最短`JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC`秒間隔」に間引き、大規模・関東の地震でP2P地図画像CDNセマフォが占有され地震情報側の画像取得まで巻き添えで失敗する不具合を解消／CLIテストに`--test_auto`（JSON構造の自動判定実行）を追加、`jishin_kanchi`・`nankai_trough`・`hypocenter_update`のテスト対象を新規追加、`tsunami_observation`/`tsunami_forecast`の入力検証フィールド誤りを修正）
+**最終更新**: 2026-08-30（EEW発表中の強震モニタ画像解析（`estimate_max_shindo_from_image`）をイベントループ非ブロッキング化（`run_in_executor`）／ログファイルパスを`.env`の`LOG_FILE_PATH`で設定可能化（未設定時はプロジェクトルート基準の絶対パス）／強震モニタのポーリング処理に計測ログを追加（`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`）／地震感知情報の地図画像添付・テキスト通知（Embed送信）を「イベントの第一報のみ／最短`JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC`秒間隔」に間引き、大規模・関東の地震でP2P地図画像CDNセマフォが占有され地震情報側の画像取得まで巻き添えで失敗する不具合を解消／CLIテストに`--test_auto`（JSON構造の自動判定実行）と`--test_eew_p2p`（生のP2P EEW形式に対応、`data_converter`フックで本番と同じ変換関数を経由）を追加、`jishin_kanchi`・`nankai_trough`・`hypocenter_update`のテスト対象を新規追加、`tsunami_observation`/`tsunami_forecast`の入力検証フィールド誤りを修正、`sniff_test_target`のEEW/地震情報/津波の判定ロジックを`issue`オブジェクトのネスト構造まで見て正確に区別するよう修正）
 **対応 Python**: 3.11+

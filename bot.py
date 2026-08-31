@@ -82,6 +82,10 @@ core/test_runner.py の sniff_test_target 参照。区別がつかない場合�
     python3 bot.py --test_jishin_kanchi tests/fixtures/jishin_kanchi_sample.json
     python3 bot.py --test_nankai_trough tests/fixtures/nankai_trough_sample.json
     python3 bot.py --test_hypocenter_update tests/fixtures/hypocenter_update_sample.json
+    python3 bot.py --test_eew_p2p tests/fixtures/eew_p2p_sample.json
+        （P2P地震情報の緊急地震速報＝生のcode=556形式。本番と同じ
+        core.eew_convert.convert_p2p_eew_to_wolfxで変換してから通知する。
+        従来の --test_eew はWolfx形式（変換済み）専用のまま維持）
 
 また、tsunami_observation / tsunami_forecast の expected_fields が
 P2P地震情報API形式（"areas"）のまま誤って設定されており、正しい

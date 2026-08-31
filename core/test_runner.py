@@ -72,6 +72,8 @@ import logging
 import os
 import sys
 
+from core.eew_convert import convert_p2p_eew_to_wolfx
+
 logger = logging.getLogger("QTLBot")
 
 # CLIテストモードで起動しているかどうかを、他モジュール（cogs/system.py の
@@ -196,12 +198,74 @@ def load_test_json(json_path: str, exit_on_error: bool = True):
 # 代わりに JSON 側に見出しテキストが含まれるフィールド（headTitle 等）へ
 # 「【テスト】」を手動で付与しておくか、_inject_test_marker() で
 # 実行時に動的に付与する。
+def _convert_raw_p2p_eew_for_test(data: dict) -> dict:
+    """
+    【2026-08-30 追加】--test_eew_p2p 用のデータ変換フック。
+
+    経緯: P2P地震情報の緊急地震速報（生の code=556 形式。トップレベルに
+    "issue"（"eventId"・"serial"を持つ）・"earthquake"・"areas" を持つ）を
+    実機でダウンロードした過去データ（例: KUMAMOTO_7_2.json）で
+    --test_eew を実行したところ、フィールドが一致せず「不明の緊急地震
+    速報」という結果になってしまう事例が発生した。
+
+    本番のWebSocketハンドラ（cogs/eew.py の P2P EEW 受信処理）は、
+    受信した生データを core.eew_convert.convert_p2p_eew_to_wolfx() で
+    Wolfx形式（notify_eewが直接期待するフラットな "EventID"/
+    "MaxIntensity" 等の形式）へ変換してから notify_eew() に渡している。
+    --test_eew はこの変換ステップを経ないまま生データを直接
+    notify_eew() に渡していたため、正しく処理できなかった。
+
+    本関数は、TEST_TARGETS["eew_p2p"] の "data_converter" として
+    _invoke_test_target() から呼び出され、本番と全く同じ変換関数を
+    使って生データを変換してから notify_eew() へ渡すことで、この
+    ギャップを解消する。
+
+    【今後の拡張について】
+    今後、別の情報ソースで「本番では生データ→変換してから通知関数に
+    渡している」ケースが見つかった場合も、同様の変換ラッパー関数を
+    作って対応する TEST_TARGETS エントリの "data_converter" に指定
+    すればよい（汎用的な拡張ポイントとして設計している。
+    _invoke_test_target 参照）。
+
+    変換に失敗した場合（convert_p2p_eew_to_wolfx が None を返す、＝
+    想定した構造ではない）は ValueError を送出し、_invoke_test_target
+    側で捕捉して分かりやすいエラーメッセージを表示する
+    （変換失敗を握りつぶして「不明」な結果を出さないようにするため）。
+    """
+    converted = convert_p2p_eew_to_wolfx(data)
+    if converted is None:
+        raise ValueError(
+            "convert_p2p_eew_to_wolfx() が None を返しました。"
+            "入力JSONがP2P地震情報の緊急地震速報（code=556）の生形式と"
+            "一致しない可能性があります（issue.eventId / earthquake / "
+            "areas 等のフィールドを確認してください）"
+        )
+    return converted
+
+
 TEST_TARGETS = {
     "eew": {
         "cog_name": "EewCog",
         "method": "notify_eew",
         "extra_kwargs": {"start_monitor": False},
         "expected_fields": ["EventID", "Hypocenter", "MaxIntensity"],
+    },
+    "eew_p2p": {
+        # 【2026-08-30 追加】P2P地震情報の緊急地震速報（生の code=556
+        # 形式）専用のテスト対象。"eew" が期待するWolfx形式（フラットな
+        # EventID/MaxIntensity）とは異なり、こちらはトップレベルに
+        # "issue"（eventId/serial）・"earthquake"・"areas" を持つ生の
+        # P2P形式をそのまま受け取り、本番と同じ
+        # core.eew_convert.convert_p2p_eew_to_wolfx() で変換してから
+        # notify_eew() を呼び出す（_convert_raw_p2p_eew_for_test 参照）。
+        # source="p2p_eew" を指定し、本番のP2P EEW受信時と同じ
+        # チャンネル選択（p2p_eew_channel）で通知させる。
+        "cog_name": "EewCog",
+        "method": "notify_eew",
+        "data_converter": _convert_raw_p2p_eew_for_test,
+        "extra_kwargs": {"start_monitor": False, "source": "p2p_eew"},
+        # expected_fields は変換前（生データ）の構造で検証する
+        "expected_fields": ["issue", "earthquake", "areas"],
     },
     "quake": {
         "cog_name": "QuakeInfoCog",
@@ -362,21 +426,48 @@ def sniff_test_target(data) -> list[str]:
 
     matches: list[str] = []
 
-    # ── EEW（Wolfx/P2P code=556 変換後の共通フラット形式）──
+    # ── EEW（Wolfxの共通フラット形式。P2P地震情報WebSocketから受信した
+    #    生データをconvert_p2p_eew_to_wolfxで変換した後の形式でもある）──
     # cogs/eew.py: data.get("EventID"), data.get("MaxIntensity") 等、
     # トップレベルの大文字キーで直接アクセスする独自形式。
     if "EventID" in data and "MaxIntensity" in data:
         matches.append("eew")
 
-    # ── 地震情報（P2P地震情報APIのcode=551形式）──
-    # cogs/quake.py notify_quake: data.get("issue"), data.get("earthquake")
-    if "issue" in data and "earthquake" in data:
-        matches.append("quake")
+    # ── issue オブジェクトのネスト構造まで見て、EEW（P2P生形式）・
+    #    地震情報・津波を区別する ──
+    # 【2026-08-30 追加の経緯】以前はトップレベルの "issue"+"earthquake"
+    # の有無だけで「地震情報（quake）」と判定していたが、P2P地震情報の
+    # 緊急地震速報（生の code=556 形式）もトップレベルに "issue"・
+    # "earthquake"・"areas" を持つため、実際には地震情報（code=551）と
+    # 区別がつかず、EEWの生データを --test_auto に渡すと誤って
+    # 「地震情報」と判定してしまう不具合があった（実機ログで確認）。
+    #
+    # 各コードの "issue" オブジェクトの中身は、実際にそのコードを
+    # パースする側のコードが読んでいるキーで区別できる:
+    #   - P2P生EEW（code=556）: core/eew_convert.py が
+    #     issue.get("eventId"), issue.get("serial") を読む
+    #   - 地震情報（code=551）: cogs/quake.py notify_quake が
+    #     issue.get("type") を読み、data.get("points") も参照する
+    #   - 津波（code=552）: cogs/tsunami.py notify_tsunami が
+    #     issue.get("time") を読み、hypocenter/points的な地震固有
+    #     フィールドは持たない
+    issue = data.get("issue")
+    issue = issue if isinstance(issue, dict) else None
+    has_earthquake = isinstance(data.get("earthquake"), dict)
 
-    # ── 津波（P2P地震情報APIのcode=552形式）──
-    # cogs/tsunami.py notify_tsunami: data.get("issue"), data.get("areas")
-    # quakeと"issue"を共有するため、"earthquake"が無いことも確認する。
-    if "issue" in data and "areas" in data and "earthquake" not in data:
+    if issue is not None and "eventId" in issue and (
+        data.get("cancelled") is not None or (has_earthquake and "areas" in data)
+    ):
+        # P2P生EEW（code=556）。cancelled（キャンセル報）は
+        # earthquake/areasを持たない場合があるためcancelledの有無も
+        # 判定条件に含める。
+        matches.append("eew_p2p")
+    elif issue is not None and "type" in issue and has_earthquake and "points" in data:
+        # 地震情報（P2P地震情報APIのcode=551形式）
+        matches.append("quake")
+    elif issue is not None and "areas" in data and not has_earthquake:
+        # 津波（P2P地震情報APIのcode=552形式）。
+        # quake/eew_p2pと違い、地震固有のearthquakeオブジェクトを持たない。
         matches.append("tsunami")
 
     # ── 地震感知情報（P2P地震情報APIのcode=9611形式）──
@@ -555,6 +646,23 @@ async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path
         return False
 
     validate_expected_fields(cog_key, data)
+
+    # 【2026-08-30 追加】data_converter: 本番コードでは生データを
+    # そのまま notify_* に渡すのではなく、事前に変換関数を通す
+    # 情報ソース（例: P2P生EEW形式 → Wolfx形式）向けのフック。
+    # expected_fields の検証は変換前（生データ）の構造に対して行う
+    # （上の validate_expected_fields 呼び出しがそれより先にあるのは
+    # そのため）。変換に失敗した場合（ValueError等）はここで捕捉し、
+    # 「不明」な通知を作ってしまうことなく、分かりやすいエラーとして
+    # 打ち切る。
+    data_converter = target.get("data_converter")
+    if data_converter is not None:
+        try:
+            data = data_converter(data)
+        except Exception as e:
+            print(f"[TEST] エラー: 入力データの変換に失敗しました（{cog_key}）: {type(e).__name__}: {e}")
+            logger.error(f"CLIテスト データ変換エラー（{cog_key}）: {e}", exc_info=True)
+            return False
 
     data_kwarg = target.get("data_kwarg", "data")
     supports_is_test = target.get("supports_is_test", True)
