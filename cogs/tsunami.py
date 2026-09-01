@@ -56,10 +56,12 @@ from core.config import (
     CHANNEL_ID, TSUNAMI_CHANNEL_ID,
     TSUNAMI_ENABLE,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
+    EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
+from core.ews_signal import generate_ews_pcm
 from core.p2p_image import P2PImageMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -97,6 +99,21 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         self.last_tsunami_id = None
         self.last_tsunami_observation_id = None
         self._tsunami_observation_initialized = False  # 初回ポーリングでは通知せずIDのみ記録
+
+        # 【2026-09-01 追加】EWS（緊急警報放送）信号音のイベント単位管理。
+        # 経緯: EWS信号音（core/ews_signal.py, core.audio.AudioMixin.
+        # play_ews_pcm）は、以前は cogs/quake.py の地震情報通知
+        # （domesticTsunamiフィールドがWarning/MajorWarningの場合）
+        # からのみ再生されており、津波情報そのもの（本Cogの
+        # notify_tsunami / notify_tsunami_forecast）が発表・更新
+        # されたタイミングでは一切再生されていなかった（実機テストで
+        # 「津波警報発表・更新時にEWSの音が再生されない」として報告
+        # された不具合）。cogs/quake.py._should_play_ews /
+        # _play_ews_signal と同じロジック（同一イベントでの警報区分の
+        # エスカレーション時のみ再度再生する）をここに移植する。
+        # キー: イベント識別子（津波情報のid、またはtsunami_forecast
+        # のEventID）、値: 直近に再生した際の警報区分（grade文字列）。
+        self._ews_last_grade_by_event: dict[str, str] = {}
 
         # -- 受信統計（!status 用。将来的にSystemCogと統合予定） --
         self._last_recv = {"tsunami": None}
@@ -370,6 +387,82 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         """
         return format_tsunami_height_value(raw)
 
+    def _should_play_ews(self, event_key: str, grade: str) -> bool:
+        """
+        【2026-09-01 追加】同一の津波イベントについて EWS 信号音を
+        再度鳴らすべきかを判定する（cogs/quake.py._should_play_ews
+        からの移植。判定ロジックは同一）。
+
+        経緯: EWS信号音（core/ews_signal.py, core.audio.AudioMixin.
+        play_ews_pcm）は、以前は cogs/quake.py の地震情報通知
+        （domesticTsunamiフィールドがWarning/MajorWarningの場合）
+        からのみ再生されており、津波情報そのもの（本Cogの
+        notify_tsunami / notify_tsunami_forecast）が発表・更新
+        されたタイミングでは一切再生されていなかった（実機テストで
+        「津波警報発表・更新時にEWSの音が再生されない」として報告
+        された不具合）。
+
+        quake.py版は真のイベント識別子が無いP2P地震情報形式に対する
+        近似キー（発生時刻+震源地名）を使っていたが、津波情報は
+        notify_tsunami側でP2Pの"id"、notify_tsunami_forecast側で
+        JMAの"EventID"という、より確実な識別子を呼び出し元から
+        受け取れるため、本メソッドではevent_keyを呼び出し元に
+        計算させる設計にしている（quake.py側のように内部で
+        eq/hypoから逆算しない）。
+
+        判定ルール:
+        - このキーで一度もEWSを鳴らしていなければ True（初回は必ず鳴らす）
+        - 既に鳴らした際の区分より今回の区分の方が深刻
+          （Warning → MajorWarning 等）であれば True
+        - それ以外（同一区分の繰り返し等）は False
+        """
+        prev_grade = self._ews_last_grade_by_event.get(event_key)
+
+        if prev_grade is None:
+            self._ews_last_grade_by_event[event_key] = grade
+            return True
+
+        try:
+            prev_rank = TSUNAMI_GRADE_ORDER.index(prev_grade)
+            curr_rank = TSUNAMI_GRADE_ORDER.index(grade)
+        except ValueError:
+            # 未知の区分値の場合は安全側に倒して鳴らす
+            self._ews_last_grade_by_event[event_key] = grade
+            return True
+
+        if curr_rank < prev_rank:
+            # 順位が若いほど深刻（MajorWarning=0 < Warning=1）
+            self._ews_last_grade_by_event[event_key] = grade
+            logger.info(
+                f"EWS: 同一津波イベント({event_key})で警報区分がエスカレーション "
+                f"({prev_grade} → {grade}) のため再度信号音を再生します"
+            )
+            return True
+
+        logger.debug(
+            f"EWS: 同一津波イベント({event_key})・区分据え置き "
+            f"({prev_grade} → {grade}) のため信号音の再生をスキップします"
+        )
+        return False
+
+    async def _play_ews_signal(self, grade: str) -> None:
+        """
+        core.ews_signal.generate_ews_pcm でメモリ上にPCMを生成し、
+        外部ファイルへ一切出力せずそのまま再生する
+        （cogs/quake.py._play_ews_signal と同じ実装）。
+        """
+        try:
+            pcm_bytes = generate_ews_pcm(
+                region_key=EWS_REGION,
+                blocks=EWS_BLOCKS,
+                pre_tone_sec=EWS_PRETONE_SEC,
+                post_tone_sec=EWS_POSTTONE_SEC,
+            )
+            logger.info(f"EWS信号音を再生します（津波警報区分={grade}, region={EWS_REGION}）")
+            await self.play_ews_pcm(pcm_bytes, label=f"ews_tsunami_{grade}")
+        except Exception:
+            logger.error(f"EWS信号音の生成・再生でエラー:\n{traceback.format_exc()}")
+
     async def notify_tsunami(self, data, is_test=False):
         if not TSUNAMI_ENABLE and not is_test:
             return
@@ -568,6 +661,20 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                     await self.play_mp3("vxse5c")
                 else:
                     await self.play_mp3("vxse53")
+
+            # ── EWS（緊急警報放送）信号音 ──
+            # 【2026-09-01 追加】津波警報（Warning）・大津波警報
+            # （MajorWarning）が発表・更新された際にEWS信号音を鳴らす。
+            # 従来はcogs/quake.pyの地震情報通知（domesticTsunami経由）
+            # からのみ再生されており、津波情報そのもの（本メソッド）
+            # では一切再生されていなかった不具合の修正（詳細は
+            # _should_play_ews / _play_ews_signal のdocstring参照）。
+            # is_test時は本番のEWS状態（_ews_last_grade_by_event）を
+            # 汚染しないよう、判定を経ずに毎回鳴らす。
+            if EWS_ENABLE and not cancelled and max_grade in ("Warning", "MajorWarning"):
+                event_key = str(tsunami_id or f"{data.get('issue', {}).get('time', '')}")
+                if is_test or self._should_play_ews(event_key, max_grade):
+                    await self._play_ews_signal(max_grade)
         except Exception as e:
             record_delivery(False, "津波情報", str(e))
             logger.error(f"notify_tsunami エラー: {e}")
@@ -984,6 +1091,20 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 mp3_key = WARN_MP3.get(max_level)
                 if mp3_key:
                     await self.play_mp3(mp3_key)
+
+            # ── EWS（緊急警報放送）信号音 ──
+            # 【2026-09-01 追加】notify_tsunami と同じ理由・同じ仕組みで
+            # 追加。max_level（5=大津波警報, 4=津波警報）を
+            # TSUNAMI_GRADE_ORDER の文字列表現に変換した上で
+            # _should_play_ews に渡す（_should_play_ews / _play_ews_signal
+            # のdocstring参照）。is_test時は本番のEWS状態を汚染しない
+            # よう、判定を経ずに毎回鳴らす。
+            ews_grade_map = {5: "MajorWarning", 4: "Warning"}
+            ews_grade = ews_grade_map.get(max_level)
+            if EWS_ENABLE and not is_cancelled and ews_grade:
+                event_key = str(head.get("EventID") or ttl)
+                if is_test or self._should_play_ews(event_key, ews_grade):
+                    await self._play_ews_signal(ews_grade)
 
         except Exception as e:
             record_delivery(False, "津波予報", str(e))
