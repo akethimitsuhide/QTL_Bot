@@ -412,7 +412,19 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                     timestamp=datetime.now()
                 )
             footer_parts = []
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            # 【2026-09-01 修正】以前は os.path.dirname(os.path.abspath(__file__))
+            # （1階層上）を使っており、これは cogs/other.py 自身が置かれている
+            # cogs/ ディレクトリを指してしまっていた。北海道・三陸沖後発地震
+            # 注意情報／南海トラフ地震臨時情報の地図画像（hokkaido_bosaitaiou_
+            # area.png / nankai_bosaitaiou_area.png）は、README・.env.example
+            # の案内通りプロジェクトルート（bot.pyと同じディレクトリ）に配置
+            # する運用のため、画像がその通りに配置されていても cogs/ 配下を
+            # 探してしまい常に「見つからない」扱いになっていた（実機テストで
+            # 発見）。core/audio.py の MP3ファイルパス解決
+            # （os.path.dirname を2回適用してプロジェクトルートを得るパターン）
+            # と同じ方式に修正し、cogs/ からさらに1階層上（プロジェクトルート）
+            # を指すようにする。
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             image_file = None
             image_filename = None
 
