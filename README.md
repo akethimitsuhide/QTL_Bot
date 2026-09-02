@@ -757,8 +757,8 @@ CLIテストモード（`--test_*` 付きで起動した場合）では、Web Da
 | `tsunami` | `TsunamiCog.notify_tsunami` | `tests/fixtures/tsunami_sample.json` |
 | `tsunami_observation` | `TsunamiCog.notify_tsunami_observation` | （気象庁 VTSE51 形式のJSONを用意） |
 | `tsunami_forecast` | `TsunamiCog.notify_tsunami_forecast` | （気象庁 VTSE41 形式のJSONを用意） |
-| `nankai_trough` | `TsunamiCog.notify_nankai_trough` | （南海トラフ地震臨時情報の詳細JSON。**2026-08-30追加**） |
-| `hypocenter_update` | `TsunamiCog.notify_hypocenter_update` | （顕著な地震の震源要素更新のお知らせの詳細JSON。**2026-08-30追加**） |
+| `nankai_trough` | `OtherInfoCog.notify_nankai_trough` | （南海トラフ地震臨時情報の詳細JSON。**2026-08-30追加、2026-09-01にcogs/tsunami.pyから移設**） |
+| `hypocenter_update` | `OtherInfoCog.notify_hypocenter_update` | （顕著な地震の震源要素更新のお知らせの詳細JSON。**2026-08-30追加、2026-09-01にcogs/tsunami.pyから移設**） |
 | `jishin_kanchi` | `JishinKanchiCog.notify_jishin_kanchi` | （P2P地震感知情報 code=9611 形式のJSON。**2026-08-30追加**。これまでCLIテスト対象が存在しなかった） |
 | `volcano` | `VolcanoCog._notify_volcano` | `tests/fixtures/volcano_sample.json` |
 | `volcano_eruption` | `VolcanoCog._notify_eruption` | （eruption.json の1エントリ形式） |

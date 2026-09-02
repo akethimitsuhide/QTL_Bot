@@ -10,12 +10,18 @@ cogs/other.py
   - 北海道・三陸沖後発地震注意情報（区域図添付）
   - 南海トラフ地震臨時情報（区域図添付）
   - 顕著な地震の震源要素更新のお知らせ
+- notify_hypocenter_update() / notify_nankai_trough()
+  （2026-09-01、cogs/tsunami.pyから移設。下記【重複について】参照）
 
-【Step6 時点の設計メモ: tsunami.py との重複に見える点について】
+【Step6 時点の設計メモ、2026-09-01 追記: tsunami.py との重複に見える点について】
 気象庁は「南海トラフ地震臨時情報」「顕著な地震の震源要素更新のお知らせ」を
 実は2つの異なるAPIエンドポイントに重複して掲載している:
-  - bosai/tsunami/data/list.json 経由 → cogs/tsunami.py の
-    notify_nankai_trough() / notify_hypocenter_update() が処理
+  - bosai/tsunami/data/list.json 経由 → フェッチ処理は cogs/tsunami.py の
+    fetch_tsunami_observation に残したまま、通知処理のみ本Cogの
+    notify_nankai_trough() / notify_hypocenter_update() へ委譲される
+    （2026-09-01移設。津波固有の処理を含まず地震情報の一種であるため、
+    津波専用のTsunamiCogよりも本Cogに置く方が実態に合っていると判断した。
+    送信先も notify_quake_advisory と揃えて OTHER_CHANNEL_ID 系に統一）
   - bosai/quake/data/list.json 経由 → この Cog の
     notify_quake_advisory() が処理（地図画像添付・独自ttlフィルタあり）
 これは元のbot.py（分割前）から存在した設計であり、Cog分割によって
@@ -47,7 +53,7 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
-from core.helpers import format_jma_time
+from core.helpers import format_jma_time, truncate_embed_description
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -476,4 +482,169 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         except Exception as e:
             record_delivery(False, "気象庁その他", str(e))
             logger.error(f"notify_quake_advisory エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+    # ===============================
+    # 顕著な地震の震源要素更新のお知らせ／南海トラフ地震関連情報
+    # （2026-09-01: cogs/tsunami.py から移設）
+    # ===============================
+    # 【移設の経緯】
+    # これら2つの情報種別は、気象庁の tsunami/data/list.json と
+    # quake/data/list.json の両方に重複して掲載されており
+    # （南海トラフ地震臨時情報／顕著な地震の震源要素更新のお知らせは
+    # 意図的に2つのエンドポイントで重複配信される。本クラスの
+    # notify_quake_advisory がquakeエンドポイント経由、以下の2メソッド
+    # がtsunamiエンドポイント経由）、内容としては「地震情報」の一種
+    # であり、津波固有の処理（津波高さ・到達予想時刻等）を一切含まない。
+    # そのため、津波情報専用のTsunamiCogよりも、地震のその他特別情報を
+    # 扱うOtherInfoCogに置く方が実態に合っていると判断し移設した。
+    #
+    # 【送信先チャンネルの変更】
+    # 移設前（cogs/tsunami.py在籍時）は self.tsunami_channel 宛てだった
+    # が、移設後は同じ情報種別を扱う notify_quake_advisory と揃えて
+    # self.other_channel 宛てに変更した（ユーザー確認済み、2026-09-01）。
+    #
+    # 【呼び出し元】
+    # 実際の取得・ディスパッチ処理（tsunami/data/list.json のポーリング
+    # ループ、ttlによるタイトル判別）は cogs/tsunami.py の
+    # fetch_tsunami_observation に残したままにしている（ネットワーク
+    # フェッチ自体を重複させない・移動範囲を最小限にするため）。
+    # 呼び出し側は self.bot.get_cog("OtherInfoCog") 経由でこれらの
+    # メソッドを呼ぶ（cogs/tsunami.py 側のコメント参照）。
+    async def notify_hypocenter_update(self, detail: dict, list_item: dict | None = None, is_test: bool = False) -> None:
+        """
+        顕著な地震の震源要素更新のお知らせ（VXSE61）を通知する。
+        津波情報等で使われる精密な震源要素（度単位）が更新されたことを伝える情報。
+        """
+        channel = self.other_channel or self.channel
+        if not channel:
+            return
+        try:
+            ttl   = list_item.get("ttl", "震源要素更新のお知らせ") if list_item else "震源要素更新のお知らせ"
+            title = ("【テスト】 " if is_test else "") + ttl
+            head  = detail.get("Head", {})
+            body  = detail.get("Body", {})
+            control = detail.get("Control", {})
+
+            publisher    = control.get("PublishingOffice", "気象庁")
+            report_time  = format_jma_time(head.get("ReportDateTime", "不明"))
+            target_time  = format_jma_time(head.get("TargetDateTime", ""))
+            headline     = head.get("Headline", {}).get("Text", "")
+
+            eq = body.get("Earthquake", {})
+            origin_time = format_jma_time(eq.get("OriginTime", "不明"))
+            hypo = eq.get("Hypocenter", {})
+            hypo_name = hypo.get("Area", {}).get("Name", "不明")
+            magnitude = eq.get("Magnitude", "不明")
+
+            free_form = body.get("Comments", {}).get("FreeFormComment", "")
+
+            description = (
+                f"**発表機関:** {publisher}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if target_time:
+                description += f"**更新時刻:** {target_time}\n"
+            description += (
+                f"\n**原因地震：** {hypo_name}　M{magnitude}（{origin_time}発生）\n"
+            )
+            if headline:
+                description += f"\n{headline}\n"
+            if free_form:
+                description += f"\n{free_form}"
+
+            description = truncate_embed_description(description)
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=0x808080,
+                timestamp=datetime.now(),
+            )
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            await channel.send(embed=embed)
+            if not is_test:
+                record_delivery(True, "震源要素更新")
+                record_notification("震源要素更新", title)
+            logger.info(f"震源要素更新通知完了: {title}")
+
+        except Exception as e:
+            record_delivery(False, "震源要素更新", str(e))
+            logger.error(f"notify_hypocenter_update エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+    async def notify_nankai_trough(self, detail: dict, list_item: dict | None = None, is_test: bool = False) -> None:
+        """
+        南海トラフ地震臨時情報・関連解説情報（VYSE50）を通知する。
+        """
+        channel = self.other_channel or self.channel
+        if not channel:
+            return
+        try:
+            ttl   = list_item.get("ttl", "南海トラフ地震に関連する情報") if list_item else "南海トラフ地震に関連する情報"
+            head  = detail.get("Head", {})
+            body  = detail.get("Body", {})
+            control = detail.get("Control", {})
+
+            # Head.Title 例: "南海トラフ地震臨時情報（巨大地震警戒）" / "（調査中）" / "（巨大地震注意）" / "（調査終了）"
+            head_title = head.get("Title", ttl)
+            title = ("【テスト】 " if is_test else "") + head_title
+
+            publisher   = control.get("PublishingOffice", "気象庁")
+            report_time = format_jma_time(head.get("ReportDateTime", "不明"))
+            headline    = head.get("Headline", {}).get("Text", "")
+
+            eq_info = body.get("EarthquakeInfo", {})
+            info_serial = eq_info.get("InfoSerial", {}).get("Name", "")
+            body_text   = eq_info.get("Text", "")
+            next_advisory = body.get("NextAdvisory", "")
+
+            # キーワード別の色・緊急度
+            KEYWORD_COLOR = {
+                "巨大地震警戒": 0xFF0000,
+                "巨大地震注意": 0xFFA500,
+                "調査中":     0xFFD700,
+                "調査終了":   0x808080,
+            }
+            embed_color = KEYWORD_COLOR.get(info_serial, 0xFFA500)
+
+            description = (
+                f"**発表機関:** {publisher}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if info_serial:
+                description += f"**情報種別:** {info_serial}\n"
+            if headline.strip():
+                description += f"\n{headline.strip()}\n"
+            if body_text.strip():
+                description += f"\n{body_text.strip()}\n"
+            if next_advisory.strip():
+                description += f"\n**次回発表:** {next_advisory.strip()}"
+
+            description = truncate_embed_description(description)
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=embed_color,
+                timestamp=datetime.now(),
+            )
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            await channel.send(embed=embed)
+            if not is_test:
+                record_delivery(True, "南海トラフ")
+                record_notification("南海トラフ", title)
+            logger.info(f"南海トラフ地震関連情報通知完了: {title}")
+
+            # 読み上げ（巨大地震警戒・注意のみ）
+            if info_serial in ("巨大地震警戒", "巨大地震注意"):
+                await self.speak_local(f"南海トラフ地震臨時情報。{info_serial}が発表されました。", priority=1)
+
+        except Exception as e:
+            record_delivery(False, "南海トラフ", str(e))
+            logger.error(f"notify_nankai_trough エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")

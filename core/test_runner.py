@@ -371,20 +371,21 @@ TEST_TARGETS = {
         "expected_fields": ["Control", "Head", "Body"],
     },
     "nankai_trough": {
-        # 【2026-08-30 追加】南海トラフ地震臨時情報専用のCLIテスト対象が
-        # 存在しなかったための追加。cogs/tsunami.py.notify_nankai_trough
-        # 参照（tsunami API経由、Body.EarthquakeInfo を含むControl/Head/
-        # Body形式）。
-        "cog_name": "TsunamiCog",
+        # 【2026-08-30 追加、2026-09-01 移設】南海トラフ地震臨時情報専用の
+        # CLIテスト対象。notify_nankai_trough は cogs/tsunami.py から
+        # cogs/other.py（OtherInfoCog）へ移設した（tsunami API経由、
+        # Body.EarthquakeInfo を含むControl/Head/Body形式であることは
+        # 変わらない）。
+        "cog_name": "OtherInfoCog",
         "method": "notify_nankai_trough",
         "data_kwarg": "detail",
         "expected_fields": ["Control", "Head", "Body"],
     },
     "hypocenter_update": {
-        # 【2026-08-30 追加】「顕著な地震の震源要素更新のお知らせ」専用の
-        # CLIテスト対象が存在しなかったための追加。
-        # cogs/tsunami.py.notify_hypocenter_update 参照。
-        "cog_name": "TsunamiCog",
+        # 【2026-08-30 追加、2026-09-01 移設】「顕著な地震の震源要素更新の
+        # お知らせ」専用のCLIテスト対象。notify_hypocenter_update は
+        # cogs/tsunami.py から cogs/other.py（OtherInfoCog）へ移設した。
+        "cog_name": "OtherInfoCog",
         "method": "notify_hypocenter_update",
         "data_kwarg": "detail",
         "expected_fields": ["Control", "Head", "Body"],
@@ -591,9 +592,10 @@ def sniff_test_target(data) -> list[str]:
                 matches.append("hypocenter_update")
                 matches.append("other_quake_advisory_detail")
             else:
-                # hypocenter_update: cogs/tsunami.py notify_hypocenter_update
-                # （Tsunamiを持たずEarthquakeのみ＝震源要素更新のお知らせ。
-                #   タイトルが取得できない/一致しない場合のフォールバック）
+                # hypocenter_update: cogs/other.py notify_hypocenter_update
+                # （2026-09-01移設。Tsunamiを持たずEarthquakeのみ＝
+                #   震源要素更新のお知らせ。タイトルが取得できない/
+                #   一致しない場合のフォールバック）
                 matches.append("hypocenter_update")
 
     # ── JMA list.json の1エントリ形式（"json"キーで詳細JSONのファイル名を

@@ -8,8 +8,15 @@ cogs/tsunami.py
 - JMA tsunami API のポーリング（60秒間隔）・種別振り分け
   - 津波観測情報（VTSE41/51/52）
   - 津波予報・警報・注意報（VTSE41系のForecast）
-  - 顕著な地震の震源要素更新のお知らせ（VXSE61）
-  - 南海トラフ地震臨時情報・関連解説情報（VYSE50）
+  - 顕著な地震の震源要素更新のお知らせ（VXSE61）・
+    南海トラフ地震臨時情報・関連解説情報（VYSE50）
+    ※フェッチ（tsunami/data/list.jsonのポーリング）は本Cogが担うが、
+    通知処理の実体は cogs/other.py（OtherInfoCog）
+    notify_hypocenter_update() / notify_nankai_trough() に委譲する
+    （2026-09-01移設。津波固有の処理を含まず地震情報の一種であるため、
+    OtherInfoCogに置く方が実態に合っていると判断した。詳細は
+    OtherInfoCog冒頭のdocstring・fetch_tsunami_observation内の
+    コメント参照）
 
 【WebSocket移行について（2026-08 feature/p2p-websocket-migration）】
 従来は本Cog自身が /v2/history?codes=552 を10秒間隔でポーリングしていたが
@@ -25,11 +32,15 @@ WebSocketとは無関係の別経路（気象庁HPのXML/JSON）のため、今�
 外とし、従来通りポーリングを継続する。
 
 【他モジュールとの依存関係】
-- core.config       : TSUNAMI_ENABLE, CHANNEL_ID, TSUNAMI_CHANNEL_ID
+- core.config       : TSUNAMI_ENABLE, CHANNEL_ID, TSUNAMI_CHANNEL_ID,
+                       EWS_ENABLE, EWS_REGION, EWS_BLOCKS,
+                       EWS_PRETONE_SEC, EWS_POSTTONE_SEC
 - core.constants    : TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key
 - core.helpers      : safe_int, safe_float, safe_bool,
                        truncate_embed_description, format_jma_time
-- core.audio.AudioMixin       : speak_local, play_mp3（多重継承で利用）
+- core.audio.AudioMixin       : speak_local, play_mp3, play_ews_pcm（多重継承で利用）
+- core.ews_signal   : generate_ews_pcm（2026-09-01追加。津波警報・
+                       大津波警報発表/更新時のEWS信号音再生用）
 - core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用。
   2026-08-02: 内容検証を強化した安定版としてembed埋め込み方式を再度採用）
 
@@ -263,11 +274,30 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                         logger.info(f"津波予報/警報取得: ID={event_id}, 時刻={report_time}, 種別={ttl}")
                         await self.notify_tsunami_forecast(detail, list_item=item)
                     elif is_hypo_update:
+                        # 【2026-09-01 移設】notify_hypocenter_update は
+                        # cogs/other.py（OtherInfoCog）へ移設した。
+                        # 内容としては地震情報の一種で津波固有の処理を
+                        # 含まないため、津波専用のTsunamiCogよりも
+                        # OtherInfoCogに置く方が実態に合っている
+                        # （詳細はOtherInfoCog側のコメント参照）。
+                        # フェッチ自体（このポーリングループ）は
+                        # tsunami/data/list.json 由来のままここに残し、
+                        # 通知処理のみクロスCog呼び出しで委譲する。
                         logger.info(f"震源要素更新取得: ID={event_id}, 時刻={report_time}")
-                        await self.notify_hypocenter_update(detail, list_item=item)
+                        other_cog = self.bot.get_cog("OtherInfoCog")
+                        if other_cog:
+                            await other_cog.notify_hypocenter_update(detail, list_item=item)
+                        else:
+                            logger.error("OtherInfoCog が見つからないため震源要素更新を通知できません")
                     elif is_nankai:
+                        # 【2026-09-01 移設】notify_nankai_trough も同様に
+                        # cogs/other.py（OtherInfoCog）へ移設した。
                         logger.info(f"南海トラフ地震関連情報取得: ID={event_id}, 時刻={report_time}, 種別={ttl}")
-                        await self.notify_nankai_trough(detail, list_item=item)
+                        other_cog = self.bot.get_cog("OtherInfoCog")
+                        if other_cog:
+                            await other_cog.notify_nankai_trough(detail, list_item=item)
+                        else:
+                            logger.error("OtherInfoCog が見つからないため南海トラフ地震関連情報を通知できません")
                     else:
                         logger.info(f"津波観測情報取得: ID={event_id}, 時刻={report_time}")
                         await self.notify_tsunami_observation(detail, list_item=item)
@@ -1111,142 +1141,16 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             logger.error(f"notify_tsunami_forecast エラー: {e}")
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
-
-    async def notify_hypocenter_update(self, detail: dict, list_item: dict | None = None, is_test: bool = False) -> None:
-        """
-        顕著な地震の震源要素更新のお知らせ（VXSE61）を通知する。
-        津波情報等で使われる精密な震源要素（度単位）が更新されたことを伝える情報。
-        """
-        channel = self.tsunami_channel or self.channel
-        if not channel:
-            return
-        try:
-            ttl   = list_item.get("ttl", "震源要素更新のお知らせ") if list_item else "震源要素更新のお知らせ"
-            title = ("【テスト】 " if is_test else "") + ttl
-            head  = detail.get("Head", {})
-            body  = detail.get("Body", {})
-            control = detail.get("Control", {})
-
-            publisher    = control.get("PublishingOffice", "気象庁")
-            report_time  = format_jma_time(head.get("ReportDateTime", "不明"))
-            target_time  = format_jma_time(head.get("TargetDateTime", ""))
-            headline     = head.get("Headline", {}).get("Text", "")
-
-            eq = body.get("Earthquake", {})
-            origin_time = format_jma_time(eq.get("OriginTime", "不明"))
-            hypo = eq.get("Hypocenter", {})
-            hypo_name = hypo.get("Area", {}).get("Name", "不明")
-            magnitude = eq.get("Magnitude", "不明")
-
-            free_form = body.get("Comments", {}).get("FreeFormComment", "")
-
-            description = (
-                f"**発表機関:** {publisher}\n"
-                f"**発表時刻:** {report_time}\n"
-            )
-            if target_time:
-                description += f"**更新時刻:** {target_time}\n"
-            description += (
-                f"\n**原因地震：** {hypo_name}　M{magnitude}（{origin_time}発生）\n"
-            )
-            if headline:
-                description += f"\n{headline}\n"
-            if free_form:
-                description += f"\n{free_form}"
-
-            description = truncate_embed_description(description)
-
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=0x808080,
-                timestamp=datetime.now(),
-            )
-            if is_test:
-                embed.set_footer(text="※これはテスト通知です。")
-
-            await channel.send(embed=embed)
-            if not is_test:
-                record_delivery(True, "震源要素更新")
-                record_notification("震源要素更新", title)
-            logger.info(f"震源要素更新通知完了: {title}")
-
-        except Exception as e:
-            record_delivery(False, "震源要素更新", str(e))
-            logger.error(f"notify_hypocenter_update エラー: {e}")
-            logger.error(f"詳細:\n{traceback.format_exc()}")
-
-
-    async def notify_nankai_trough(self, detail: dict, list_item: dict | None = None, is_test: bool = False) -> None:
-        """
-        南海トラフ地震臨時情報・関連解説情報（VYSE50）を通知する。
-        """
-        channel = self.tsunami_channel or self.channel
-        if not channel:
-            return
-        try:
-            ttl   = list_item.get("ttl", "南海トラフ地震に関連する情報") if list_item else "南海トラフ地震に関連する情報"
-            head  = detail.get("Head", {})
-            body  = detail.get("Body", {})
-            control = detail.get("Control", {})
-
-            # Head.Title 例: "南海トラフ地震臨時情報（巨大地震警戒）" / "（調査中）" / "（巨大地震注意）" / "（調査終了）"
-            head_title = head.get("Title", ttl)
-            title = ("【テスト】 " if is_test else "") + head_title
-
-            publisher   = control.get("PublishingOffice", "気象庁")
-            report_time = format_jma_time(head.get("ReportDateTime", "不明"))
-            headline    = head.get("Headline", {}).get("Text", "")
-
-            eq_info = body.get("EarthquakeInfo", {})
-            info_serial = eq_info.get("InfoSerial", {}).get("Name", "")
-            body_text   = eq_info.get("Text", "")
-            next_advisory = body.get("NextAdvisory", "")
-
-            # キーワード別の色・緊急度
-            KEYWORD_COLOR = {
-                "巨大地震警戒": 0xFF0000,
-                "巨大地震注意": 0xFFA500,
-                "調査中":     0xFFD700,
-                "調査終了":   0x808080,
-            }
-            embed_color = KEYWORD_COLOR.get(info_serial, 0xFFA500)
-
-            description = (
-                f"**発表機関:** {publisher}\n"
-                f"**発表時刻:** {report_time}\n"
-            )
-            if info_serial:
-                description += f"**情報種別:** {info_serial}\n"
-            if headline.strip():
-                description += f"\n{headline.strip()}\n"
-            if body_text.strip():
-                description += f"\n{body_text.strip()}\n"
-            if next_advisory.strip():
-                description += f"\n**次回発表:** {next_advisory.strip()}"
-
-            description = truncate_embed_description(description)
-
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=embed_color,
-                timestamp=datetime.now(),
-            )
-            if is_test:
-                embed.set_footer(text="※これはテスト通知です。")
-
-            await channel.send(embed=embed)
-            if not is_test:
-                record_delivery(True, "南海トラフ")
-                record_notification("南海トラフ", title)
-            logger.info(f"南海トラフ地震関連情報通知完了: {title}")
-
-            # 読み上げ（巨大地震警戒・注意のみ）
-            if info_serial in ("巨大地震警戒", "巨大地震注意"):
-                await self.speak_local(f"南海トラフ地震臨時情報。{info_serial}が発表されました。", priority=1)
-
-        except Exception as e:
-            record_delivery(False, "南海トラフ", str(e))
-            logger.error(f"notify_nankai_trough エラー: {e}")
-            logger.error(f"詳細:\n{traceback.format_exc()}")
+    # ===============================
+    # 【2026-09-01 移設】notify_hypocenter_update / notify_nankai_trough は
+    # cogs/other.py（OtherInfoCog）へ移設した。理由: これら2つの情報種別は
+    # 内容としては地震情報の一種で、津波固有の処理（津波高さ・到達予想
+    # 時刻等）を一切含まないため、津波専用のTsunamiCogよりも、地震のその他
+    # 特別情報を扱うOtherInfoCogに置く方が実態に合っていると判断した
+    # （送信先チャンネルも self.tsunami_channel から self.other_channel に
+    # 変更済み。OtherInfoCog.notify_quake_advisory と同じ運用に統一）。
+    # フェッチ自体（tsunami/data/list.jsonのポーリング）は上記
+    # fetch_tsunami_observation に残したままで、通知処理のみ
+    # self.bot.get_cog("OtherInfoCog") 経由でクロスCog呼び出ししている
+    # （fetch_tsunami_observation内のコメント参照）。
+    # ===============================
