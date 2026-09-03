@@ -369,7 +369,7 @@ class UsgsCog(commands.Cog, AudioMixin):
             embed.set_footer(text="USGS Earthquake Hazards Program")
             
             # USGS リンク
-            usgs_url = f"https://earthquake.usgs.gov/earthquakes/events/{event_id}/"
+            usgs_url = f"https://earthquake.usgs.gov/earthquakes/eventpage/{event_id}/executive/"
             embed.add_field(name="詳細情報", value=f"[USGS]({usgs_url})", inline=False)
             
             await channel.send(embed=embed)

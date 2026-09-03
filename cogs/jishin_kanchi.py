@@ -358,7 +358,7 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                     for area_name, area_count in areas:
                         description += f"\n　{area_name}（{area_count}件）"
 
-            color = {1: 0xC31B1B, 2: 0xFF9939, 3: 0xF6CB51, 4: 0x62626B}.get(level, 0x62626B)
+            color = {1: 0x62626B, 2: 0xF6CB51, 3: 0xFF9939, 4: 0xC31B1B}.get(level, 0x62626B)
 
             embed = discord.Embed(
                 title=title,
