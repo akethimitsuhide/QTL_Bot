@@ -231,6 +231,20 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
     【2026-08-27 追加】単一EEW通知（notify_eew）と複数EEWサマリー通知
     （「複数の緊急地震速報が発表されています」）の両方で全く同じ
     グルーピングロジックが必要になったため、重複を避けてここに共通化した。
+
+    【2026-09-02 修正】以前は shindo1（scaleFrom＝下限値ベース）が
+    「不明」のエリアを、shindo2（scaleTo＝上限値ベース。例えば
+    scaleTo=99「7以上」相当）が判明していても丸ごと表示から除外して
+    いた。この結果、core.eew_convert.convert_p2p_eew_to_wolfx の
+    MaxIntensity計算（全エリアのscaleToを見て「7以上」と判定）と、
+    本関数が生成する地域ごとの震度内訳との間に食い違いが生じ、
+    「全体の予想最大震度は7以上なのに、地域ごとの内訳には6弱・5強
+    までしか出てこない」という実機での報告に一致する不具合があった。
+    下限（scaleFrom）が不明なだけで、上限（scaleTo）は判明している
+    エリアは実際に存在しうる（EEW初期の推定でscaleFromが未計算の
+    ケース等）。shindo1・shindo2のうち少なくとも一方が判明していれば
+    表示するよう修正し、下限が不明な場合は上限（shindo2）のみで
+    ラベルを組み立てる。
     """
     forecast_groups: dict = defaultdict(list)
     for area in warn_areas:
@@ -241,18 +255,29 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
         shindo2 = area.get("Shindo2", shindo1)
 
         if is_assumption:
-            if shindo1 != "不明":
-                forecast_groups[f"震度{shindo1}程度"].append(chiiki)
+            # shindo1が不明でもshindo2（上限値）が判明していればそちらを使う
+            display_val = shindo1 if shindo1 != "不明" else shindo2
+            if display_val != "不明":
+                forecast_groups[f"震度{display_val}程度"].append(chiiki)
             continue
 
-        if shindo1 != "不明":
-            if shindo1 == shindo2:
-                label = f"震度{shindo1}程度"
-            else:
-                r1, r2 = shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map)
-                high, low = (shindo1, shindo2) if r1 >= r2 else (shindo2, shindo1)
-                label = f"震度{high}〜{low}程度"
-            forecast_groups[label].append(chiiki)
+        if shindo1 == "不明" and shindo2 == "不明":
+            # 上限・下限とも不明な場合のみ、本当に表示できないため除外する
+            continue
+
+        if shindo1 == "不明":
+            # 下限は不明だが上限（例: 7以上→"7"）は判明している
+            label = f"震度{shindo2}程度"
+        elif shindo2 == "不明":
+            # 逆に上限のみ不明なケース（通常は起こりにくいが念のため対応）
+            label = f"震度{shindo1}程度"
+        elif shindo1 == shindo2:
+            label = f"震度{shindo1}程度"
+        else:
+            r1, r2 = shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map)
+            high, low = (shindo1, shindo2) if r1 >= r2 else (shindo2, shindo1)
+            label = f"震度{high}〜{low}程度"
+        forecast_groups[label].append(chiiki)
     return dict(forecast_groups)
 
 
