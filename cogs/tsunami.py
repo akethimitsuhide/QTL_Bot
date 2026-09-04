@@ -749,17 +749,24 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 if eq_source:
                     source_note = f" ※原因地震情報は {eq_source} からの情報です"
                 
-                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}\n\n"
+                # 【2026-09-02 修正】以前は末尾に "\n\n" を含んだ文字列を
+                # そのまま "**{cause_text}**" で囲んでいたため、太字終了の
+                # "**" が改行を挟んだ次の行に孤立して表示される崩れが
+                # あった（実際の通知文で確認）。太字で囲む対象からは
+                # 改行を除外し、"\n\n" は呼び出し側で付与するよう修正する。
+                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}"
             
             # 説明文の開始
+            # 【2026-09-02 修正】embed.title と全く同じ文言を description の
+            # 1行目にも太字で重複表示していたため削除した
+            # （Discord上でタイトルと本文の両方に同じ文言が出てしまっていた）。
             description = (
-                f"**{title}**\n\n"
                 f"**発表機関:** {source}\n"
                 f"**発表時刻:** {report_time}\n"
             )
             
             if cause_text:
-                description += f"**{cause_text}**"
+                description += f"\n**{cause_text}**\n"
             
             # 津波観測情報
             tsunami = body.get("Tsunami", {})
@@ -962,7 +969,10 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 depth_str = f"　深さ{depth}" if depth else ""
                 eq_source = eq.get("Source", "")
                 source_note = f" ※原因地震情報は {eq_source} からの情報です" if eq_source else ""
-                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}\n\n"
+                # 【2026-09-02 修正】notify_tsunami_observationと同様、太字終了の
+                # "**" が改行を挟んで孤立する崩れを解消するため、改行を
+                # 呼び出し側に移した。
+                cause_text = f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}"
 
             # ── Forecast（予報区別の警報種別） ──
             forecast = tsunami.get("Forecast", {})
@@ -1040,13 +1050,14 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 cancel_speak_text = ""
 
             # ── description 組み立て（notify_tsunami_observation スタイル準拠） ──
+            # 【2026-09-02 修正】embed.title と同じ文言をdescriptionの1行目にも
+            # 重複表示していたため削除した。
             description = (
-                f"**{title}**\n\n"
                 f"**発表機関:** {source}\n"
                 f"**発表時刻:** {report_time}\n"
             )
             if cause_text:
-                description += f"**{cause_text}**"
+                description += f"\n**{cause_text}**\n"
 
             if is_cancelled:
                 description += cancel_speak_text or "すべての津波警報・注意報・予報が解除されました。"
