@@ -14,10 +14,13 @@
 - **P2P EEW（緊急地震速報（警報）専用）**: P2P 地震情報の WebSocket から警報のみを常時受信
   - Wolfx と同時並行稼働。EventIDごとの最大Serial番号を管理し、同一ソース内での重複/逆行メッセージを排除する（Wolfx・P2Pそれぞれ独立に管理しており、互いの処理状況が他方の通知を抑制することはない。詳細は「EEWの重複排除について」参照）
   - 地図画像: P2Pメッセージの `id` から地震情報通知と同じ生成方法で地図画像URLを組み立て、Embed最下部に添付する（Wolfx由来のEEWには画像IDが存在しないため対象外。2026-08-19追加）
+  - **PLUM法（震源要素を経由せず、観測波形から直接各地点の震度を推定する気象庁の緊急地震速報手法）による予測時、マグニチュード・深さが「推定なし」になるのは仕様通り**。PLUM法はそもそも震源の規模・位置を推定しないため、マグニチュード・深さが不明のまま、震度だけが（「7以上」のような具体的な値も含めて）観測波形から直接推定される。震源が未確定でも震度は判明する、という一見矛盾した組み合わせがPLUM法の正常な出力
+  - `isAssumption`（PLUM法フラグ）の判定は、地震オブジェクト直下の`condition`（`"仮定震源要素"`）のみを見る（**2026-08-31修正**）。以前は個別エリアの`kindCode=19`（そのエリアの震度推定にPLUM法を使用）が1つでもあれば地震全体をPLUM法扱いにしていたため、辺縁部の一部エリアだけがPLUM法推定でも、既に確定しているはずのマグニチュード・震源情報全体が「推定なし」表示に潰される不具合があった
 - **地震情報**: P2P 地震情報の API からの確報情報
   - 震度速報（`ScalePrompt`）: 読み上げは `prefecture_map.json` で区域名を都道府県名に変換し、重複を排除して発表（例:「熊本県天草・芦北」「熊本県熊本」→「熊本県」1回のみ）。通知本文の津波記述の下に区域別の震度一覧（■ 震度○ + 区域名）を追記
   - 震源に関する情報（`Destination`）: 震源地の横に度分秒形式の緯度経度を常に付記（例:「熊本県天草・芦北地方（32°33′39.8、130°22′43.2）」）
   - 各地の震度に関する情報（`ScaleAndDestination` / `DetailScale`）: 最大震度3以上の場合、読み上げに最大震度を観測した地点名を追加。最大震度〜1階級下までの観測点一覧を追記（震度46＝推定5弱以上は45と同階級として扱う）。1階級下の観測点数が `QUAKE_INTENSITY_COLLAPSE_THRESHOLD`（デフォルト10）件以上の場合、通知文の肥大化を防ぐため都道府県ごとに1地点だけを代表として表示し「（以下略）」を付ける
+  - **【地域ごとの予想震度】の下限値／上限値のどちらかが不明なエリアの表示（2026-09-02修正）**: EEW（P2P生形式）のエリアには、推定精度上の理由で震度の下限（`scaleFrom`）と上限（`scaleTo`）のうち一方だけが判明しているケースがある（例: 全体の「予想最大震度」は`scaleTo=99`＝「7以上」由来で判明しているのに、そのエリア自体の`scaleFrom`は`-1`＝不明）。以前は下限（`Shindo1`）が「不明」のエリアを地域内訳から丸ごと除外していたため、「全体の予想最大震度は7以上なのに、地域ごとの内訳には6弱・5強までしか出てこない」という不整合が生じていた。下限・上限のうち少なくとも一方が判明していれば表示するよう`core/eew_convert.py`の`build_forecast_groups`を修正した（単独EEW通知・複数EEWサマリー通知の両方に適用される共通関数）
   - 地図画像: メッセージ送信後にバックグラウンドで P2P 地震情報 CDN をポーリングし、画像が実際に取得可能になった時点で Embed に画像を追加（詳細は下記「P2P 地図画像の添付」参照）
   - 津波の有無（`domesticTsunami`）の表記: P2P 地震情報の `domesticTsunami` は速報段階の推定値であり、`Warning` が返っても実際に気象庁から「津波警報」が正式発表されているとは限らない。誤解を招く断定的な表記を避けるため、`Watch`・`Warning` は通知本文で「津波警報・注意報を発表中」、読み上げで「現在、津波予報等を発表中です。」とまとめて表現する。`NonEffective` は通知「若干の海面変動（被害の心配なし）」、読み上げ「この地震で、若干の海面変動があるかもしれませんが、被害の心配はありません。」。`None` は読み上げで「この地震による津波の心配はありません。」を明示的に付加する（`MajorWarning` は従来通り「大津波警報」）
 
@@ -33,7 +36,8 @@
 - **2026-08-23修正**: 以前はこの管理をWolfx・P2Pで単一の辞書として共有しており、「同一EventIDのEEWを両ソースがほぼ同時に配信してきた場合の二重通知防止」を意図していた。しかし実際にはWolfxとP2P地震情報は同一EventIDに対して独立にSerial番号を採番しており両者の値は対応しないため、一方のソースが先に高いSerial番号を処理すると、もう一方のソースの正当な更新（低いSerial番号）が誤って「重複/逆行」とみなされ、通知が欠落する不具合があった（実際の茨城県南部の地震で発生を確認）。ソースごとに辞書を分離し、この誤抑制を解消した
 
 ### EWS（緊急警報放送）信号音
-- 津波警報・大津波警報（`domesticTsunami` が `Warning` または `MajorWarning`。津波注意報・津波予報は対象外）が発表・更新された P2P 地震情報を受信した際に、昭和60年郵政省告示第405号に準拠した AFSK 方式の緊急警報信号音（第二種開始信号）を生成・再生する
+- 津波警報・大津波警報（地震情報側の`domesticTsunami`が`Warning`/`MajorWarning`。津波注意報・津波予報は対象外）が発表・更新された P2P 地震情報を受信した際に、昭和60年郵政省告示第405号に準拠した AFSK 方式の緊急警報信号音（第二種開始信号）を生成・再生する
+- **2026-09-01追加**: 津波情報そのもの（`notify_tsunami`・`notify_tsunami_forecast`）が津波警報・大津波警報を発表・更新した際にも再生する。以前は地震情報側（`domesticTsunami`経由）のみで、津波情報が単独で発表・更新されたタイミングでは再生されないリグレッションがあった。詳細は上記「EWS（緊急警報放送）信号音（津波）」参照
 - 信号音は `core/ews_signal.py` でビット列組み立て・PCM波形合成を行い、外部 WAV ファイルへは一切出力しない。生成した PCM バイト列はメモリ上のまま `core/audio.py` の `play_ews_pcm`（`pygame.mixer.Sound(buffer=...)`）に渡して直接再生する
 - `pygame.mixer.Sound(buffer=...)` はリサンプリングを行わず、ミキサー初期化時のサンプルレート・チャンネル数をそのままバッファの解釈に使うため、`core/audio.py` の `pygame.mixer.init()` は `core/ews_signal.py` の生成条件（44100Hz・モノラル）に明示的に合わせて初期化している（不一致のまま再生するとピッチ・再生速度が変わってしまう。既存の `pygame.mixer.music`（MP3再生）はファイル再生時に自動リサンプリングされるためこの制約を受けない）
 - `EWS_ENABLE=true` で有効化（デフォルト `false`。オプトイン機能）。地域符号・送信ブロック数・前置後置固定音の長さは環境変数で設定可能（下記「EWS 設定」参照）
@@ -61,12 +65,26 @@
 - `P2P_IMAGE_ATTACH_ENABLED=false` にすると、この画像添付処理（CDN ポーリング）自体を無効化し、通知本文に画像 URL をテキストとして含める簡易方式に切り替わる（Discord のリンクプレビュー機能により自動展開。原因切り分け用）
 
 ### 津波情報
-- 気象庁 HP の JSON から自動取得（大津波警報 / 津波警報 / 津波注意報 / 津波予報）
-- 警報種別・予想高さ別のエリア一覧表示
-- 読み上げは「（地域名）に（警報種別）が発表されました」の形式（例:「有明・八代海に津波注意報が発表されました」「宮城県に大津波警報が発表されました」）。複数地域該当時は最重要度（大津波警報 > 津波警報 > 津波注意報）の地域を優先し、4件以上は代表3件＋「等」で丸める
-- 本文（`Body.Text`）・解説（`Body.Comments.FreeFormComment`）を通知下部に追記
-- 津波観測情報（`VTSE41/51`）を別関数で処理
-- 地震情報通知と同じ地図画像添付方式（下記「P2P 地図画像の添付」参照）を使用
+2つの独立した情報源から通知する（それぞれ通知文のテンプレートが異なる）。
+
+- **P2P 地震情報**（`notify_tsunami`、P2P WebSocket code=552）
+  - 警報種別・予想高さ別のエリア一覧表示
+  - **エリアごとに`immediate`（ただちに来襲）・`firstHeight.condition`・`firstHeight.arrivalTime`（到達予想時刻）を表示**（2026-08-30復元。Cog分割時に実装から欠落していたリグレッションを修正したもの。P2P公式仕様のこれらのフィールドは気象庁の生XML形式には存在しないため、この情報量の多さはP2P経由の通知だけの特徴）
+  - 読み上げは「（地域名）に（警報種別）が発表されました」の形式（例:「有明・八代海に津波注意報が発表されました」「宮城県に大津波警報が発表されました」）。複数地域該当時は最重要度（大津波警報 > 津波警報 > 津波注意報）の地域を優先し、4件以上は代表3件＋「等」で丸める
+  - 発信元コメント（`comments.warningComment.text`）を通知下部に追記
+- **気象庁 HP の JSON**（`tsunami/data/list.json`を60秒間隔でポーリング）
+  - `notify_tsunami_forecast`：津波警報・注意報・予報（VTSE41）。警報種別・予想高さ別のエリア一覧、原因地震情報、解除時は解除レベル別の文言を出し分け
+  - `notify_tsunami_observation`：津波観測に関する情報（VTSE41/51/52）。観測点ごとの**実測**津波高さ・到達状況を表示（P2P側・予報側にはない実測値情報）
+  - 顕著な地震の震源要素更新のお知らせ／南海トラフ地震臨時情報は `cogs/other.py`（`OtherInfoCog`）へ委譲（下記「気象庁その他特別情報」参照）
+- 地震情報通知と同じ地図画像添付方式（下記「P2P 地図画像の添付」参照）を使用（P2P経由のみ）
+
+### EWS（緊急警報放送）信号音（津波）
+**2026-09-01追加。** 津波警報・大津波警報（`Warning`/`MajorWarning`）が発表・更新された際に、`EWS_ENABLE=true`でEWS信号音（下記「EWS（緊急警報放送）信号音」参照）を再生する。P2P形式（`notify_tsunami`）・気象庁HP形式（`notify_tsunami_forecast`）の両方に対応。以前は地震情報側（`domesticTsunami`フィールド経由）からのみ再生され、津波情報そのものの発表・更新時には再生されないリグレッションがあったため追加した。同一イベントでの警報区分のエスカレーション時（例: 津波警報→大津波警報）は再度再生し、同一区分の繰り返し更新では再生しない。
+
+### 気象庁その他特別情報
+- 北海道・三陸沖後発地震注意情報・南海トラフ地震臨時情報・顕著な地震の震源要素更新のお知らせを`OtherInfoCog`（`cogs/other.py`）で通知する
+- 南海トラフ地震臨時情報・顕著な地震の震源要素更新のお知らせは、気象庁が`tsunami/data/list.json`と`quake/data/list.json`の両方に重複して掲載しているため、本Botでも2経路から独立して通知される（フェッチは`cogs/tsunami.py`側の`fetch_tsunami_observation`が担当し、通知処理のみ`OtherInfoCog.notify_hypocenter_update`/`notify_nankai_trough`に委譲。**2026-09-01移設**、送信先は`OTHER_CHANNEL_ID`に統一）
+- 北海道・三陸沖後発地震注意情報／南海トラフ地震臨時情報には区域図画像（`hokkaido_bosaitaiou_area.png`／`nankai_bosaitaiou_area.png`。**プロジェクトルート**＝`bot.py`と同じディレクトリに配置）を添付
 
 ### 火山情報
 - 気象庁 HP の JSON から自動取得（1分ごとのポーリング）
@@ -678,6 +696,25 @@ python3 bot.py --test_auto path/to/downloaded.json
 [TEST] 判定結果: --test_tsunami_forecast 相当と判断しました (TsunamiCog.notify_tsunami_forecast)
 ```
 
+**【2026-08-31 追加】P2P生EEW（code=556）と地震情報（code=551）の判定改善**
+以前は`issue`+`earthquake`という同じトップレベルキーを共有するため、
+P2P地震情報の緊急地震速報（生形式）が誤って「地震情報」と判定されて
+いた。`issue`オブジェクトの中身（EEWは`eventId`、地震情報は`type`を
+持つ、`points`/`areas`の有無等）まで見て区別するよう修正し、正しく
+`eew_p2p`と判定されるようになった。
+
+**【2026-08-31 追加】北海道・三陸沖後発地震注意情報と南海トラフ地震
+臨時情報の判定改善**
+`Body.EarthquakeInfo`を持つJSONを無条件に`nankai_trough`（津波チャンネル
+宛て）と判定していたが、「北海道・三陸沖後発地震注意情報」も同じBody
+構造を共有しており、本来は`other_quake_advisory_detail`（otherチャンネル
+宛て）専用だった。`Head.Title`のテキスト内容で区別するよう修正し、
+「北海道」「三陸沖」「後発地震」を含む場合は`other_quake_advisory_detail`
+のみに絞り込む。「南海トラフ」「顕著な地震の震源要素更新」は気象庁の
+意図的な重複配信（下記「気象庁その他特別情報」参照）により本番でも
+2経路が独立して動作しうるため、どちらか一方に決め打ちせず両方を候補
+として提示する。
+
 ### 一括実行（`--test_all`）
 
 デプロイ前の一括疎通確認用に、`TEST_TARGETS` に登録された全対象を順に
@@ -706,7 +743,7 @@ python3 bot.py --test_all tests/fixtures/
 [TEST]   ✅ OK   volcano
 [TEST]   ✅ OK   usgs
 [TEST]   ✅ OK   ews
-[TEST] 合計: 16 件 / OK=6 NG=0 SKIP=10
+[TEST] 合計: 17 件 / OK=6 NG=0 SKIP=11
 ============================================================
 ```
 
@@ -765,7 +802,8 @@ CLIテストモード（`--test_*` 付きで起動した場合）では、Web Da
 | `volcano_warning` | `VolcanoCog._notify_warning` | （warning.json の1エントリ形式） |
 | `usgs` | `UsgsCog.notify_usgs_quake` | `tests/fixtures/usgs_sample.json` |
 | `other_long_period` | `OtherInfoCog.notify_long_period` | （長周期地震動情報の list item 形式） |
-| `other_quake_advisory` | `OtherInfoCog.notify_quake_advisory` | （その他地震情報の list item 形式） |
+| `other_quake_advisory` | `OtherInfoCog.notify_quake_advisory` | （その他地震情報の list item 形式。`quake/data/list.json`の1エントリ） |
+| `other_quake_advisory_detail` | `OtherInfoCog.notify_quake_advisory` | （気象庁HPから直接ダウンロードした完全な詳細JSON＝Control/Head/Body形式。**2026-08-31追加**。list_item形式との違いはREADME下記参照） |
 
 **【2026-08-30 修正】** `tsunami_observation` / `tsunami_forecast` の
 `validate_expected_fields()` チェック対象フィールドが、P2P地震情報API形式
@@ -985,11 +1023,13 @@ QTL_Bot/
 │   ├── audio_shared.py       - AudioCog: 音声読み上げ・MP3再生の実体（EewCog/QuakeInfoCogが共有）
 │   ├── eew.py                - EewCog: 緊急地震速報（Wolfx/P2P EEW）専用
 │   ├── quake.py              - QuakeInfoCog: 地震情報（震度速報等）・P2P地震情報ポーリング
-│   ├── tsunami.py            - TsunamiCog: 津波観測・予報
+│   ├── tsunami.py            - TsunamiCog: 津波観測・予報・警報通知、EWS信号音（津波）
 │   ├── jishin_kanchi.py      - JishinKanchiCog: P2P地震感知情報（code=9611、デフォルト無効）
 │   ├── volcano.py            - VolcanoCog: 火山情報・噴火速報・噴火警報
 │   ├── usgs.py               - UsgsCog: USGS 海外地震情報
-│   ├── other.py              - OtherInfoCog: 長周期地震動・気象庁その他情報
+│   ├── other.py              - OtherInfoCog: 長周期地震動・気象庁その他情報（後発地震注意情報・
+│   │                            南海トラフ・震源要素更新のお知らせ。2026-09-01にtsunami.pyから
+│   │                            notify_hypocenter_update/notify_nankai_troughを移設）
 │   ├── system.py             - SystemCog: !status・Web Dashboard・エラー監視・リソース監視
 │   └── kyoshin_monitor.py    - KyoshinMonitorCog: 強震モニタ画像解析による揺れ検知
 └── core/
@@ -1042,10 +1082,10 @@ QTL_Bot/
 | `AudioCog` | `cogs/audio_shared.py` | 音声読み上げ・MP3再生の実体（EewCog・QuakeInfoCogが共有） |
 | `EewCog` | `cogs/eew.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・EEW発表時の強震モニタ通知 |
 | `QuakeInfoCog` | `cogs/quake.py` | P2P API（地震速報・各地の震度等）ポーリング・通知 |
-| `TsunamiCog` | `cogs/tsunami.py` | JMA 津波 API ポーリング・観測情報・予報 / 警報通知 |
+| `TsunamiCog` | `cogs/tsunami.py` | JMA 津波 API ポーリング・観測情報・予報 / 警報通知、EWS信号音（津波） |
 | `VolcanoCog` | `cogs/volcano.py` | JMA 火山 API ポーリング・噴火速報・噴火警報 |
 | `UsgsCog` | `cogs/usgs.py` | USGS API ポーリング・海外地震フィルタリング・通知 |
-| `OtherInfoCog` | `cogs/other.py` | 長周期地震動・気象庁その他情報 |
+| `OtherInfoCog` | `cogs/other.py` | 長周期地震動・気象庁その他情報（後発地震注意情報・南海トラフ・震源要素更新のお知らせ） |
 | `SystemCog` | `cogs/system.py` | Web Dashboard・`!status`・エラー自動通知・リソース監視 |
 | `KyoshinMonitorCog` | `cogs/kyoshin_monitor.py` | 強震モニタ画像の解析による揺れ検知・通知（Pillow が必要） |
 
@@ -1093,5 +1133,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-08-30（EEW発表中の強震モニタ画像解析（`estimate_max_shindo_from_image`）をイベントループ非ブロッキング化（`run_in_executor`）／ログファイルパスを`.env`の`LOG_FILE_PATH`で設定可能化（未設定時はプロジェクトルート基準の絶対パス）／強震モニタのポーリング処理に計測ログを追加（`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`）／地震感知情報の地図画像添付・テキスト通知（Embed送信）を「イベントの第一報のみ／最短`JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC`秒間隔」に間引き、大規模・関東の地震でP2P地図画像CDNセマフォが占有され地震情報側の画像取得まで巻き添えで失敗する不具合を解消／CLIテストに`--test_auto`（JSON構造の自動判定実行）と`--test_eew_p2p`（生のP2P EEW形式に対応、`data_converter`フックで本番と同じ変換関数を経由）を追加、`jishin_kanchi`・`nankai_trough`・`hypocenter_update`のテスト対象を新規追加、`tsunami_observation`/`tsunami_forecast`の入力検証フィールド誤りを修正、`sniff_test_target`のEEW/地震情報/津波の判定ロジックを`issue`オブジェクトのネスト構造まで見て正確に区別するよう修正）
+**最終更新**: 2026-09-02（EEWの`isAssumption`（PLUM法）判定を地震全体の`condition`のみに限定し、辺縁部エリアの`kindCode=19`だけで震源・マグニチュード全体が「推定なし」表示に潰される不具合を修正／地図画像の探索先ディレクトリ誤り（`cogs/`を指していた）を修正し、北海道・三陸沖後発地震注意情報・南海トラフ地震臨時情報の区域図画像が添付されない不具合を解消／`notify_hypocenter_update`・`notify_nankai_trough`を`cogs/tsunami.py`から`cogs/other.py`（`OtherInfoCog`）へ移設し送信先を`OTHER_CHANNEL_ID`に統一／津波警報・大津波警報の発表・更新時にEWS信号音が再生されない不具合を修正（`TsunamiCog`にEWSトリガーを追加）／`--test_auto`のP2P生EEW誤判定（地震情報と混同）・北海道/南海トラフ誤判定（津波チャンネルに誤送信）を修正／EEWの地域ごとの震度内訳で、下限（`scaleFrom`）が不明だが上限（`scaleTo`、「7以上」等）が判明しているエリアが表示から丸ごと消える不具合を修正（`build_forecast_groups`）／津波情報（気象庁HP系）の通知文でタイトルの重複表示・原因地震行の改行崩れを修正）
 **対応 Python**: 3.11+
