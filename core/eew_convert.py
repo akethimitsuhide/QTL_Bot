@@ -207,6 +207,28 @@ def extract_alert_regions(data: dict, region_map: dict) -> set:
     return alert_regions
 
 
+def eew_warn_advisory_note(max_shindo_code: int | None) -> str:
+    """
+    isWarn=True（緊急地震速報・警報）時の注意喚起文を、予想最大震度
+    （int_mapのキー。例: 45=5弱, 55=6弱）に応じて選択する。
+
+    - 6弱以上（55以上）        : 「直ちに身の安全を確保してください」
+    - 5弱以上6弱未満（45〜54） : 「強い揺れに警戒してください」
+      （46="推定5弱以上"を含む。PLUM法等で確定値ではないが、
+       6弱以上と確定できない値のため、より安全側の文言にする）
+    - それ以外（震度不明・5弱未満など）:
+      予想最大震度から強さを判断できないケースであり、警報自体は
+      発表されている（isWarn=True）ため、従来通り
+      「強い揺れに警戒してください」を安全側のデフォルトとして返す。
+
+    max_shindo_code が None（INT_MAPに対応する値が見つからない）場合も
+    同様に安全側のデフォルトを返す。
+    """
+    if max_shindo_code is not None and max_shindo_code >= 55:
+        return "**⚠ 直ちに身の安全を確保してください。**"
+    return "**⚠ 強い揺れに警戒してください。**"
+
+
 def shindo_rank(value: str, int_map: dict) -> int:
     """
     "1"〜"7"・"5弱"・"6強"等の震度文字列を、大小比較用の数値ランクに

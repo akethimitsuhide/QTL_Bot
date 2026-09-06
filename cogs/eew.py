@@ -58,6 +58,7 @@ from core.delivery_stats import record_delivery
 from core.eew_convert import (
     convert_p2p_eew_to_wolfx, extract_alert_regions,
     build_forecast_groups, format_forecast_section, merge_forecast_groups,
+    eew_warn_advisory_note,
 )
 from core.p2p_image import P2PImageMixin
 from core.ws_helpers import ws_connect_loop
@@ -419,6 +420,7 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                 sorted_eews = sorted(self.recent_eews.items(), key=lambda x: x[1][1])
                 merged_warn_regions = set()
                 any_warn = False
+                max_warn_shindo_code = None
                 for eid, (old_data, _) in sorted_eews:
                     title_text = old_data.get('Title', '緊急地震速報')
                     s = int(old_data.get("Serial", 1))
@@ -439,6 +441,13 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
                     if old_data.get("isWarn"):
                         any_warn = True
+                        # 複数EEW中、警報が発表されているものの予想最大震度の
+                        # うち最も大きい値を注意喚起文の判定に使う（安全側）。
+                        warn_code = next((k for k, v in INT_MAP.items() if v == max_int), None)
+                        if warn_code is not None and (
+                            max_warn_shindo_code is None or warn_code > max_warn_shindo_code
+                        ):
+                            max_warn_shindo_code = warn_code
                     eid_state = self.eew_state.get(eid)
                     if eid_state:
                         merged_warn_regions |= eid_state["cumulative_warn_areas"]
@@ -447,7 +456,7 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
                 notes = []
                 if any_warn:
-                    notes.append("**⚠強い揺れに警戒してください。**")
+                    notes.append(eew_warn_advisory_note(max_warn_shindo_code))
                     if any(
                         safe_bool(d.get("isSea", False)) and safe_float(
                             d.get("Magnitude") or d.get("Magunitude") or 0
@@ -528,7 +537,7 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
             notes = []
             if data.get("isWarn"):
-                notes.append("**⚠強い揺れに警戒してください。**")
+                notes.append(eew_warn_advisory_note(max_int_val))
 
             if not is_plum:
                 is_sea = safe_bool(data.get("isSea", False))
