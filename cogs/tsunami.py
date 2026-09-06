@@ -133,14 +133,16 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
         # -- 音声再生（AudioMixin が要求する属性） --
         self.speech_queue = asyncio.PriorityQueue(maxsize=SPEECH_QUEUE_MAXSIZE)
         self.speech_task = None
+        # 【2026-09-06 修正】以前は notify_tsunami / notify_tsunami_forecast が
+        # ここに登録された vxse51/52/53/5c（本来は震度速報など地震情報向けの
+        # チャイム）を再生していたが、津波情報の発表時に地震情報用のチャイムが
+        # 鳴るのは文脈として不適切なため廃止した（音声はspeak_localの読み上げと
+        # EWS警告音のみに限定）。mp3_queue/mp3_worker自体はAudioMixinの契約
+        # （speak_local/play_ews_pcmと共通のMixin）上必要なため残しているが、
+        # 現時点でTsunamiCogからplay_mp3()を呼ぶ箇所は無い。
         self.mp3_queue = asyncio.Queue(maxsize=MP3_QUEUE_MAXSIZE)
         self.mp3_task = None
-        self.audio_files = {
-            "vxse51": "vxse51.mp3",
-            "vxse52": "vxse52.mp3",
-            "vxse53": "vxse53.mp3",
-            "vxse5c": "vxse5c.mp3",
-        }
+        self.audio_files: dict[str, str] = {}
 
     # ===============================
     # Cog起動・終了
@@ -682,15 +684,13 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
                 speak_text = f"{title} が発表されました"
 
             await self.speak_local(speak_text)
-            if not cancelled:
-                if any(a.get("grade") == "MajorWarning" for a in areas):
-                    await self.play_mp3("vxse51")
-                elif any(a.get("grade") == "Warning" for a in areas):
-                    await self.play_mp3("vxse52")
-                elif any(a.get("grade") == "Watch" for a in areas):
-                    await self.play_mp3("vxse5c")
-                else:
-                    await self.play_mp3("vxse53")
+            # 【2026-09-06 修正】以前は grade に応じて vxse51/52/53/5c の
+            # MP3（元々は震度速報等・地震情報向けに用意されたチャイム）を
+            # ここで再生していたが、津波情報の発表時に地震情報用のチャイムが
+            # 鳴るのは文脈として不適切かつ紛らわしい（実運用で「無関係な
+            # 音声が再生される」と報告された）。津波情報発表時に鳴らす音声は
+            # 「読み上げ（speak_local）」と「EWS警告音（_play_ews_signal、
+            # 下記）」の2つのみとし、mp3チャイムの再生はここでは行わない。
 
             # ── EWS（緊急警報放送）信号音 ──
             # 【2026-09-01 追加】津波警報（Warning）・大津波警報
@@ -943,8 +943,6 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             4: "今すぐ海岸・河川から離れて避難してください。",
             2: "海岸・河川に近づかないでください。",
         }
-        WARN_MP3 = {5: "vxse51", 4: "vxse52", 2: "vxse5c"}
-
         try:
             ttl     = list_item.get("ttl", "津波情報") if list_item else "津波情報"
             title   = ("【テスト】 " if is_test else "") + ttl
@@ -1124,14 +1122,14 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
 
 
             # ── 読み上げ・音声 ──
+            # 【2026-09-06 修正】notify_tsunami と同じ理由で、地震情報用
+            # チャイム（WARN_MP3: vxse51/52/5c）の再生を廃止した。津波情報
+            # 発表時に鳴らす音声は「読み上げ」と「EWS警告音」のみとする。
             if is_cancelled:
                 await self.speak_local(cancel_speak_text)
             else:
                 speak_label = WARN_LABEL.get(max_level, "津波情報")
                 await self.speak_local(f"{speak_label}が発表されました")
-                mp3_key = WARN_MP3.get(max_level)
-                if mp3_key:
-                    await self.play_mp3(mp3_key)
 
             # ── EWS（緊急警報放送）信号音 ──
             # 【2026-09-01 追加】notify_tsunami と同じ理由・同じ仕組みで
