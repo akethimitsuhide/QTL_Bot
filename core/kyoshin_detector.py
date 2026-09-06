@@ -100,6 +100,17 @@ class DetectorConfig:
     # イベントを終了する。
     event_timeout_sec: float = 60.0
 
+    # 【2026-09-06 追加】起動直後のウォームアップ期間（秒）。
+    # 起動直後は各観測点のhistoryが浅く、baseline_average()が「範囲内に
+    # サンプルが無い場合は履歴中の最古の値をそのまま使う」フォールバックに
+    # 頼らざるを得ない（Station.baseline_average参照）。この間は基準値が
+    # 実質「起動直後にたまたま観測できた1点」でしかなく、揺れの上昇幅を
+    # 正しく評価できないため、起動からこの秒数が経過するまでは「上昇
+    # トリガー」が立ってもイベントの新規生成・確定を行わない
+    # （ingest()自体は通常通り継続し、historyの蓄積は止めない）。
+    # 0以下を指定するとウォームアップを無効化する（従来通りの挙動）。
+    startup_warmup_sec: float = 0.0
+
     # ブラックリスト（機器異常疑いの観測点を検知対象から除外する）関連。
     blacklist_shindo_threshold: float = 3.0         # 震度3以上
     blacklist_shindo_threshold_island: float = 4.5  # 離島は震度5弱以上
@@ -212,6 +223,10 @@ class EventManager:
         self.stations: dict[str, Station] = {}
         self.events: dict[str, SeismicEvent] = {}
 
+        # 起動ウォームアップ管理（tick()の初回呼び出し時刻を起点とする）。
+        self._started_at: float | None = None
+        self._warmup_ended_logged = False
+
     # ===============================
     # 観測点登録（静的データ）
     # ===============================
@@ -282,40 +297,68 @@ class EventManager:
     def tick(self, now: float) -> list["_Change"]:
         changes: list[_Change] = []
 
+        # ── 起動ウォームアップ判定 ──
+        # tick() が初めて呼ばれた時刻を「起動時刻」とみなす
+        # （呼び出し側のポーリングループが起動直後から回り始めるため、
+        # Bot/監視ループの起動時刻とほぼ一致する）。
+        if self._started_at is None:
+            self._started_at = now
+            if self.config.startup_warmup_sec > 0:
+                logger.info(
+                    f"KyoshinDetector: 起動ウォームアップを開始します"
+                    f"（{self.config.startup_warmup_sec:.1f}秒間、揺れ検知イベントの新規生成・"
+                    f"確定を抑制します。観測点の履歴蓄積は継続します）"
+                )
+
+        in_warmup = (
+            self.config.startup_warmup_sec > 0
+            and (now - self._started_at) < self.config.startup_warmup_sec
+        )
+        if (
+            not in_warmup
+            and self.config.startup_warmup_sec > 0
+            and not self._warmup_ended_logged
+        ):
+            self._warmup_ended_logged = True
+            logger.info(
+                "KyoshinDetector: 起動ウォームアップが終了しました。揺れ検知イベントの新規生成・確定を有効化します"
+            )
+
         risen_ids = {sid for sid, st in self.stations.items() if st._rose_this_tick}
 
-        # ── ブラックリスト化（周囲が無反応なのに単独でフラット&高震度） ──
-        # 既にイベントに参加中の観測点は、進行中の地震で震度が高止まりしている
-        # 可能性があるため、ブラックリスト判定の対象から除外する。
-        for sid, st in list(self.stations.items()):
-            if st.blacklisted:
-                # 既にブラックリスト化済みの観測点は ingest() 側で早期returnされ、
-                # _flat_and_high が最後の値のまま凍結され続ける。ここで除外しないと
-                # 毎tick同じ条件が成立し続け、警告ログが無限に出続けてしまう。
-                continue
-            if st.event_id is not None:
-                continue
-            if st._flat_and_high:
-                neighbor_active = any(
-                    self.stations[n]._rose_this_tick or self.stations[n].event_id is not None
-                    for n in st.neighbors if n in self.stations
-                )
-                if not neighbor_active:
-                    st.blacklisted = True
-                    logger.warning(f"KyoshinDetector: 観測点 {sid} をブラックリスト化しました（機器異常疑い）")
+        confirmed_ids: list[str] = []
+        if not in_warmup:
+            # ── ブラックリスト化（周囲が無反応なのに単独でフラット&高震度） ──
+            # 既にイベントに参加中の観測点は、進行中の地震で震度が高止まりしている
+            # 可能性があるため、ブラックリスト判定の対象から除外する。
+            for sid, st in list(self.stations.items()):
+                if st.blacklisted:
+                    # 既にブラックリスト化済みの観測点は ingest() 側で早期returnされ、
+                    # _flat_and_high が最後の値のまま凍結され続ける。ここで除外しないと
+                    # 毎tick同じ条件が成立し続け、警告ログが無限に出続けてしまう。
+                    continue
+                if st.event_id is not None:
+                    continue
+                if st._flat_and_high:
+                    neighbor_active = any(
+                        self.stations[n]._rose_this_tick or self.stations[n].event_id is not None
+                        for n in st.neighbors if n in self.stations
+                    )
+                    if not neighbor_active:
+                        st.blacklisted = True
+                        logger.warning(f"KyoshinDetector: 観測点 {sid} をブラックリスト化しました（機器異常疑い）")
 
-        # ── 空間クロスバリデーション: 上昇トリガー成立の判定 ──
-        # risen_ids は基準値との差分のみで決まる「edge」な集合であり、
-        # 震度が変化しなくなれば diff は自然にゼロへ近づいて risen_ids から
-        # 自然に外れる（＝この集合自体がstale化しない設計になっている）。
-        confirmed_ids = []
-        for sid in risen_ids:
-            st = self.stations[sid]
-            if st.blacklisted:
-                continue
-            neighbor_rise_count = sum(1 for n in st.neighbors if n in risen_ids)
-            if neighbor_rise_count >= self.config.neighbor_trigger_count:
-                confirmed_ids.append(sid)
+            # ── 空間クロスバリデーション: 上昇トリガー成立の判定 ──
+            # risen_ids は基準値との差分のみで決まる「edge」な集合であり、
+            # 震度が変化しなくなれば diff は自然にゼロへ近づいて risen_ids から
+            # 自然に外れる（＝この集合自体がstale化しない設計になっている）。
+            for sid in risen_ids:
+                st = self.stations[sid]
+                if st.blacklisted:
+                    continue
+                neighbor_rise_count = sum(1 for n in st.neighbors if n in risen_ids)
+                if neighbor_rise_count >= self.config.neighbor_trigger_count:
+                    confirmed_ids.append(sid)
 
         # ── イベント割当 / 新規作成 / マージ ──
         for sid in confirmed_ids:

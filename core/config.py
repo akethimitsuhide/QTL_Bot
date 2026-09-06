@@ -390,6 +390,22 @@ KYOSHIN_NEIGHBOR_K = _env_int("KYOSHIN_NEIGHBOR_K", 6)
 KYOSHIN_BASELINE_WINDOW_START_SEC = float(os.getenv("KYOSHIN_BASELINE_WINDOW_START_SEC", "10.0"))
 KYOSHIN_BASELINE_WINDOW_END_SEC   = float(os.getenv("KYOSHIN_BASELINE_WINDOW_END_SEC", "25.0"))
 
+# 【2026-09-06 追加】起動直後のウォームアップ期間（秒）。
+# 起動直後は観測点のhistoryが浅く、基準値(baseline)が
+# KYOSHIN_BASELINE_WINDOW_END_SEC秒分の実サンプルに基づいた平均ではなく
+# 「履歴中の最古の1点」にフォールバックせざるを得ない（詳細は
+# core/kyoshin_detector.py の Station.baseline_average 参照）。
+# 起動からこの秒数が経過し、基準値計算に十分な履歴が貯まるまでは、
+# 揺れ検知イベントの新規生成・確定を抑制する
+# （観測点ごとの震度履歴の蓄積＝ingest自体は起動直後から通常通り行う）。
+# 未設定時はKYOSHIN_BASELINE_WINDOW_END_SECと同じ値を使う
+# （基準値が実サンプルに基づくようになるタイミングと一致するため）。
+# 固定値で上書きしたい場合のみ本変数を設定する。0以下を指定すると
+# ウォームアップを無効化し、従来通り起動直後から検知を行う。
+KYOSHIN_STARTUP_WARMUP_SEC = float(
+    os.getenv("KYOSHIN_STARTUP_WARMUP_SEC", str(KYOSHIN_BASELINE_WINDOW_END_SEC))
+)
+
 # 観測点ごとに保持する震度履歴の長さ（秒）。KYOSHIN_BASELINE_WINDOW_END_SEC
 # より短くすると基準値の計算に必要なサンプルが欠落するため、
 # 通常はBASELINE_WINDOW_END_SECと同じか、それ以上の値にすること。
