@@ -528,6 +528,30 @@ P2P_IMAGE_ATTACH_ENABLED = _env_bool("P2P_IMAGE_ATTACH_ENABLED", True)
 P2P_IMAGE_CDN_CONCURRENCY = _env_int("P2P_IMAGE_CDN_CONCURRENCY", 3)
 
 # ===============================
+# 地震情報 履歴（qtlbot.logベース、地図・表での閲覧機能）
+# ===============================
+# core/quake_history_log.py 参照。Web Dashboard（/status/quake_history,
+# /quake_map）が qtlbot.log* をスキャンして返す際の最大件数（クエリ
+# パラメータ ?limit= で上書きされない場合のデフォルト）。
+QUAKE_HISTORY_DEFAULT_LIMIT = _env_int("QUAKE_HISTORY_DEFAULT_LIMIT", 500)
+
+# qtlbot.log* のスキャンはファイルサイズ次第で時間がかかりうるため、
+# /status/quake_history への短時間の連続アクセスで毎回スキャンし直す
+# ことがないよう、この秒数だけ結果をキャッシュする。
+QUAKE_HISTORY_CACHE_TTL_SEC = _env_int("QUAKE_HISTORY_CACHE_TTL_SEC", 30)
+
+# --backfill_quake_history （core/quake_history_backfill.py）専用の設定。
+# P2P地震情報 API の /v2/history は実運用上 offset+limit がある程度を
+# 超えると空配列になる（無制限に過去へ遡れるAPIではない）ため、
+# 際限なくページングし続けないための安全な上限として使う。
+QUAKE_HISTORY_BACKFILL_MAX_ITEMS = _env_int("QUAKE_HISTORY_BACKFILL_MAX_ITEMS", 1000)
+QUAKE_HISTORY_BACKFILL_PAGE_SIZE = _env_int("QUAKE_HISTORY_BACKFILL_PAGE_SIZE", 100)
+# ページ取得ごとの待機秒数（API・回線への配慮。連続リクエストを避ける）。
+QUAKE_HISTORY_BACKFILL_REQUEST_DELAY_SEC = float(
+    os.getenv("QUAKE_HISTORY_BACKFILL_REQUEST_DELAY_SEC", "0.5")
+)
+
+# ===============================
 # APM (Application Performance Monitoring) 設定
 # ===============================
 # Mackerel の APM（トレーシング）連携。OpenTelemetry (OTLP) 経由で送信する。

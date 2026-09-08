@@ -57,12 +57,14 @@ from core.config import (
     DISK_WARNING_THRESHOLD, DISK_ERROR_THRESHOLD,
     HEALTH_CHECK_TIMEOUT, HEALTH_CHECK_CACHE_TTL, ERROR_NOTIFICATION_TTL,
     ENABLE_KYOSHIN,
+    QUAKE_HISTORY_DEFAULT_LIMIT, QUAKE_HISTORY_CACHE_TTL_SEC,
     DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_ID,
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
 from core.notification_log import get_recent_notifications
 from core.delivery_stats import get_delivery_stats
+from core.quake_history_log import load_quake_history, display_record
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -173,6 +175,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div class="toolbar">
     <a class="btn-link" href="/status/history?format=csv" download>CSVをダウンロード</a>
+    <a class="btn-link" href="/quake_map">地震情報履歴（地図・表）</a>
     <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
   </div>
   <div id="chartsContent" class="grid">
@@ -406,6 +409,215 @@ setInterval(loadAndRenderNotifications, 30000);
 """
 
 
+# GET /quake_map で返す、地震情報履歴の地図・表表示用HTML。
+# Leaflet（地図描画）はCDNから読み込み、タイルは国土地理院（地理院タイル、
+# 出典表示付き・利用規約上ボット等での定常的な軽量アクセスも許容される
+# 無料タイル）を使う。データ取得元は /status/quake_history のみで、
+# Bot側（Raspberry Pi）は core/quake_history_log.py によるqtlbot.logの
+# スキャン結果をJSONで返すだけ。地図描画・表描画はすべてブラウザ側で
+# 行うため、_DASHBOARD_HTML と同様にRaspberry Pi側の追加負荷は生じない。
+_QUAKE_MAP_HTML = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QTL_Bot 地震情報履歴</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 4px; }
+  .subtitle { color: #7f849c; font-size: 0.85em; margin-bottom: 16px; }
+  .toolbar { margin-bottom: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .btn-link { display: inline-block; color: #89b4fa; background: #292c3c;
+              border: 1px solid #45475a; border-radius: 6px;
+              padding: 6px 14px; font-size: 0.85em; text-decoration: none;
+              cursor: pointer; font-family: inherit; }
+  .btn-link:hover { background: #313244; }
+  select.btn-link { padding: 5px 10px; }
+  #map { height: 420px; border-radius: 8px; margin-bottom: 20px; }
+  .notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  .notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #313244; }
+  .notif-table th { color: #7f849c; font-weight: normal; position: sticky; top: 0; background: #292c3c; }
+  .notif-table tbody tr:hover { background: #313244; cursor: pointer; }
+  .card { background: #292c3c; border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 1em; margin: 0 0 12px 0; color: #a6adc8; }
+  .scale-badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                 color: #11111b; font-size: 0.85em; white-space: nowrap; font-weight: 600; }
+  .notif-empty { color: #7f849c; padding: 12px 0; }
+  .table-wrap { max-height: 480px; overflow-y: auto; }
+  @media (max-width: 480px) {
+    body { padding: 10px; }
+    #map { height: 300px; }
+  }
+</style>
+</head>
+<body>
+  <h1>QTL_Bot 地震情報履歴</h1>
+  <div class="subtitle">P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震は含まれません。</div>
+
+  <div class="toolbar">
+    <select class="btn-link" id="scaleFilter">
+      <option value="0">最大震度: すべて</option>
+    </select>
+    <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="card">
+    <h2 id="tableTitle">履歴一覧</h2>
+    <div class="table-wrap" id="tableContent"><div class="notif-empty">読み込み中...</div></div>
+  </div>
+
+<script>
+// core/constants.py の SHINDO_COLORS / INT_MAP と同じ対応関係を
+// ブラウザ側で描画するためのミラー（_DASHBOARD_HTML の KIND_COLORS と
+// 同様、Bot側の値を都度APIで渡す設計にはしていない。値を変更した場合は
+// 両方を合わせて更新すること）。
+const SHINDO_COLORS = {
+  '-1': '#62626B', '0': '#62626B', '10': '#3098BD', '20': '#4CD0A7',
+  '30': '#F6CB51', '40': '#FF9939', '45': '#E52A18', '46': '#E52A18',
+  '50': '#C31B1B', '55': '#A30A6B', '60': '#86046E', '70': '#54068E',
+};
+const INT_MAP = {
+  '-1': '不明', '10': '1', '20': '2', '30': '3', '40': '4',
+  '45': '5弱', '46': '推定5弱以上', '50': '5強', '55': '6弱', '60': '6強', '70': '7',
+};
+
+let allRecords = [];
+let markers = [];
+
+const map = L.map('map').setView([36.5, 138.0], 5);  // 日本全体が収まる初期表示
+L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+  attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>',
+  maxZoom: 18,
+}).addTo(map);
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function scaleLabel(code) {
+  return INT_MAP[String(code)] || '不明';
+}
+function scaleColor(code) {
+  return SHINDO_COLORS[String(code)] || '#62626B';
+}
+
+function clearMarkers() {
+  for (const m of markers) map.removeLayer(m);
+  markers = [];
+}
+
+function renderMarkers(records) {
+  clearMarkers();
+  const pts = [];
+  for (const r of records) {
+    if (r.latitude == null || r.longitude == null) continue;
+    const color = scaleColor(r.max_scale);
+    const marker = L.circleMarker([r.latitude, r.longitude], {
+      radius: 7, color: color, fillColor: color, fillOpacity: 0.75, weight: 1,
+    }).addTo(map);
+    marker.bindPopup(
+      '<b>' + escapeHtml(r.hypocenter_name) + '</b><br>' +
+      escapeHtml(r.time_display) + '<br>' +
+      '最大震度: ' + escapeHtml(scaleLabel(r.max_scale)) +
+      (r.magnitude && r.magnitude > 0 ? ' / M' + r.magnitude : '') +
+      (r.depth && r.depth >= 0 ? ' / 深さ約' + r.depth + 'km' : '')
+    );
+    markers.push(marker);
+    pts.push([r.latitude, r.longitude]);
+  }
+  if (pts.length > 0) {
+    map.fitBounds(pts, { maxZoom: 9, padding: [20, 20] });
+  }
+}
+
+function renderTable(records) {
+  const el = document.getElementById('tableContent');
+  document.getElementById('tableTitle').textContent = '履歴一覧（' + records.length + '件）';
+  if (records.length === 0) {
+    el.innerHTML = '<div class="notif-empty">該当する地震情報がありません</div>';
+    return;
+  }
+  let html = '<table class="notif-table"><thead><tr>' +
+    '<th>発生時刻</th><th>震源地</th><th>最大震度</th><th>M</th><th>深さ</th>' +
+    '</tr></thead><tbody>';
+  for (const r of records) {
+    const color = scaleColor(r.max_scale);
+    const depthText = (r.depth != null && r.depth >= 0) ? (r.depth === 0 ? 'ごく浅い' : r.depth + 'km') : '-';
+    const magText = (r.magnitude != null && r.magnitude > 0) ? r.magnitude : '-';
+    html += '<tr data-lat="' + (r.latitude != null ? r.latitude : '') + '" data-lon="' + (r.longitude != null ? r.longitude : '') + '">' +
+      '<td>' + escapeHtml(r.time_display) + '</td>' +
+      '<td>' + escapeHtml(r.hypocenter_name) + '</td>' +
+      '<td><span class="scale-badge" style="background:' + color + '">' + escapeHtml(scaleLabel(r.max_scale)) + '</span></td>' +
+      '<td>' + escapeHtml(magText) + '</td>' +
+      '<td>' + escapeHtml(depthText) + '</td>' +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  // 行クリックで地図を該当地点へフォーカスする
+  for (const row of el.querySelectorAll('tbody tr')) {
+    row.addEventListener('click', () => {
+      const lat = parseFloat(row.dataset.lat);
+      const lon = parseFloat(row.dataset.lon);
+      if (!isNaN(lat) && !isNaN(lon)) {
+        map.setView([lat, lon], 9);
+      }
+    });
+  }
+}
+
+function populateScaleFilterOptions(records) {
+  const select = document.getElementById('scaleFilter');
+  const prevValue = select.value;
+  const scales = [...new Set(records.map(r => r.max_scale))].sort((a, b) => b - a);
+  select.innerHTML = '<option value="0">最大震度: すべて</option>' +
+    scales.map(s => '<option value="' + s + '">震度' + escapeHtml(scaleLabel(s)) + 'のみ</option>').join('');
+  if ([...select.options].some(o => o.value === prevValue)) {
+    select.value = prevValue;
+  }
+}
+
+function applyFilter() {
+  const selected = document.getElementById('scaleFilter').value;
+  const filtered = (selected === '0')
+    ? allRecords
+    : allRecords.filter(r => String(r.max_scale) === selected);
+  renderMarkers(filtered);
+  renderTable(filtered);
+}
+
+async function loadAndRender() {
+  const el = document.getElementById('tableContent');
+  try {
+    const res = await fetch('/status/quake_history');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    allRecords = data.records || [];
+    populateScaleFilterOptions(allRecords);
+    applyFilter();
+  } catch (e) {
+    el.innerHTML = '<div class="error">地震情報履歴の取得に失敗しました: ' + e.message + '</div>';
+  }
+}
+
+document.getElementById('scaleFilter').addEventListener('change', applyFilter);
+document.getElementById('refreshBtn').addEventListener('click', loadAndRender);
+
+loadAndRender();
+</script>
+</body>
+</html>
+"""
+
+
 class SystemCog(commands.Cog):
     """Bot全体の稼働状況集約・エラー監視・Web Dashboardを扱う Cog。"""
 
@@ -434,6 +646,13 @@ class SystemCog(commands.Cog):
         # -- ヘルスチェックキャッシュ --
         self.health_check_cache = None
         self.last_health_check_time = None
+
+        # -- 地震情報履歴（qtlbot.logスキャン）キャッシュ --
+        # /status/quake_history, /quake_map 用。qtlbot.log*のスキャンは
+        # ファイルサイズ次第でコストがかかるため、health_check_cacheと
+        # 同様の単純なTTLキャッシュとする（core/quake_history_log.py参照）。
+        self.quake_history_cache: list[dict] | None = None
+        self.last_quake_history_scan_time: datetime | None = None
 
         # -- エラー監視 --
         self.error_summary_task: asyncio.Task | None = None
@@ -1472,6 +1691,42 @@ class SystemCog(commands.Cog):
                 "notifications": notifications,
             })
 
+        async def quake_history_handler(request):
+            """
+            GET /status/quake_history - 地震情報の履歴（qtlbot.log*から復元）。
+
+            core.quake_history_log.load_quake_history が qtlbot.log*
+            全体をスキャンして返す構造化レコードを、表示用フィールド
+            （time_display等）を付加した上でJSON配列として返す。
+
+            クエリパラメータ ?limit=N で件数を絞れる（省略時は
+            core.config.QUAKE_HISTORY_DEFAULT_LIMIT）。
+            スキャン結果自体は QUAKE_HISTORY_CACHE_TTL_SEC 秒キャッシュする
+            （_get_quake_history_cached 参照）。
+            """
+            limit_raw = request.query.get("limit")
+            limit = QUAKE_HISTORY_DEFAULT_LIMIT
+            if limit_raw is not None:
+                try:
+                    limit = max(1, int(limit_raw))
+                except ValueError:
+                    pass
+
+            records = self._get_quake_history_cached(limit)[:limit]
+            return web.json_response({
+                "count": len(records),
+                "records": [display_record(r) for r in records],
+            })
+
+        async def quake_map_handler(request):
+            """
+            GET /quake_map - 地震情報履歴を地図・表で閲覧するHTMLページ。
+            データ取得は /status/quake_history のみに依存し、地図・表の
+            描画自体はブラウザ側（Leaflet + 地理院タイル）で行うため、
+            /dashboard 同様Raspberry Pi側の追加負荷は生じない。
+            """
+            return web.Response(text=_QUAKE_MAP_HTML, content_type="text/html")
+
         async def dashboard_handler(request):
             """
             GET /dashboard - システムリソース・受信件数の推移をグラフ表示
@@ -1488,6 +1743,8 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status", status_handler)
             self._web_app.router.add_get("/status/history", history_handler)
             self._web_app.router.add_get("/status/notifications", notifications_handler)
+            self._web_app.router.add_get("/status/quake_history", quake_history_handler)
+            self._web_app.router.add_get("/quake_map", quake_map_handler)
             self._web_app.router.add_get("/dashboard", dashboard_handler)
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
@@ -1642,6 +1899,38 @@ class SystemCog(commands.Cog):
             except Exception as e:
                 logger.error(f"status_history_recorder エラー: {e}")
                 await asyncio.sleep(60)
+
+    # ===============================
+    # 地震情報履歴（qtlbot.logスキャン、/status/quake_history・/quake_map）
+    # ===============================
+    def _get_quake_history_cached(self, limit: int) -> list[dict]:
+        """
+        core.quake_history_log.load_quake_history() の結果を
+        QUAKE_HISTORY_CACHE_TTL_SEC 秒だけキャッシュして返す。
+
+        qtlbot.log*（ローテーション込みで最大 LOG_BACKUP_COUNT+1 ファイル）
+        の全件スキャンは、ファイルサイズによっては非同期イベントループを
+        一定時間ブロックしうる（同期的なファイルI/O + JSONパース）。
+        Web Dashboardへの連続アクセスでその都度スキャンし直すことを
+        避けるため、health_check_cacheと同様の単純なTTLキャッシュとする。
+
+        limit はキャッシュそのものには適用しない（キャッシュは常に
+        「スキャンした全件」を保持し、limit の適用は呼び出し側で行う）。
+        これは、異なるlimit値でのリクエストが混在してもキャッシュが
+        無駄に再スキャンされないようにするため。
+        """
+        now = datetime.now()
+        if (
+            self.quake_history_cache is not None
+            and self.last_quake_history_scan_time is not None
+            and (now - self.last_quake_history_scan_time).total_seconds() < QUAKE_HISTORY_CACHE_TTL_SEC
+        ):
+            return self.quake_history_cache
+
+        records = load_quake_history()
+        self.quake_history_cache = records
+        self.last_quake_history_scan_time = now
+        return records
 
     # ===============================
     # ヘルスチェック

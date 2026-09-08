@@ -66,6 +66,7 @@ from core.p2p_image import P2PImageMixin
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.quake_history_log import build_quake_record, format_quake_record_log_line
 
 logger = logging.getLogger("QTLBot")
 
@@ -409,6 +410,16 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         if not is_test:
             record_delivery(True, "地震情報")
             record_notification("地震情報", title, name_field)
+            # 【2026-09-06 追加】Web Dashboardの地図・表での履歴閲覧
+            # （/quake_map, /status/quake_history）向けに、record_notification
+            # とは別に、緯度経度等を含む機械可読な1行をqtlbot.logへ追記する。
+            # record_notificationはメモリ上のリングバッファ（最大50件、
+            # Bot再起動でリセット）のため、qtlbot.logのローテーション込みの
+            # 保持期間全体をカバーする履歴が必要な用途にはこちらを使う
+            # （詳細はcore/quake_history_log.py参照）。
+            quake_record = build_quake_record(data, title)
+            if quake_record is not None:
+                logger.info(format_quake_record_log_line(quake_record))
 
         # ── 地図画像（embed埋め込み） ──
         quake_id = data.get("id") or data.get("_id")

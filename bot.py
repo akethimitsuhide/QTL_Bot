@@ -120,6 +120,17 @@ core/test_runner.py の run_all_cli_tests を参照）。
 こちらも .env が存在しない状態で実行できる必要があるため、--starter と
 同様に core.config を import する前に判定する。
 
+【地震情報履歴の一括バックフィル（2026-09-06 追加, core/quake_history_backfill.py）】
+core/quake_history_log.py による構造化ログ（QUAKE_RECORD_V1）を追加する
+前に発生した地震について、P2P地震情報 API から可能な範囲で遡って取得し、
+qtlbot.log へ書き足す：
+
+    python3 bot.py --backfill_quake_history
+
+Discordへの接続は不要なため、Botを起動せずここで完結して終了する。
+ただし --starter / --check_env とは異なり、通常運用中のBotに対して行う
+操作のため .env が正しく設定済みであることを前提とする。
+
 【起動手順】
     初めて導入する場合はまず .env を作成する（対話形式ウィザード）:
         python3 bot.py --starter
@@ -139,6 +150,27 @@ if "--starter" in sys.argv[1:]:
 if "--check_env" in sys.argv[1:]:
     from core.env_audit import run_env_check
     run_env_check()
+    sys.exit(0)
+
+# ── --backfill_quake_history（2026-09-06 追加, core/quake_history_backfill.py）
+# 地震情報の地図・表閲覧機能（/quake_map, core/quake_history_log.py）向けの
+# 構造化ログ（QUAKE_RECORD_V1）を追加する以前に発生した地震について、
+# P2P地震情報 API から可能な範囲で遡って取得し、qtlbot.log へ書き足す。
+# Discordへの接続は不要なため、Bot本体（discord.Client）を起動せず、
+# --check_env 等と同様にここで完結させて終了する。
+# ただし core.config の読み込み自体は必要（BOT_TOKEN等の.env検証を含む）
+# ため、--starter / --check_env とは異なり .env が正しく設定済みである
+# ことを前提とする（通常運用中のBotに対して行う操作のため）。
+if "--backfill_quake_history" in sys.argv[1:]:
+    import asyncio as _asyncio
+    from core.logging_setup import setup_logging as _setup_logging
+    from core.quake_history_backfill import backfill_quake_history as _backfill_quake_history
+    _setup_logging()
+    _examined, _newly_logged = _asyncio.run(_backfill_quake_history())
+    print(
+        f"[Backfill] P2P地震情報APIから{_examined}件を確認し、"
+        f"{_newly_logged}件を新たにqtlbot.logへ記録しました。"
+    )
     sys.exit(0)
 
 import asyncio

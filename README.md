@@ -166,8 +166,15 @@
 - 配信成功率の可視化: 各Cogの通知送信箇所（`channel.send()`）の成功/失敗を `core/delivery_stats.py` に記録し、直近24時間の成功率を `!status` Embed・`GET /status` の `delivery` フィールドで確認できる
 - 週間/月間ダイジェスト: `DIGEST_ENABLED=true` で有効化。累積受信カウントの差分から「先週/先月の通知件数」を集計し、指定した曜日・時刻（または毎月1日）にEmbedで自動投稿する（`SystemCog.digest_worker`）
 - `GET /dashboard` で上記データを可視化する HTML ページ。ステータスサマリー（Bot状態・稼働時間・Ping・Wolfx EEW接続状態・CPU/メモリ・ディスク使用率を色付きインジケーターで表示）、CPU/メモリ/ディスク使用率・各種受信件数の推移グラフ（Chart.js）、種別フィルタ付きの直近通知履歴テーブル、CSVダウンロードボタン、手動更新ボタンを備える。15〜60秒間隔で自動更新
+- **地震情報履歴の地図・表閲覧（2026-09-06追加）**: `GET /quake_map` で、地震情報（P2P地震情報 code=551）の通知履歴を地図（Leaflet + 国土地理院タイル、震度に応じた色分けマーカー）と表の両方で閲覧できる。データ取得元は `GET /status/quake_history`（`?limit=N` で件数を絞り込み可能。省略時は `QUAKE_HISTORY_DEFAULT_LIMIT`）で、`core/quake_history_log.py` が qtlbot.log（ローテーション含む全世代）をスキャンして復元した内容をそのまま返す。詳細は下記「地震情報履歴（qtlbot.logベース）」参照
 - `!status` コマンド（管理者専用）
 - `/qtl_status` スラッシュコマンド（管理者専用）
+
+### 地震情報履歴（qtlbot.logベース）
+- **背景**: `core/notification_log.py`（`/status/notifications`）は「直近の通知履歴」をメモリ上のリングバッファ（最大50件）のみで保持しており、Bot再起動でリセットされ、緯度経度等の座標も保持しない。一方 `qtlbot.log` は `LOG_BACKUP_COUNT`（既定7）世代分が既に永続化されている。新たなDB等の永続化レイヤーを追加するのではなく、この既存のログ基盤をそのまま履歴ストアとしても使う設計とした（軽量・低依存の方針に合わせるため）
+- **記録形式**: `QuakeInfoCog.notify_quake()` が地震情報の通知（テスト通知を除く）を送信するたびに、`QUAKE_RECORD_V1 {json}` という機械可読な1行を `record_notification`（メモリ上履歴）とは別に `logger.info()` でqtlbot.logへ追記する（`core/quake_history_log.py` の `build_quake_record` / `format_quake_record_log_line`）。JSONには震源地名・緯度経度・マグニチュード・深さ・最大震度・発生時刻等を含む
+- **読み出し**: `core/quake_history_log.load_quake_history()` が `qtlbot.log` + `qtlbot.log.1`〜`.<LOG_BACKUP_COUNT>` を古い世代→新しい世代の順にスキャンし、`QUAKE_RECORD_V1` 行のみを抽出、`id` で重複排除（新しい世代を優先）した上で発生時刻の降順で返す。Web Dashboard（`cogs/system.py`）はこの結果を `QUAKE_HISTORY_CACHE_TTL_SEC` 秒キャッシュしてから返す（ログファイル全体のスキャンは相応にコストがかかるため）
+- **過去分の遡り（バックフィル）**: この記録形式を追加する前に発生した地震には `QUAKE_RECORD_V1` 行が存在せず、遡って自動復元することはできない。`python3 bot.py --backfill_quake_history` を実行すると、P2P地震情報 API（`GET /v2/history?codes=551`）を新しい順にページ送りして取得し、まだ記録されていない `id` があれば同じ形式でqtlbot.logへ書き足す（`core/quake_history_backfill.py`）。ただしP2P地震情報 APIの `/v2/history` は特定の `id` を直接指定して取得するAPIではなく、無制限に過去へ遡れるAPIでもないため、`QUAKE_HISTORY_BACKFILL_MAX_ITEMS`（既定1000件）より古い地震はこの方法でも復元できない（ベストエフォート）
 
 ---
 
@@ -317,6 +324,15 @@ python3 bot.py --check_env
 |:---|:---|:---|
 | `P2P_IMAGE_ATTACH_ENABLED` | true | P2P 地震情報の地図画像を Embed に添付するか。`false` で CDN ポーリングを無効化し、本文への画像 URL テキスト追記方式にフォールバック（詳細は「P2P 地図画像の添付」参照） |
 | `P2P_IMAGE_CDN_CONCURRENCY` | 3 | CDN（cdn.p2pquake.net）への同時アクセス数の上限。`P2PImageMixin` を使う全Cog（QuakeInfoCog/TsunamiCog/EewCog/JishinKanchiCog）を横断して共有制限する |
+
+### 地震情報履歴設定（qtlbot.logベース、地図・表での閲覧機能）
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `QUAKE_HISTORY_DEFAULT_LIMIT` | 500 | `GET /status/quake_history` がデフォルトで返す最大件数（`?limit=`で上書き可） |
+| `QUAKE_HISTORY_CACHE_TTL_SEC` | 30 | qtlbot.log*のスキャン結果をキャッシュする秒数 |
+| `QUAKE_HISTORY_BACKFILL_MAX_ITEMS` | 1000 | `--backfill_quake_history` がP2P地震情報APIから取得する最大件数（APIの実質的な遡り可能範囲に合わせた安全上限） |
+| `QUAKE_HISTORY_BACKFILL_PAGE_SIZE` | 100 | `--backfill_quake_history` の1回あたりのAPI取得件数 |
+| `QUAKE_HISTORY_BACKFILL_REQUEST_DELAY_SEC` | 0.5 | `--backfill_quake_history` のページ取得ごとの待機秒数 |
 
 ### P2P 地震感知情報設定
 | 変数名 | 既定値 | 説明 |
