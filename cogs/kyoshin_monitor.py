@@ -106,11 +106,14 @@ from core.config import (
     KYOSHIN_STATIONS_SOURCE_URL, KYOSHIN_STATIONS_CACHE_PATH,
     KYOSHIN_STATIONS_REFRESH_SEC, KYOSHIN_NEIGHBOR_K,
     KYOSHIN_SLOW_FETCH_THRESHOLD_SEC,
+    KYOSHIN_PATCH_RADIUS, KYOSHIN_PATCH_AGGREGATION,
+    KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC,
 )
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
 from core.kyoshin_stations import (
-    StationStore, KyoshinStationMeta, build_k_nearest_neighbors, make_shindo_decoder,
+    StationStore, KyoshinStationMeta, build_k_nearest_neighbors,
+    make_shindo_decoder, make_patch_shindo_sampler,
 )
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
@@ -179,9 +182,36 @@ class KyoshinMonitorCog(commands.Cog):
         self._shindo_from_rgb = make_shindo_decoder(
             inactive_sentinel=KYOSHIN_ACTIVE_SHINDO_FLOOR - 1.0
         )
+        # 【2026-09-09 追加】KYOSHIN_PATCH_RADIUS>=1のときのみ使うパッチ
+        # サンプラー。半径0（既定）のままなら作らず、従来通り
+        # self._shindo_from_rgb による単一ピクセル方式を使う
+        # （_fetch_current_shindo_map 参照）。
+        self._shindo_from_patch = None
+        if KYOSHIN_PATCH_RADIUS >= 1:
+            self._shindo_from_patch = make_patch_shindo_sampler(
+                inactive_sentinel=KYOSHIN_ACTIVE_SHINDO_FLOOR - 1.0,
+                radius=KYOSHIN_PATCH_RADIUS,
+                aggregation=KYOSHIN_PATCH_AGGREGATION,
+            )
+            logger.info(
+                f"KyoshinMonitorCog: パッチサンプリングを有効化しました "
+                f"(radius={KYOSHIN_PATCH_RADIUS}, "
+                f"patch={2*KYOSHIN_PATCH_RADIUS+1}x{2*KYOSHIN_PATCH_RADIUS+1}, "
+                f"aggregation={KYOSHIN_PATCH_AGGREGATION})"
+            )
 
         self._last_image_url: str | None = None
         self._dual_image_fetcher = DualImageFetcher()
+
+        # 【2026-09-09 追加】画像デコード失敗ログの集約カウンタ。
+        # _log_decode_failure 参照。1秒間隔ポーリングでは画像が生成
+        # 途中のタイミングで捕まることがあり、想定内の一時的事象として
+        # 比較的頻繁に発生しうる。毎回WARNINGを出すとログノイズになり、
+        # 本当に見るべき異常（強震モニタの誤検知やWebSocket切断等）を
+        # 埋もれさせるリスクがあるため、一定間隔で件数をまとめて
+        # 1回だけWARNINGを出す方式にした（詳細は毎回DEBUGに出す）。
+        self._decode_failure_count_in_window = 0
+        self._decode_failure_window_start_mono: float | None = None
 
         # !status / /qtl_status・Web Dashboard から他Cogと統一的に参照
         # できるよう、他の受信系Cogと同じ _last_recv / _recv_count の
@@ -336,6 +366,36 @@ class KyoshinMonitorCog(commands.Cog):
     # ===============================
     # 画像取得・解析（検知パイプライン）
     # ===============================
+    def _log_decode_failure(self, exc: Exception) -> None:
+        """
+        画像デコード失敗（KYOSHIN_POLL_INTERVAL_SEC間隔で発生しうる、
+        想定内の一時的事象）のログを、KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC
+        秒ごとに1回だけWARNINGへ集約して出す。ウィンドウ内の詳細は
+        毎回DEBUGへ出すため、DEBUGログを有効にすれば従来通り1件ずつ
+        確認できる。
+        """
+        now_mono = time.monotonic()
+        self._decode_failure_count_in_window += 1
+
+        window_elapsed = (
+            None if self._decode_failure_window_start_mono is None
+            else now_mono - self._decode_failure_window_start_mono
+        )
+        if window_elapsed is None or window_elapsed >= KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC:
+            count = self._decode_failure_count_in_window
+            if count > 1:
+                logger.warning(
+                    f"KyoshinMonitorCog: 画像デコードに失敗しました（直近"
+                    f"{KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC}秒間で{count}回、"
+                    f"最新のエラー: {exc}）"
+                )
+            else:
+                logger.warning(f"KyoshinMonitorCog: 画像デコードに失敗しました: {exc}")
+            self._decode_failure_window_start_mono = now_mono
+            self._decode_failure_count_in_window = 0
+        else:
+            logger.debug(f"KyoshinMonitorCog: 画像デコードに失敗しました（集約中）: {exc}")
+
     async def _fetch_current_shindo_map(self) -> dict[str, float]:
         """
         強震モニタ画像(jma_s系統)を取得し、登録済み実観測点それぞれの
@@ -394,7 +454,7 @@ class KyoshinMonitorCog(commands.Cog):
         try:
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception as e:
-            logger.warning(f"KyoshinMonitorCog: 画像デコードに失敗しました: {e}")
+            self._log_decode_failure(e)
             return {}
 
         pixels = img.load()
@@ -407,8 +467,11 @@ class KyoshinMonitorCog(commands.Cog):
                 # 画像範囲外の座標（観測点データが画像サイズと不整合。
                 # 配信元の画像仕様変更等で起こりうる）は静穏扱いにする
                 continue
-            r, g, b = pixels[x, y]
-            shindo_map[code] = self._shindo_from_rgb(r, g, b)
+            if self._shindo_from_patch is not None:
+                shindo_map[code] = self._shindo_from_patch(pixels, x, y, w, h)
+            else:
+                r, g, b = pixels[x, y]
+                shindo_map[code] = self._shindo_from_rgb(r, g, b)
         decode_sampling_elapsed = time.perf_counter() - t_decode_start
 
         total_elapsed = download_elapsed + decode_sampling_elapsed
