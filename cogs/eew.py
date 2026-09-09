@@ -55,6 +55,7 @@ from core.helpers import (
 from core.audio import AudioClientMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.eew_history_log import build_eew_record, format_eew_record_log_line
 from core.eew_convert import (
     convert_p2p_eew_to_wolfx, extract_alert_regions,
     build_forecast_groups, format_forecast_section, merge_forecast_groups,
@@ -582,6 +583,17 @@ class EewCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             if not is_test:
                 record_delivery(True, "EEW")
                 record_notification("EEW", title, hypo if isinstance(hypo, str) else "")
+                # 【2026-09-09 追加】Web Dashboardの地図・表での履歴閲覧
+                # （/quake_map, /status/eew_history）向けに、record_notification
+                # とは別に、緯度経度等を含む機械可読な1行をqtlbot.logへ
+                # 追記する。詳細はcore/eew_history_log.py参照。
+                # is_cancel（キャンセル報）はbuild_eew_record側でNoneを
+                # 返すため自然にスキップされる（このif分岐に来る時点で
+                # is_cancelはFalse確定だが、念のためbuild_eew_record側にも
+                # ガードを残している）。
+                eew_record = build_eew_record(data, title)
+                if eew_record is not None:
+                    logger.info(format_eew_record_log_line(eew_record))
 
             # ── P2P地震情報の地図画像添付（2026-08-19追加） ──
             # Wolfx由来のEEW（source="wolfx"、主系統）には地図画像のIDが

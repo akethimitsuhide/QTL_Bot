@@ -154,6 +154,8 @@
 - イベントの生死は「最後に本物の上昇トリガーが立ってから `KYOSHIN_EVENT_TIMEOUT_SEC` 秒経過したか」の1点のみで判定（複数条件を組み合わせない単純な状態機械）
 - 周囲が無反応のまま単独でフラット（変化なし）かつ高震度が続く観測点は機器異常とみなし自動的にブラックリスト化し、以後の判定から除外する（観測点メタデータが実態と乖離していた場合の実行時セーフティネットとしても機能する）
 - 画像上でカラースケール外（背景・地図色等）と判定されたピクセルは、地震発生を意味しない固定の「静穏相当」代表値として扱う（無効値をそのまま検知ロジックへ注入しない安全設計）
+- **パッチサンプリング（恒久対策、2026-09-09追加）**: `KYOSHIN_RISE_THRESHOLD=1.0`・`KYOSHIN_NEIGHBOR_TRIGGER_COUNT=3`への引き上げは「観測点座標周辺の複数ピクセルを平均・中央値で平滑化するパッチサンプリング等の恒久対策を検討するまでの一時的な緩和措置」とされていたが、これを実装した。`KYOSHIN_PATCH_RADIUS`（既定0＝従来通りの単一ピクセル方式）を1以上にすると、観測点のピクセル位置を中心とした`(2*radius+1)^2`の正方形パッチ内の各ピクセルを個別に震度へ変換し、その中央値（`KYOSHIN_PATCH_AGGREGATION=median`、既定）または平均（`mean`）をその観測点の震度として採用する。RGBを直接平均せず「各ピクセルを震度に変換してから集約」する設計にしているのは、色空間上でのRGB平均がカラースケール外の色と混ざって無意味な値に化ける危険を避けるため。パッチが大きいほど計算量が`(2r+1)^2`倍に増えるため、既定では無効のままとし、`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`のログを見ながら段階的に有効化・チューニングする想定
+- 画像デコード失敗（配信元画像が生成途中のタイミングで捕まる、想定内の一時的事象）のログは、`KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC`（既定300秒）ごとに件数をまとめて1回だけWARNINGへ集約する（詳細は毎回DEBUGに出る）。1秒間隔ポーリングでは頻発しうるため、毎回WARNINGを出すログノイズを避け、本当に見るべき異常が埋もれないようにした
 - 画像の時刻決定は `latest.json` API（実際に配信されている最新時刻）を優先取得し、失敗時のみ従来のリトライ探索方式にフォールバック
 - 通知には `jma_s` 系統・`abrspmx_s` 系統の両画像と振動レベルを含める
 - 通知の色は `jma_s` 系統の実震度に基づく独自カラーマップで決定（EEW発表時の強震モニタ通知と共通仕様）
@@ -166,7 +168,7 @@
 - 配信成功率の可視化: 各Cogの通知送信箇所（`channel.send()`）の成功/失敗を `core/delivery_stats.py` に記録し、直近24時間の成功率を `!status` Embed・`GET /status` の `delivery` フィールドで確認できる
 - 週間/月間ダイジェスト: `DIGEST_ENABLED=true` で有効化。累積受信カウントの差分から「先週/先月の通知件数」を集計し、指定した曜日・時刻（または毎月1日）にEmbedで自動投稿する（`SystemCog.digest_worker`）
 - `GET /dashboard` で上記データを可視化する HTML ページ。ステータスサマリー（Bot状態・稼働時間・Ping・Wolfx EEW接続状態・CPU/メモリ・ディスク使用率を色付きインジケーターで表示）、CPU/メモリ/ディスク使用率・各種受信件数の推移グラフ（Chart.js）、種別フィルタ付きの直近通知履歴テーブル、CSVダウンロードボタン、手動更新ボタンを備える。15〜60秒間隔で自動更新
-- **地震情報履歴の地図・表閲覧（2026-09-06追加）**: `GET /quake_map` で、地震情報（P2P地震情報 code=551）の通知履歴を地図（Leaflet + 国土地理院タイル、震度に応じた色分けマーカー）と表の両方で閲覧できる。データ取得元は `GET /status/quake_history`（`?limit=N` で件数を絞り込み可能。省略時は `QUAKE_HISTORY_DEFAULT_LIMIT`）で、`core/quake_history_log.py` が qtlbot.log（ローテーション含む全世代）をスキャンして復元した内容をそのまま返す。詳細は下記「地震情報履歴（qtlbot.logベース）」参照
+- **地震情報履歴の地図・表閲覧（2026-09-06追加、2026-09-09にEEW対応）**: `GET /quake_map` で、地震情報（P2P地震情報 code=551）・EEW（緊急地震速報）の通知履歴を地図（Leaflet + 国土地理院タイル、震度に応じた色分けマーカー）と表の両方で、ページ内の種別セレクタで切り替えながら閲覧できる。データ取得元は `GET /status/quake_history` / `GET /status/eew_history`（`?limit=N` で件数を絞り込み可能。省略時は `QUAKE_HISTORY_DEFAULT_LIMIT`）で、`core/quake_history_log.py` / `core/eew_history_log.py` が qtlbot.log（ローテーション含む全世代）をスキャンして復元した内容をそのまま返す。詳細は下記「地震情報履歴（qtlbot.logベース）」参照
 - `!status` コマンド（管理者専用）
 - `/qtl_status` スラッシュコマンド（管理者専用）
 
@@ -175,6 +177,7 @@
 - **記録形式**: `QuakeInfoCog.notify_quake()` が地震情報の通知（テスト通知を除く）を送信するたびに、`QUAKE_RECORD_V1 {json}` という機械可読な1行を `record_notification`（メモリ上履歴）とは別に `logger.info()` でqtlbot.logへ追記する（`core/quake_history_log.py` の `build_quake_record` / `format_quake_record_log_line`）。JSONには震源地名・緯度経度・マグニチュード・深さ・最大震度・発生時刻等を含む
 - **読み出し**: `core/quake_history_log.load_quake_history()` が `qtlbot.log` + `qtlbot.log.1`〜`.<LOG_BACKUP_COUNT>` を古い世代→新しい世代の順にスキャンし、`QUAKE_RECORD_V1` 行のみを抽出、`id` で重複排除（新しい世代を優先）した上で発生時刻の降順で返す。Web Dashboard（`cogs/system.py`）はこの結果を `QUAKE_HISTORY_CACHE_TTL_SEC` 秒キャッシュしてから返す（ログファイル全体のスキャンは相応にコストがかかるため）
 - **過去分の遡り（バックフィル）**: この記録形式を追加する前に発生した地震には `QUAKE_RECORD_V1` 行が存在せず、遡って自動復元することはできない。`python3 bot.py --backfill_quake_history` を実行すると、P2P地震情報 API（`GET /v2/history?codes=551`）を新しい順にページ送りして取得し、まだ記録されていない `id` があれば同じ形式でqtlbot.logへ書き足す（`core/quake_history_backfill.py`）。ただしP2P地震情報 APIの `/v2/history` は特定の `id` を直接指定して取得するAPIではなく、無制限に過去へ遡れるAPIでもないため、`QUAKE_HISTORY_BACKFILL_MAX_ITEMS`（既定1000件）より古い地震はこの方法でも復元できない（ベストエフォート）
+- **EEW履歴（2026-09-09追加）**: 同じ設計をEEW（`core/eew_history_log.py`）にも拡張した。`EEW_RECORD_V1 {json}` 形式でqtlbot.logへ記録し、`GET /status/eew_history` ・`GET /quake_map`（種別セレクタで「EEW」を選択）から閲覧できる。EEWは同一地震（EventID）について第1報〜最終報まで複数回更新されるため、レコードの一意キーはEventIDのみとし、Serialを重ねるたびに同じキーで上書きする（＝地図・表には常にその時点での最新の報が1行表示される）。キャンセル報（isCancel=True）は震源情報を持たないため記録しない。EEWの過去分バックフィルコマンドは現時点では未実装（地震情報のバックフィルとは異なり、Wolfx API側に同等の履歴取得APIがないため）
 
 ---
 
@@ -385,14 +388,17 @@ python3 bot.py --check_env
 | `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 | `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | **2026-08-29追加**。`_fetch_current_shindo_map`（画像ダウンロード・デコード・観測点サンプリング。`KYOSHIN_POLL_INTERVAL_SEC`ごとに常時実行される）のうち、デコード+サンプリング部分の所要時間がこの秒数を超えた場合にWARNINGログを出す。通常はDEBUGログに毎回の所要時間が出るのみ。Raspberry Pi等でのCPU負荷を実測ベースで把握するための計測用設定であり、通常運用では変更不要 |
+| `KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC` | 300 | **2026-09-09追加**。画像デコード失敗（想定内の一時的事象）のログをこの秒数ごとに件数集約して1回だけWARNINGに出す（詳細は毎回DEBUGに出る） |
 
 **【2026-08-27】誤検知対策アルゴリズム調整値は `.env.kyoshin` に分離**
-以下の6個は、実機ログを見ながらチューニングする上級者向けパラメータのため、`.env.example`（本体）ではなく `.env.kyoshin.example` に分離されている（`.env整理案③・⑩`）。何も設定しなくても以下と同じデフォルト値で動作するため、通常運用では `.env.kyoshin` を作る必要はない。詳細チューニングをしたい場合のみ `cp .env.kyoshin.example .env.kyoshin` して編集する（`python3 bot.py --starter` の詳細設定メニューからも作成できる）。
+以下は、実機ログを見ながらチューニングする上級者向けパラメータのため、`.env.example`（本体）ではなく `.env.kyoshin.example` に分離されている（`.env整理案③・⑩`）。何も設定しなくても以下と同じデフォルト値で動作するため、通常運用では `.env.kyoshin` を作る必要はない。詳細チューニングをしたい場合のみ `cp .env.kyoshin.example .env.kyoshin` して編集する（`python3 bot.py --starter` の詳細設定メニューからも作成できる）。
 
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
 | `KYOSHIN_ACTIVE_SHINDO_FLOOR` | 0.5 | 揺れ候補とみなす実震度の下限 |
 | `KYOSHIN_RISE_THRESHOLD` | 1.0 | 「上昇トリガー」とみなす基準値との差分幅。震度の絶対値ではなく変化量で判定する。実観測点方式（1ピクセルサンプリング、平滑化なし）移行後の誤検知対策として0.5から引き上げ済み（一時的な緩和措置） |
+| `KYOSHIN_PATCH_RADIUS` | 0 | **2026-09-09追加**。パッチサンプリング（恒久対策）の半径。0＝従来通りの単一ピクセル方式、1以上で`(2r+1)^2`パッチの中央値/平均を採用。パッチが大きいほど計算量が`(2r+1)^2`倍に増えるため、`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`のログを見ながら段階的に有効化すること |
+| `KYOSHIN_PATCH_AGGREGATION` | median | **2026-09-09追加**。パッチ内の集約方式。`median`（外れ値に強い）または`mean` |
 | `KYOSHIN_BASELINE_WINDOW_START_SEC` | 10.0 | 基準値計算に使う過去サンプルの開始位置（秒前） |
 | `KYOSHIN_BASELINE_WINDOW_END_SEC` | 25.0 | 基準値計算に使う過去サンプルの終了位置（秒前） |
 | `KYOSHIN_HISTORY_WINDOW_SEC` | 25.0 | 観測点ごとに保持する震度履歴の長さ（秒）。BASELINE_WINDOW_END_SEC以上を推奨 |

@@ -65,6 +65,7 @@ from core.cog_utils import get_cog_attr
 from core.notification_log import get_recent_notifications
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
+from core.eew_history_log import load_eew_history, display_record as display_eew_record
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -454,10 +455,14 @@ _QUAKE_MAP_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-  <h1>QTL_Bot 地震情報履歴</h1>
-  <div class="subtitle">P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震は含まれません。</div>
+  <h1 id="pageTitle">QTL_Bot 地震情報履歴</h1>
+  <div class="subtitle" id="pageSubtitle">P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震・EEWは含まれません。</div>
 
   <div class="toolbar">
+    <select class="btn-link" id="typeSelect">
+      <option value="quake">種別: 地震情報</option>
+      <option value="eew">種別: EEW（緊急地震速報）</option>
+    </select>
     <select class="btn-link" id="scaleFilter">
       <option value="0">最大震度: すべて</option>
     </select>
@@ -485,6 +490,23 @@ const INT_MAP = {
   '-1': '不明', '10': '1', '20': '2', '30': '3', '40': '4',
   '45': '5弱', '46': '推定5弱以上', '50': '5強', '55': '6弱', '60': '6強', '70': '7',
 };
+
+// 種別ごとの設定。2026-09-09追加: EEWにも対応（core/eew_history_log.py）。
+const TYPE_CONFIG = {
+  quake: {
+    label: '地震情報',
+    endpoint: '/status/quake_history',
+    subtitle: 'P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震は含まれません。',
+    emptyMessage: '該当する地震情報がありません',
+  },
+  eew: {
+    label: 'EEW（緊急地震速報）',
+    endpoint: '/status/eew_history',
+    subtitle: '緊急地震速報（Wolfx/P2P由来）の通知履歴。同一の地震は最終報（またはその時点での最新の報）に統合して表示しています。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前のEEWは含まれません。',
+    emptyMessage: '該当するEEWがありません',
+  },
+};
+let currentType = 'quake';
 
 let allRecords = [];
 let markers = [];
@@ -522,13 +544,16 @@ function renderMarkers(records) {
     const marker = L.circleMarker([r.latitude, r.longitude], {
       radius: 7, color: color, fillColor: color, fillOpacity: 0.75, weight: 1,
     }).addTo(map);
-    marker.bindPopup(
-      '<b>' + escapeHtml(r.hypocenter_name) + '</b><br>' +
+    let popup = '<b>' + escapeHtml(r.hypocenter_name) + '</b><br>' +
       escapeHtml(r.time_display) + '<br>' +
       '最大震度: ' + escapeHtml(scaleLabel(r.max_scale)) +
       (r.magnitude && r.magnitude > 0 ? ' / M' + r.magnitude : '') +
-      (r.depth && r.depth >= 0 ? ' / 深さ約' + r.depth + 'km' : '')
-    );
+      (r.depth != null && r.depth >= 0 ? ' / 深さ約' + r.depth + 'km' : '');
+    if (currentType === 'eew') {
+      popup += '<br>' + (r.is_final ? '最終報' : '予報中（第' + r.serial + '報）') +
+        (r.is_warn ? ' / 警報' : ' / 予報');
+    }
+    marker.bindPopup(popup);
     markers.push(marker);
     pts.push([r.latitude, r.longitude]);
   }
@@ -541,22 +566,28 @@ function renderTable(records) {
   const el = document.getElementById('tableContent');
   document.getElementById('tableTitle').textContent = '履歴一覧（' + records.length + '件）';
   if (records.length === 0) {
-    el.innerHTML = '<div class="notif-empty">該当する地震情報がありません</div>';
+    el.innerHTML = '<div class="notif-empty">' + TYPE_CONFIG[currentType].emptyMessage + '</div>';
     return;
   }
+  const extraHeader = currentType === 'eew' ? '<th>状態</th>' : '';
   let html = '<table class="notif-table"><thead><tr>' +
-    '<th>発生時刻</th><th>震源地</th><th>最大震度</th><th>M</th><th>深さ</th>' +
+    '<th>発生時刻</th><th>震源地</th><th>最大震度</th><th>M</th><th>深さ</th>' + extraHeader +
     '</tr></thead><tbody>';
   for (const r of records) {
     const color = scaleColor(r.max_scale);
     const depthText = (r.depth != null && r.depth >= 0) ? (r.depth === 0 ? 'ごく浅い' : r.depth + 'km') : '-';
     const magText = (r.magnitude != null && r.magnitude > 0) ? r.magnitude : '-';
+    let extraCell = '';
+    if (currentType === 'eew') {
+      const statusText = (r.is_final ? '最終報' : '第' + r.serial + '報') + (r.is_warn ? '・警報' : '・予報');
+      extraCell = '<td>' + escapeHtml(statusText) + '</td>';
+    }
     html += '<tr data-lat="' + (r.latitude != null ? r.latitude : '') + '" data-lon="' + (r.longitude != null ? r.longitude : '') + '">' +
       '<td>' + escapeHtml(r.time_display) + '</td>' +
       '<td>' + escapeHtml(r.hypocenter_name) + '</td>' +
       '<td><span class="scale-badge" style="background:' + color + '">' + escapeHtml(scaleLabel(r.max_scale)) + '</span></td>' +
       '<td>' + escapeHtml(magText) + '</td>' +
-      '<td>' + escapeHtml(depthText) + '</td>' +
+      '<td>' + escapeHtml(depthText) + '</td>' + extraCell +
       '</tr>';
   }
   html += '</tbody></table>';
@@ -596,18 +627,24 @@ function applyFilter() {
 
 async function loadAndRender() {
   const el = document.getElementById('tableContent');
+  const cfg = TYPE_CONFIG[currentType];
+  document.getElementById('pageSubtitle').textContent = cfg.subtitle;
   try {
-    const res = await fetch('/status/quake_history');
+    const res = await fetch(cfg.endpoint);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     allRecords = data.records || [];
     populateScaleFilterOptions(allRecords);
     applyFilter();
   } catch (e) {
-    el.innerHTML = '<div class="error">地震情報履歴の取得に失敗しました: ' + e.message + '</div>';
+    el.innerHTML = '<div class="error">' + cfg.label + '履歴の取得に失敗しました: ' + e.message + '</div>';
   }
 }
 
+document.getElementById('typeSelect').addEventListener('change', (ev) => {
+  currentType = ev.target.value;
+  loadAndRender();
+});
 document.getElementById('scaleFilter').addEventListener('change', applyFilter);
 document.getElementById('refreshBtn').addEventListener('click', loadAndRender);
 
@@ -653,6 +690,12 @@ class SystemCog(commands.Cog):
         # 同様の単純なTTLキャッシュとする（core/quake_history_log.py参照）。
         self.quake_history_cache: list[dict] | None = None
         self.last_quake_history_scan_time: datetime | None = None
+
+        # -- EEW履歴（qtlbot.logスキャン）キャッシュ --
+        # /status/eew_history, /quake_map（EEW種別選択時）用。
+        # 考え方は quake_history_cache と同じ（core/eew_history_log.py参照）。
+        self.eew_history_cache: list[dict] | None = None
+        self.last_eew_history_scan_time: datetime | None = None
 
         # -- エラー監視 --
         self.error_summary_task: asyncio.Task | None = None
@@ -1718,6 +1761,26 @@ class SystemCog(commands.Cog):
                 "records": [display_record(r) for r in records],
             })
 
+        async def eew_history_handler(request):
+            """
+            GET /status/eew_history - EEWの履歴（qtlbot.log*から復元）。
+            quake_history_handler と同じ考え方。core/eew_history_log.py参照。
+            同一EventIDは最新の報（Serialが最大のもの）に統合済み。
+            """
+            limit_raw = request.query.get("limit")
+            limit = QUAKE_HISTORY_DEFAULT_LIMIT
+            if limit_raw is not None:
+                try:
+                    limit = max(1, int(limit_raw))
+                except ValueError:
+                    pass
+
+            records = self._get_eew_history_cached(limit)[:limit]
+            return web.json_response({
+                "count": len(records),
+                "records": [display_eew_record(r) for r in records],
+            })
+
         async def quake_map_handler(request):
             """
             GET /quake_map - 地震情報履歴を地図・表で閲覧するHTMLページ。
@@ -1744,6 +1807,7 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status/history", history_handler)
             self._web_app.router.add_get("/status/notifications", notifications_handler)
             self._web_app.router.add_get("/status/quake_history", quake_history_handler)
+            self._web_app.router.add_get("/status/eew_history", eew_history_handler)
             self._web_app.router.add_get("/quake_map", quake_map_handler)
             self._web_app.router.add_get("/dashboard", dashboard_handler)
             self._web_app.router.add_get("/health", health_handler)
@@ -1930,6 +1994,21 @@ class SystemCog(commands.Cog):
         records = load_quake_history()
         self.quake_history_cache = records
         self.last_quake_history_scan_time = now
+        return records
+
+    def _get_eew_history_cached(self, limit: int) -> list[dict]:
+        """core.eew_history_log.load_eew_history() のキャッシュ版。_get_quake_history_cached と同じ考え方。"""
+        now = datetime.now()
+        if (
+            self.eew_history_cache is not None
+            and self.last_eew_history_scan_time is not None
+            and (now - self.last_eew_history_scan_time).total_seconds() < QUAKE_HISTORY_CACHE_TTL_SEC
+        ):
+            return self.eew_history_cache
+
+        records = load_eew_history()
+        self.eew_history_cache = records
+        self.last_eew_history_scan_time = now
         return records
 
     # ===============================
