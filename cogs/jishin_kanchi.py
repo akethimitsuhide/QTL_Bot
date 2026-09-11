@@ -49,7 +49,6 @@ from core.config import (
     JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC,
 )
 from core.audio import AudioClientMixin
-from core.p2p_image import P2PImageMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.epsp_area import get_area_name
@@ -64,14 +63,13 @@ logger = logging.getLogger("QTLBot")
 _SOUND_KEY = "jishin_kanchi"
 
 
-class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
+class JishinKanchiCog(commands.Cog, AudioClientMixin):
     """P2P地震情報「地震感知情報」（code=9611）の受信・通知を行う Cog。"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.channel = None
         self.jishin_kanchi_channel = None
-        self.session = None  # P2PImageMixin._attach_p2p_image が要求する
 
         # 直近に処理したイベントのstarted_atを記憶する用途で追加した
         # 属性。started_atは仕様上「イベントを一意に識別するキー」と
@@ -122,18 +120,6 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
         self._last_recv: dict[str, datetime | None] = {"jishin_kanchi": None}
         self._recv_count: dict[str, int] = {"jishin_kanchi": 0}
-
-    async def cog_load(self):
-        import aiohttp
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
-        )
-        logger.info("JishinKanchiCog: aiohttp セッションを作成しました")
-
-    async def cog_unload(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-            logger.info("JishinKanchiCog: aiohttp セッションを閉じました")
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -370,7 +356,7 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             try:
-                sent_msg = await channel.send(embed=embed)
+                await channel.send(embed=embed)
             except Exception as e:
                 record_delivery(False, "地震感知情報", str(e))
                 raise
@@ -378,31 +364,30 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin, P2PImageMixin):
                 record_delivery(True, "地震感知情報")
                 record_notification("地震感知情報", title, f"信頼度{level_label}・{count}件")
 
-            # ── 地図画像（地震情報通知と同じ生成方法）──
-            # 【2026-08-27 修正】地震感知情報（code=9611）では、地図画像の
-            # 取得には "id" ではなく "_id" フィールドを使う必要があることが
-            # 実機ログで判明した（quake/tsunami の code=551/552 とはキーの
-            # 優先順位が逆）。まず "_id" を優先し、無ければ "id" にフォール
-            # バックする防御的な実装にしておく。
+            # ── 地図画像（現在は取得しない）──
+            # 【2026-09-11 確定・廃止】以前は地震情報通知と同じ方法
+            # （"_id"優先→"id"フォールバック）で地図画像の添付を試みて
+            # いたが、実機ログで検証した結果、地震感知情報（code=9611）
+            # の "_id" に対応する画像は cdn.p2pquake.net 上に存在せず、
+            # 20回リトライ（約2分間）後、常に HTTP 404 で失敗することが
+            # 確認された（実機ログ根拠: 2026-08-31・09-02・09-04・09-11の
+            # 4件で検証し、4件とも最終的にHTTP 404。「生成が遅いだけ」
+            # であれば偶発的に成功する試行が見られるはずだが、皆無だった）。
+            # つまり地震感知情報には元々対応する地図画像が用意されておらず
+            # （P2P地震情報 API側の仕様上の制約）、コード側の不具合では
+            # ない。無駄なリトライ（毎回約2分間、core.p2p_image._cdn_semaphore
+            # ＝P2P_IMAGE_CDN_CONCURRENCY枠を専有し続ける）を避けるため、
+            # 地震感知情報では地図画像の取得自体を行わないこととした。
             #
-            # 【2026-08-30 追加】画像添付タスクの起動は is_first_report
-            # （このイベントの第一報かどうか。上の _judge_event_notification
-            # 参照）が True の場合のみ行う。従来は更新のたびに毎回新規の
-            # _attach_p2p_image タスクを起動していたため、感知報告が
-            # 短時間に大量発生する地震（大規模・関東等）で、
-            # core.p2p_image._cdn_semaphore（P2P_IMAGE_CDN_CONCURRENCY、
-            # 既定3）を占有し尽くし、cogs/quake.py側の正当な画像取得まで
-            # 巻き添えで失敗させる実害が確認されたための対策
-            # （実機ログ根拠: 本来6秒程度で成功するはずの画像取得が
-            # 103秒後まで成功しなかった）。
-            image_id = data.get("_id") or data.get("id")
-            if image_id and is_first_report:
-                self.bot.loop.create_task(self._attach_p2p_image(sent_msg, image_id))
-            elif image_id and not is_first_report:
-                logger.debug(
-                    f"地震感知情報: 同一イベントの更新のため画像添付をスキップします "
-                    f"(image_id={image_id})"
-                )
+            # 【参考: 過去の経緯（現在は上記の理由により不要になった）】
+            # 2026-08-27: 画像取得キーが"id"ではなく"_id"であることが
+            #   判明し、優先順位を修正した。
+            # 2026-08-30: 更新のたびに毎回新規の画像添付タスクを起動して
+            #   いたため、短時間に大量発生する地震でCDN共有セマフォを
+            #   占有し尽くし、cogs/quake.py側の正当な画像取得まで巻き添え
+            #   で失敗させる実害が確認され、is_first_reportの場合のみに
+            #   限定する対策を行った。今回、その第一報の画像取得自体が
+            #   常に失敗することが判明したため、対策ごと不要になった。
 
             # ── 音声読み上げ・効果音（第一報のときのみ）──
             if JISHIN_KANCHI_SPEECH_ENABLE and is_first_report:
