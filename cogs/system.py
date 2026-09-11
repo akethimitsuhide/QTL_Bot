@@ -62,7 +62,7 @@ from core.config import (
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
-from core.notification_log import get_recent_notifications
+from core.notification_log import load_notification_history
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
 from core.eew_history_log import load_eew_history, display_record as display_eew_record
@@ -203,6 +203,11 @@ const COLORS = {
   cpu: '#89b4fa', mem: '#a6e3a1', disk: '#f9e2af',
   wolfx: '#f38ba8', p2p_eew: '#fab387', quake: '#94e2d5',
   tsunami: '#89dceb', usgs: '#cba6f7', volcano: '#eba0ac',
+  // 【2026-09-09追加】recvChartのrecvKeysには元々含まれていたが、
+  // 色定義が漏れていたため未定義色（Chart.jsのデフォルト）で描画
+  // されていた。status_history_recorderのスナップショット側にも
+  // 併せてキーを追加している。
+  jishin_kanchi: '#f2cdcd', kyoshin: '#b4befe',
 };
 
 // 通知種別ごとの表示色（notif-kindピルの背景色）。
@@ -425,6 +430,7 @@ _QUAKE_MAP_HTML = """<!DOCTYPE html>
 <title>QTL_Bot 地震情報履歴</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
@@ -448,9 +454,14 @@ _QUAKE_MAP_HTML = """<!DOCTYPE html>
                  color: #11111b; font-size: 0.85em; white-space: nowrap; font-weight: 600; }
   .notif-empty { color: #7f849c; padding: 12px 0; }
   .table-wrap { max-height: 480px; overflow-y: auto; }
+  .date-input { background: #292c3c; border: 1px solid #45475a; border-radius: 6px;
+                color: #cdd6f4; padding: 5px 8px; font-size: 0.85em; font-family: inherit; }
+  .toolbar label { font-size: 0.8em; color: #7f849c; display: flex; align-items: center; gap: 4px; }
+  .chart-wrap { height: 220px; }
   @media (max-width: 480px) {
     body { padding: 10px; }
     #map { height: 300px; }
+    .chart-wrap { height: 180px; }
   }
 </style>
 </head>
@@ -466,10 +477,18 @@ _QUAKE_MAP_HTML = """<!DOCTYPE html>
     <select class="btn-link" id="scaleFilter">
       <option value="0">最大震度: すべて</option>
     </select>
+    <label>から <input type="date" class="date-input" id="dateFrom"></label>
+    <label>まで <input type="date" class="date-input" id="dateTo"></label>
+    <button class="btn-link" id="clearDateBtn" type="button">日付クリア</button>
     <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
   </div>
 
   <div id="map"></div>
+
+  <div class="card" style="margin-bottom: 16px;">
+    <h2 id="chartTitle">月次件数</h2>
+    <div class="chart-wrap"><canvas id="monthlyChart"></canvas></div>
+  </div>
 
   <div class="card">
     <h2 id="tableTitle">履歴一覧</h2>
@@ -618,11 +637,62 @@ function populateScaleFilterOptions(records) {
 
 function applyFilter() {
   const selected = document.getElementById('scaleFilter').value;
-  const filtered = (selected === '0')
-    ? allRecords
-    : allRecords.filter(r => String(r.max_scale) === selected);
+  const dateFrom = document.getElementById('dateFrom').value;   // "YYYY-MM-DD" or ""
+  const dateTo = document.getElementById('dateTo').value;
+
+  let filtered = allRecords;
+  if (selected !== '0') {
+    filtered = filtered.filter(r => String(r.max_scale) === selected);
+  }
+  if (dateFrom || dateTo) {
+    filtered = filtered.filter(r => {
+      // time_raw: "YYYY/MM/DD HH:MM" 形式。日付部分だけ "YYYY-MM-DD" に揃えて比較する。
+      const raw = (r.time_raw || '').slice(0, 10).split('/').join('-');
+      if (!raw) return false;
+      if (dateFrom && raw < dateFrom) return false;
+      if (dateTo && raw > dateTo) return false;
+      return true;
+    });
+  }
   renderMarkers(filtered);
   renderTable(filtered);
+  renderMonthlyChart(filtered);
+}
+
+let monthlyChartInstance = null;
+
+function renderMonthlyChart(records) {
+  // time_raw ("YYYY/MM/DD HH:MM") から "YYYY-MM" を抽出して月次集計する。
+  const counts = {};
+  for (const r of records) {
+    const raw = r.time_raw || '';
+    const ym = raw.slice(0, 7).replace('/', '-');  // "YYYY-MM"
+    if (ym.length !== 7) continue;
+    counts[ym] = (counts[ym] || 0) + 1;
+  }
+  const months = Object.keys(counts).sort();
+  const values = months.map(m => counts[m]);
+
+  document.getElementById('chartTitle').textContent =
+    '月次件数（' + TYPE_CONFIG[currentType].label + '、表示中のフィルタ適用後）';
+
+  const ctx = document.getElementById('monthlyChart');
+  if (monthlyChartInstance) monthlyChartInstance.destroy();
+  monthlyChartInstance = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: months,
+      datasets: [{ label: '件数', data: values, backgroundColor: '#89b4fa' }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#a6adc8' }, grid: { color: '#313244' } },
+        y: { beginAtZero: true, ticks: { color: '#a6adc8', precision: 0 }, grid: { color: '#313244' } },
+      },
+    },
+  });
 }
 
 async function loadAndRender() {
@@ -646,6 +716,13 @@ document.getElementById('typeSelect').addEventListener('change', (ev) => {
   loadAndRender();
 });
 document.getElementById('scaleFilter').addEventListener('change', applyFilter);
+document.getElementById('dateFrom').addEventListener('change', applyFilter);
+document.getElementById('dateTo').addEventListener('change', applyFilter);
+document.getElementById('clearDateBtn').addEventListener('click', () => {
+  document.getElementById('dateFrom').value = '';
+  document.getElementById('dateTo').value = '';
+  applyFilter();
+});
 document.getElementById('refreshBtn').addEventListener('click', loadAndRender);
 
 loadAndRender();
@@ -696,6 +773,12 @@ class SystemCog(commands.Cog):
         # 考え方は quake_history_cache と同じ（core/eew_history_log.py参照）。
         self.eew_history_cache: list[dict] | None = None
         self.last_eew_history_scan_time: datetime | None = None
+
+        # -- 通知履歴（qtlbot.logスキャン）キャッシュ（2026-09-09追加） --
+        # /status/notifications 用。考え方は quake_history_cache と同じ
+        # （core/notification_log.py参照）。
+        self.notification_history_cache: list[dict] | None = None
+        self.last_notification_history_scan_time: datetime | None = None
 
         # -- エラー監視 --
         self.error_summary_task: asyncio.Task | None = None
@@ -1710,25 +1793,33 @@ class SystemCog(commands.Cog):
 
         async def notifications_handler(request):
             """
-            GET /status/notifications - 直近の通知履歴。
+            GET /status/notifications - 通知履歴。
 
             各Cogのnotify_*メソッドが core.notification_log.record_notification
             で記録した「実際にDiscordへ送信した通知」の一覧を新しい順に
-            返す（メモリ上のリングバッファ、Bot再起動でリセット）。
-            障害調査時に「何が通知されたか」を素早く確認できるようにする
-            ためのエンドポイント（2026-08 追加）。
+            返す。障害調査時に「何が通知されたか」を素早く確認できる
+            ようにするためのエンドポイント（2026-08 追加）。
 
-            クエリパラメータ ?limit=N で件数を絞れる（省略時は全件、
-            最大でも core.notification_log.NOTIFICATION_LOG_MAXLEN 件）。
+            【2026-09-09 変更】以前はメモリ上のリングバッファ（最大50件、
+            Bot再起動でリセット）のみを参照していたが、
+            core.notification_log.load_notification_history()
+            （qtlbot.log*をスキャンして復元、quake/eew履歴と同じ方式）
+            を使うようにし、再起動をまたいで永続化された履歴を返せる
+            ようにした。スキャン結果自体は
+            _get_notification_history_cached でキャッシュする。
+
+            クエリパラメータ ?limit=N で件数を絞れる（省略時は
+            QUAKE_HISTORY_DEFAULT_LIMIT。quake/eew履歴と同じデフォルト
+            値を流用している）。
             """
             limit_raw = request.query.get("limit")
-            limit = None
+            limit = QUAKE_HISTORY_DEFAULT_LIMIT
             if limit_raw is not None:
                 try:
                     limit = max(1, int(limit_raw))
                 except ValueError:
                     pass
-            notifications = get_recent_notifications(limit)
+            notifications = self._get_notification_history_cached(limit)[:limit]
             return web.json_response({
                 "count": len(notifications),
                 "notifications": notifications,
@@ -1951,6 +2042,14 @@ class SystemCog(commands.Cog):
                             "tsunami": p2p_recv.get("tsunami", recv_count.get("tsunami", 0)),
                             "usgs": recv_count.get("usgs", 0),
                             "volcano": recv_count.get("volcano", 0),
+                            # 【2026-09-09 追加】_DASHBOARD_HTML側のrecvChart
+                            # (recvKeys) は以前からjishin_kanchi・kyoshinを
+                            # 描画しようとしていたが、このスナップショット
+                            # 側にキー自体が無く、常に0（グラフ上でフラット
+                            # な線）になっていた。_merged_recv_count()には
+                            # 元々含まれていたため、単に転記漏れだった。
+                            "jishin_kanchi": recv_count.get("jishin_kanchi", 0),
+                            "kyoshin": recv_count.get("kyoshin", 0),
                         },
                     }
                     self.status_history.append(snapshot)
@@ -2009,6 +2108,21 @@ class SystemCog(commands.Cog):
         records = load_eew_history()
         self.eew_history_cache = records
         self.last_eew_history_scan_time = now
+        return records
+
+    def _get_notification_history_cached(self, limit: int) -> list[dict]:
+        """core.notification_log.load_notification_history() のキャッシュ版。_get_quake_history_cached と同じ考え方。"""
+        now = datetime.now()
+        if (
+            self.notification_history_cache is not None
+            and self.last_notification_history_scan_time is not None
+            and (now - self.last_notification_history_scan_time).total_seconds() < QUAKE_HISTORY_CACHE_TTL_SEC
+        ):
+            return self.notification_history_cache
+
+        records = load_notification_history()
+        self.notification_history_cache = records
+        self.last_notification_history_scan_time = now
         return records
 
     # ===============================
