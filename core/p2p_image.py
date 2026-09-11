@@ -227,6 +227,19 @@ class P2PImageMixin:
         MAX_RETRY = 20   # 最大 20 回 × 約 6 秒 = 約 2 分
         INTERVAL  = 6    # 各試行前の待機秒数
 
+        # 【2026-09-09 追加】全リトライ失敗時、最終的な失敗理由が
+        # DEBUGログ（既定運用ではファイルに出力されない）にしか
+        #残らず、「そもそも画像が存在しないURL（恒常的な404等）なのか」
+        # 「生成が遅いだけで200は返るが内容が不正な状態が続いているのか」
+        # を通常運用のログ（INFO以上）から判別できなかった。
+        # JishinKanchiCog（地震感知情報）で「地図画像が表示されない」
+        # 事象の切り分け依頼があり、実機ログを確認したところ、疑わしい
+        # 画像取得が3件とも20回リトライ後に失敗していたが、具体的な
+        # 失敗理由（HTTPステータス等）が記録されておらず原因を特定
+        # できなかった。そのため、最終試行の結果をこの変数に保持し、
+        # 全リトライ失敗時のサマリーログ（INFO）に含めるようにした。
+        last_failure_reason = "不明"
+
         for attempt in range(MAX_RETRY):
             await asyncio.sleep(INTERVAL)
             try:
@@ -239,6 +252,7 @@ class P2PImageMixin:
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
                         if resp.status != 200:
+                            last_failure_reason = f"HTTP {resp.status}"
                             logger.debug(
                                 f"P2P画像まだなし: HTTP {resp.status} "
                                 f"attempt={attempt+1}/{MAX_RETRY}"
@@ -247,6 +261,7 @@ class P2PImageMixin:
                         body = await resp.read()
 
                 if not self._is_valid_image_response(body):
+                    last_failure_reason = f"HTTP 200だが内容が不正（size={len(body)}bytes）"
                     logger.debug(
                         f"P2P画像: HTTP 200だが内容が不正（生成中の可能性）"
                         f" size={len(body)}bytes attempt={attempt+1}/{MAX_RETRY}"
@@ -268,9 +283,13 @@ class P2PImageMixin:
                 return
 
             except Exception as e:
+                last_failure_reason = f"{type(e).__name__}: {e}"
                 logger.debug(f"P2P画像確認エラー: {e} attempt={attempt+1}")
 
-        logger.info(f"P2P画像: {MAX_RETRY}回リトライ後も取得できませんでした id={image_id}")
+        logger.info(
+            f"P2P画像: {MAX_RETRY}回リトライ後も取得できませんでした "
+            f"id={image_id} url={url} (最終試行の結果: {last_failure_reason})"
+        )
         if on_failure:
             try:
                 await on_failure(message, url)

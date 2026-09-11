@@ -128,14 +128,104 @@ def make_shindo_decoder(inactive_sentinel: float):
     無効値センチネル（7.0）はそのまま使わない（モジュール docstring 参照）。
     """
     def shindo_from_rgb(r: int, g: int, b: int) -> float:
-        p = color2position(r, g, b)
-        if p is None:
-            return inactive_sentinel
-        shindo = round(10.0 * float(p) - 3.0, 1)
-        if shindo < -3.0 or shindo > 6.9:
-            return inactive_sentinel
-        return shindo
+        v = shindo_from_rgb_or_none(r, g, b)
+        return inactive_sentinel if v is None else v
     return shindo_from_rgb
+
+
+def shindo_from_rgb_or_none(r: int, g: int, b: int) -> Optional[float]:
+    """
+    RGBを震度に変換する。色がカラースケール外（背景・地図等）の場合や
+    変換後の値が有効範囲外（-3.0〜6.9）の場合は None を返す
+    （make_shindo_decoder のようにセンチネル値へ丸め込まない生の変換）。
+
+    make_shindo_decoder が返す shindo_from_rgb() は単一ピクセル方式
+    向けにセンチネル値へ丸め込むが、パッチサンプリング
+    （make_patch_shindo_sampler）では「このピクセルは背景相当だった」
+    という情報自体を、パッチ内の集約（中央値/平均）から除外するために
+    必要となるため、この生の変換を別途公開している。
+    """
+    p = color2position(r, g, b)
+    if p is None:
+        return None
+    shindo = round(10.0 * float(p) - 3.0, 1)
+    if shindo < -3.0 or shindo > 6.9:
+        return None
+    return shindo
+
+
+def make_patch_shindo_sampler(inactive_sentinel: float, radius: int, aggregation: str = "median"):
+    """
+    【2026-09-09 追加】パッチサンプリング方式の shindo_from_patch(pixels,
+    x, y, w, h) -> float を生成するファクトリ。
+
+    【背景】単一ピクセルのみをサンプリングする方式（2026-08〜）は、
+    旧・グリッド方式（N×N平均で平滑化済み）と比べてノイズに弱く、
+    KYOSHIN_RISE_THRESHOLD / KYOSHIN_NEIGHBOR_TRIGGER_COUNT を本来より
+    厳しめの値に引き上げて凌ぐ「一時的な緩和措置」が続いていた
+    （core/config.py 参照）。本関数はその恒久対策として、観測点の
+    ピクセル位置を中心とした (2*radius+1)^2 の正方形パッチ内の各
+    ピクセルを個別に震度へ変換し、その中央値（または平均）を
+    その観測点の震度として採用する。
+
+    【なぜRGBを平均せず、震度に変換してから集約するのか】
+    color2position() はHSVの非線形な多項式補間であり、色空間上で
+    単純にRGBを平均すると、パッチ内に「カラースケール上の色」と
+    「背景色（地図・海域）」が混在した場合に、どちらのカテゴリにも
+    属さない無意味な色（≒誤った震度）に化けてしまう危険がある。
+    そのため、各ピクセルをまず個別に「震度 or 背景（None）」へ変換した
+    上で、震度として有効だった値だけを対象に集約する
+    （shindo_from_rgb_or_none参照）。
+
+    【中央値をデフォルトにしている理由】
+    平均は少数の外れ値（単一ピクセルの色化け等のノイズ）に弱い。
+    中央値はそうした外れ値の影響を受けにくく、旧グリッド方式ほどの
+    過剰な平滑化（震度変化への追従の鈍化）も避けられるため、
+    デフォルトの集約方式とした。
+
+    Parameters
+    ----------
+    inactive_sentinel : パッチ内が全て背景相当（有効な震度が1つも
+        得られなかった）場合に返す代表値。単一ピクセル方式と同じ考え方。
+    radius : パッチの半径（ピクセル）。0を指定すると単一ピクセル方式と
+        等価（呼び出し側は通常 radius=0 のときはこの関数自体を使わず
+        make_shindo_decoder の方を使うこと。cogs/kyoshin_monitor.py参照）。
+    aggregation : "median"（既定）または "mean"。
+    """
+    if aggregation not in ("median", "mean"):
+        raise ValueError(f"aggregation は 'median' か 'mean' を指定してください: {aggregation!r}")
+
+    def shindo_from_patch(pixels, x: int, y: int, w: int, h: int) -> float:
+        values: list[float] = []
+        for dy in range(-radius, radius + 1):
+            py = y + dy
+            if not (0 <= py < h):
+                continue
+            for dx in range(-radius, radius + 1):
+                px = x + dx
+                if not (0 <= px < w):
+                    continue
+                r, g, b = pixels[px, py]
+                v = shindo_from_rgb_or_none(r, g, b)
+                if v is not None:
+                    values.append(v)
+
+        if not values:
+            return inactive_sentinel
+
+        if aggregation == "median":
+            values.sort()
+            mid = len(values) // 2
+            if len(values) % 2 == 1:
+                result = values[mid]
+            else:
+                result = (values[mid - 1] + values[mid]) / 2.0
+        else:
+            result = sum(values) / len(values)
+
+        return round(result, 1)
+
+    return shindo_from_patch
 
 
 # ===============================

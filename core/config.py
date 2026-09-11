@@ -357,6 +357,31 @@ KYOSHIN_ACTIVE_SHINDO_FLOOR  = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0
 # 一時的な緩和措置として1.0に引き上げる。
 KYOSHIN_RISE_THRESHOLD = float(os.getenv("KYOSHIN_RISE_THRESHOLD", "1.0"))
 
+# 【2026-09-09 追加】パッチサンプリング（恒久対策）
+# 上記KYOSHIN_RISE_THRESHOLD=1.0・KYOSHIN_NEIGHBOR_TRIGGER_COUNT=3への
+# 引き上げは「観測点座標周辺の複数ピクセルを平均・中央値で平滑化する
+# パッチサンプリング等の恒久対策を検討するまでの一時的な緩和措置」と
+# 明記されていた対策そのもの。core/kyoshin_stations.py の
+# make_patch_shindo_sampler 参照。
+#
+# 0（既定）を指定すると単一ピクセル方式（従来通り、2026-08〜の挙動）
+# のまま。1以上を指定すると、観測点のピクセル位置を中心とした
+# (2*KYOSHIN_PATCH_RADIUS+1)^2 の正方形パッチ内の各ピクセルを個別に
+# 震度へ変換し、その中央値/平均をその観測点の震度として採用する
+# （半径1＝3x3、半径2＝5x5、…）。
+#
+# 【デフォルトを0（無効）にしている理由】
+# パッチが大きいほど観測点あたりのcolor2position()呼び出し回数が
+# (2r+1)^2倍に増え、Raspberry Pi等の非力なハードウェアではCPU負荷
+# （decode+sampling時間。KYOSHIN_SLOW_FETCH_THRESHOLD_SECのWARNINGログで
+# 実測できる）に無視できない影響を与えうる。既存の検知動作を
+# 意図せず変えないため、既定では無効のままとし、実機で
+# KYOSHIN_SLOW_FETCH_THRESHOLD_SECのログを見ながら段階的に有効化・
+# チューニングできるようにしている。
+KYOSHIN_PATCH_RADIUS = _env_int("KYOSHIN_PATCH_RADIUS", 0)
+# "median"（既定、外れ値に強い）または "mean"。
+KYOSHIN_PATCH_AGGREGATION = os.getenv("KYOSHIN_PATCH_AGGREGATION", "median")
+
 # ===============================
 # 強震モニタ: 実観測点データソース（2026-08〜）
 # ===============================
@@ -474,6 +499,15 @@ KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_d
 # 毎回DEBUGログには常時出力するため、閾値を超えた場合のみ運用上
 # 気づきやすいWARNINGレベルでも出す、という2段構えにしている。
 KYOSHIN_SLOW_FETCH_THRESHOLD_SEC = float(os.getenv("KYOSHIN_SLOW_FETCH_THRESHOLD_SEC", "0.5"))
+
+# 【2026-09-09 追加】画像デコード失敗（Image.open()の例外）のログを
+# 集約する間隔（秒）。1秒間隔ポーリングでは、配信元の画像が生成途中の
+# タイミングで捕まり一時的にデコードへ失敗することが想定内の頻度で
+# 起こりうる。毎回WARNINGを出すとログノイズになり、本当に見るべき
+# 異常を埋もれさせるリスクがあるため、この秒数ごとに件数をまとめて
+# 1回だけWARNINGを出す（詳細は毎回DEBUGに出る。
+# cogs/kyoshin_monitor.py._log_decode_failure 参照）。
+KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC = _env_int("KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC", 300)
 
 # ===============================
 # EEW / API エラー挙動設定
