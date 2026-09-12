@@ -41,8 +41,11 @@ WebSocketとは無関係の別経路（気象庁HPのXML/JSON）のため、今�
 - core.audio.AudioMixin       : speak_local, play_mp3, play_ews_pcm（多重継承で利用）
 - core.ews_signal   : generate_ews_pcm（2026-09-01追加。津波警報・
                        大津波警報発表/更新時のEWS信号音再生用）
-- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用。
-  2026-08-02: 内容検証を強化した安定版としてembed埋め込み方式を再度採用）
+
+【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付（core.p2p_image.
+P2PImageMixin）は、気象庁シェープファイル/GeoJSONベースの地図描画機能
+（試験導入予定）に置き換えるため廃止した。core/p2p_image.py 自体も
+削除済み。
 
 【設計メモ】
 - Circuit Breaker（連続失敗時のバックオフ）は core.fetch_backoff.FetchBackoff
@@ -73,7 +76,6 @@ from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
 from core.ews_signal import generate_ews_pcm
-from core.p2p_image import P2PImageMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 
@@ -91,7 +93,7 @@ logger = logging.getLogger("QTLBot")
 GRADE_ORDER = TSUNAMI_GRADE_ORDER
 
 
-class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
+class TsunamiCog(commands.Cog, AudioMixin):
     """津波情報（P2P・JMA）を扱う Cog。"""
 
     def __init__(self, bot: commands.Bot):
@@ -641,15 +643,13 @@ class TsunamiCog(commands.Cog, AudioMixin, P2PImageMixin):
             if footer_parts:
                 embed.set_footer(text=" | ".join(footer_parts))
 
-            sent_msg = await channel.send(embed=embed)
+            await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "津波情報")
                 record_notification("津波情報", title)
-            # 2026-08-02: CDN反映のリトライ埋め込み方式を、内容検証を
-            # 強化した上で再度採用する（core/p2p_image.py の
-            # _attach_p2p_image docstring参照）。
-            if tsunami_id:
-                self.bot.loop.create_task(self._attach_p2p_image(sent_msg, tsunami_id))
+            # 【2026-09-13 廃止】P2P地図画像の添付処理はここにあったが、
+            # 気象庁シェープファイル/GeoJSONベースの地図描画機能
+            # （試験導入予定）に置き換えるため廃止した。
 
             # ── 読み上げ文言 ──
             # 以前は「{title} が発表されました」の固定文言のみで、Embed本文には

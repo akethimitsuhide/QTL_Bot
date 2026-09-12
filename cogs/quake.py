@@ -17,7 +17,6 @@ MP3再生のみを扱う。EEW（緊急地震速報）は cogs/eew.py の EewCog
 
 【この Cog が担当する機能】
 - P2P地震情報 WebSocket（code=551, core.p2p_ws_hub 経由）からの地震情報通知
-- P2P CDN画像のリトライ添付
 
 【WebSocket移行について（2026-08 feature/p2p-websocket-migration）】
 従来は本Cog自身が /v2/history を3秒間隔でポーリングしていたが、
@@ -33,11 +32,12 @@ code=551 のメッセージを受け取る方式に移行した（handle_p2p_qua
 - core.constants   : INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP
 - core.helpers     : format_jma_time
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
-- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用。
-  2026-08-02: 一時的にテキストURL方式へ変更していたが、CDNレスポンス内容の
-  検証（PNGマジックバイト・最小サイズ）を追加した安定版として
-  _attach_p2p_image によるembed埋め込み方式を再度採用）
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
+
+【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付（core.p2p_image.
+P2PImageMixin）は、気象庁シェープファイル/GeoJSONベースの地図描画機能
+（試験導入予定）に置き換えるため廃止した。core/p2p_image.py 自体も
+削除済み。
 """
 import discord
 from discord.ext import commands
@@ -62,7 +62,6 @@ from core.constants import (
 )
 from core.helpers import format_jma_time, format_latlon
 from core.audio import AudioClientMixin
-from core.p2p_image import P2PImageMixin
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -71,7 +70,7 @@ from core.quake_history_log import build_quake_record, format_quake_record_log_l
 logger = logging.getLogger("QTLBot")
 
 
-class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
+class QuakeInfoCog(commands.Cog, AudioClientMixin):
     """地震情報（震度速報・各地の震度等）を扱う Cog。"""
 
     def __init__(self, bot: commands.Bot):
@@ -317,11 +316,11 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
         name_display = "調査中" if issue_type == "ScalePrompt" else name
         # 「震源に関する情報」（Destination）の場合、震源地の横に緯度経度を
-        # 付記する（要件2）。以前は「地図画像の取得に失敗した場合のみ」
-        # 付記していたが、_attach_p2p_image による embed 埋め込み方式を
-        # 採用した現在も、画像添付は非同期（create_task）でメッセージ送信
-        # 後に行われるため、送信時点では成否が確定しない。そのため引き続き
-        # 常に緯度経度を付記する方針を維持する。
+        # 常に付記する（要件2）。以前は「地図画像の取得に失敗した場合のみ」
+        # 付記する案もあったが、地図画像自体が非同期・遅延取得（成否が
+        # 送信時点で未確定）だったため、常時付記する方針にしていた。
+        # 2026-09-13にP2P地図画像添付機能自体を廃止した後も、緯度経度の
+        # 表示自体は単体で有用なため、この方針は変更していない。
         show_latlon_in_name = (
             issue_type == "Destination"
             and latitude != -200 and longitude != -200
@@ -398,7 +397,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             embed.set_footer(text=" | ".join(footer_parts))
 
         try:
-            sent_msg = await channel.send(embed=embed)
+            await channel.send(embed=embed)
         except Exception as e:
             # notify_quake は他のCogと異なりメソッド全体を包むtry/exceptを
             # 持たない設計のため、送信箇所をピンポイントでtry/exceptし、
@@ -420,11 +419,6 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             quake_record = build_quake_record(data, title)
             if quake_record is not None:
                 logger.info(format_quake_record_log_line(quake_record))
-
-        # ── 地図画像（embed埋め込み） ──
-        quake_id = data.get("id") or data.get("_id")
-        if quake_id:
-            self.bot.loop.create_task(self._attach_p2p_image(sent_msg, quake_id))
 
         if issue_type == "ScalePrompt" and max_scale_val >= 55:
             now_dt = datetime.now()

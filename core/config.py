@@ -80,6 +80,31 @@ def _env_bool(key: str, default: bool) -> bool:
     return v.strip().lower() in ("1", "true", "yes")
 
 
+def _env_hex_color(key: str, default: int) -> int:
+    """
+    16進カラーコード（例: "0x3098BD" / "#3098BD" / "3098BD"）を
+    int（discord.Embed の color 引数にそのまま渡せる形式）に変換する。
+
+    "0x" プレフィックス・"#" プレフィックスのどちらでも受け付ける
+    （HTML/CSS で見慣れた "#RRGGBB" 表記でも .env に書けるようにするため）。
+    未設定・空文字・不正な値の場合は default（＝現行の配色）にフォール
+    バックし、ここで起動を止めることはしない（配色設定の誤りで Bot が
+    起動しなくなるのは過剰なため、警告ログを出して安全側の既定値を使う）。
+    """
+    v = os.getenv(key, "").strip()
+    if not v:
+        return default
+    v = v.removeprefix("0x").removeprefix("0X").removeprefix("#")
+    try:
+        return int(v, 16)
+    except ValueError:
+        logger.warning(
+            f"{key} の値 {os.getenv(key)!r} は16進カラーコードとして解釈できません。"
+            f"デフォルト値 (0x{default:06X}) を使用します。"
+        )
+        return default
+
+
 # ===============================
 # ロギング設定
 # ===============================
@@ -537,29 +562,31 @@ WOLFX_WSS = "wss://ws-api.wolfx.jp/jma_eew"
 P2P_WSS   = "wss://api.p2pquake.net/v2/ws"
 P2P_API   = "https://api.p2pquake.net/v2/history"
 
-# P2P地震情報の地図画像埋め込み（CDNへのリトライポーリング）を一時的に
-# 無効化するフラグ。原因切り分けのため画像埋め込み処理自体をオフに
-# できるようにする。無効化時は core.p2p_image.P2PImageMixin
-# .build_p2p_image_url_text() が生成する画像URLを通知本文に含めることで、
-# Discord自体のリンクプレビュー機能により画像が自動展開される
-# （Bot側でのリトライ・embed編集は行わない）。
-P2P_IMAGE_ATTACH_ENABLED = _env_bool("P2P_IMAGE_ATTACH_ENABLED", True)
+# 【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付機能
+# （core/p2p_image.py の P2PImageMixin）は、気象庁シェープファイル/
+# GeoJSONベースの独自地図描画機能（試験導入予定）に置き換えるため
+# 廃止した。P2P_IMAGE_ATTACH_ENABLED・P2P_IMAGE_CDN_CONCURRENCY は
+# それに伴い削除済み。既存の .env にこれらのキーが残っていても、
+# 単に参照されなくなるだけで無害（未知のキーは無視される）。
 
-# P2P地震情報CDN（cdn.p2pquake.net）への同時アクセス数の上限。
-# QuakeInfoCog/TsunamiCog/EewCog/JishinKanchiCog等、core.p2p_image.
-# P2PImageMixin を使う全Cogを横断した共有の同時実行数制限として使う
-# （core/p2p_image.py 側でモジュールレベルの asyncio.Semaphore を
-# この値で生成する）。
-#
-# 【2026-08-23 追加の経緯】
-# 大規模地震（震度5弱、茨城県南部の地震）発生時、震度速報→各地の
-# 震度に関する情報等、短時間に複数のP2P地震情報レポートが連続発表
-# され、それぞれが独立した画像添付タスクとして並行実行された結果、
-# 同一CDNへの同時多発的なリクエストが実際に発生し、5件中3件が
-# 20回リトライ後も失敗、残り2件も15〜17回目でようやく成功（約90〜
-# 100秒要した）という実害を確認した。同時実行数を制限することで
-# CDNへの負荷を平準化し、個々のリクエストの成功率を上げる狙い。
-P2P_IMAGE_CDN_CONCURRENCY = _env_int("P2P_IMAGE_CDN_CONCURRENCY", 3)
+# ===============================
+# 震度色（Embed / 今後のGIS地図描画で共通利用予定）
+# ===============================
+# core/constants.py の SHINDO_COLORS はこれらの値から組み立てられる。
+# 気象庁の公式配色ではなく本Bot独自の配色のため、環境に合わせて
+# ユーザーがカスタマイズできるよう .env で上書き可能にした
+# （2026-09-13）。未設定時は従来通りの配色がそのまま使われる。
+# 値は "0x3098BD" "#3098BD" "3098BD" のいずれの表記でもよい。
+SHINDO_COLOR_UNKNOWN  = _env_hex_color("SHINDO_COLOR_UNKNOWN",  0x62626B)  # 不明・震度0
+SHINDO_COLOR_1        = _env_hex_color("SHINDO_COLOR_1",        0x3098BD)  # 震度1
+SHINDO_COLOR_2        = _env_hex_color("SHINDO_COLOR_2",        0x4CD0A7)  # 震度2
+SHINDO_COLOR_3        = _env_hex_color("SHINDO_COLOR_3",        0xF6CB51)  # 震度3
+SHINDO_COLOR_4        = _env_hex_color("SHINDO_COLOR_4",        0xFF9939)  # 震度4
+SHINDO_COLOR_5_LOWER  = _env_hex_color("SHINDO_COLOR_5_LOWER",  0xE52A18)  # 震度5弱
+SHINDO_COLOR_5_UPPER  = _env_hex_color("SHINDO_COLOR_5_UPPER",  0xC31B1B)  # 震度5強
+SHINDO_COLOR_6_LOWER  = _env_hex_color("SHINDO_COLOR_6_LOWER",  0xA30A6B)  # 震度6弱
+SHINDO_COLOR_6_UPPER  = _env_hex_color("SHINDO_COLOR_6_UPPER",  0x86046E)  # 震度6強
+SHINDO_COLOR_7        = _env_hex_color("SHINDO_COLOR_7",        0x54068E)  # 震度7
 
 # ===============================
 # 地震情報 履歴（qtlbot.logベース、地図・表での閲覧機能）

@@ -52,7 +52,10 @@ _CODE_GLOB_PATTERNS = ("bot.py", "cogs/*.py", "core/*.py")
 # _env_int 等のヘルパー、cogs/system.py 等が直接呼ぶ os.getenv、
 # core/config.py の _require_env）。新しいヘルパー関数を増やしたら
 # ここにも追記すること。
-_GETENV_FUNC_NAMES = ("_env_int", "_env_bool", "_getenv_nonempty", "_require_env", "getenv")
+_GETENV_FUNC_NAMES = (
+    "_env_int", "_env_bool", "_getenv_nonempty", "_require_env",
+    "_env_hex_color", "getenv",
+)
 
 # 意図的にドキュメント化していない、または意図的にコード側で
 # 参照していない変数名（誤検知として除外したいものがあればここに追加）。
