@@ -61,6 +61,7 @@ import discord
 from discord.ext import commands, tasks
 import aiohttp
 import asyncio
+import io
 import traceback
 from datetime import datetime
 from collections import defaultdict
@@ -71,10 +72,13 @@ from core.config import (
     TSUNAMI_ENABLE,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
+    TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
+    TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_UNKNOWN,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
+from core.gis_render import render_tsunami_map
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -623,12 +627,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
             )
 
             color_map = {
-                "MajorWarning": 0xD344FC,
-                "Warning":      0xF93022,
-                "Watch":        0xEEDB2D,
-                "Unknown":      0x56BCFC,
+                "MajorWarning": TSUNAMI_COLOR_MAJOR_WARNING,
+                "Warning":      TSUNAMI_COLOR_WARNING,
+                "Watch":        TSUNAMI_COLOR_WATCH,
+                "Unknown":      TSUNAMI_COLOR_UNKNOWN,
             }
-            color = 0x00FF00 if cancelled else color_map.get(max_grade, 0x56BCFC)
+            color = 0x00FF00 if cancelled else color_map.get(max_grade, TSUNAMI_COLOR_UNKNOWN)
 
             embed = discord.Embed(
                 title=title,
@@ -643,13 +647,31 @@ class TsunamiCog(commands.Cog, AudioMixin):
             if footer_parts:
                 embed.set_footer(text=" | ".join(footer_parts))
 
-            await channel.send(embed=embed)
+            # ── GIS地図描画（試験導入、2026-09-14〜） ──
+            # 津波予報区の沿岸線（ポリゴンではなく線データ）を警報種別
+            # ごとの色で塗り分ける。cancelled（解除）の場合は塗るべき
+            # 対象が無いため描画自体を行わない。GIS_MAP_ENABLE=false・
+            # 外部データ未取得・該当区域がGeoJSON上に見つからない場合は
+            # render_tsunami_map() が None を返すので、その場合は画像
+            # 添付自体を単に省略する。
+            gis_file = None
+            if not cancelled:
+                area_grades = {
+                    area.get("name"): area.get("grade", "Unknown")
+                    for area in areas if area.get("name")
+                }
+                gis_image_bytes = render_tsunami_map(area_grades)
+                if gis_image_bytes:
+                    gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                    embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "津波情報")
                 record_notification("津波情報", title)
-            # 【2026-09-13 廃止】P2P地図画像の添付処理はここにあったが、
-            # 気象庁シェープファイル/GeoJSONベースの地図描画機能
-            # （試験導入予定）に置き換えるため廃止した。
 
             # ── 読み上げ文言 ──
             # 以前は「{title} が発表されました」の固定文言のみで、Embed本文には

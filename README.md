@@ -68,26 +68,31 @@
 ### P2P 地図画像の添付（廃止）
 **2026-09-13廃止。** 以前は地震情報・津波情報・EEW（P2P由来）の通知に、P2P 地震情報 CDN が生成する震源地図画像をEmbedに添付していた（`core/p2p_image.py` の `P2PImageMixin`。`QuakeInfoCog` / `TsunamiCog` / `EewCog` が多重継承）。CDN側の画像生成遅延に対応するためHTTPステータス・PNG構造検証・リトライ・同時アクセス制限（`P2P_IMAGE_CDN_CONCURRENCY`）等を重ねて安定化させてきた機能だったが、気象庁のシェープファイル形式のGISデータ（または有志によりGeoJSON化されたもの）を用いた独自の地図描画機能に置き換えるため廃止した。関連モジュール（`core/p2p_image.py`）・環境変数（`P2P_IMAGE_ATTACH_ENABLED`, `P2P_IMAGE_CDN_CONCURRENCY`）は削除済み。
 
-### GIS地図描画機能（試験導入、2026-09-13〜）
-気象庁のシェープファイル形式のGISデータ（有志によりGeoJSON化されたもの、CC-BY-4.0）を用いて、震源・震度分布等の地図画像を独自に描画する機能。旧・P2P地図画像添付機能の置き換え。データ取得・キャッシュは`core/gis_data.py`、描画は`core/gis_render.py`（Pillowのみ使用。新規の重量級依存は追加していない）が担当する。
+### GIS地図描画機能（試験導入、2026-09-13〜。津波対応・自動ズーム・視認性向上は2026-09-14〜）
+気象庁のシェープファイル形式のGISデータ（有志によりGeoJSON化されたもの、CC-BY-4.0）を用いて、震源・震度分布・津波予報区等の地図画像を独自に描画する機能。旧・P2P地図画像添付機能の置き換え。データ取得・キャッシュは`core/gis_data.py`、描画は`core/gis_render.py`（Pillowのみ使用。新規の重量級依存は追加していない）が担当する。`EewCog`・`QuakeInfoCog`・`TsunamiCog`に統合済み。
 
-**有効化**: `.env`で`GIS_MAP_ENABLE=true`にする（デフォルト無効。試験導入のためオプトイン方式）。有効化すると、`EewCog`/`QuakeInfoCog`ロード時に必要な外部データが未取得であれば自動的にダウンロードする（初回のみ。手動で強制再取得したい場合は`python3 bot.py --refresh_gis_data`）。
+**有効化**: `.env`で`GIS_MAP_ENABLE=true`にする（デフォルト無効。試験導入のためオプトイン方式）。有効化すると、各Cogロード時に必要な外部データが未取得であれば自動的にダウンロードする（初回のみ。手動で強制再取得したい場合は`python3 bot.py --refresh_gis_data`）。
 
 **使用データ（いずれもキャッシュ先は`GIS_MAP_DATA_DIR`。デフォルト`<プロジェクトルート>/data/gis`、`.gitignore`登録済み）**:
 - `AreaForecastLocalEEW_GIS`（府県予報区、56件。緊急地震速報（警報）の発表地域描画用。区域名はREGION_MAP変換後の名称と一致）
 - `AreaForecastLocalE_GIS`（細分区域、194件。緊急地震速報（予報）・全地震情報の震度分布描画用。区域名はREGION_MAP変換前の生の名称と一致。2件はgeometryがnull＝境界データ未整備のため塗りつぶし対象外）
+- `AreaTsunami_GIS`（津波予報区、70件。津波情報の沿岸線描画用。2026-09-14追加。geometryはPolygonではなくLineString/MultiLineString＝海岸線に沿った線データで、気象庁の実際の津波予報区表示（塗りつぶしではなく色付き沿岸線）に合わせている。区域名は津波情報APIの`areas[].name`と一致。4件はgeometryがnull＝「帰属未定」のプレースホルダーのため実データで参照されることはない）
 - `stations.json`（気象庁 震度観測点一覧。観測点ごとの震度マーカー描画の緯度経度取得用）
 
-いずれも[Ichihai1415/JMA-GIS-GeoJSON](https://github.com/Ichihai1415/JMA-GIS-GeoJSON)（GeoJSON2種）および気象庁公式（stations.json）から取得する。
+いずれも[Ichihai1415/JMA-GIS-GeoJSON](https://github.com/Ichihai1415/JMA-GIS-GeoJSON)（GeoJSON3種）および気象庁公式（stations.json）から取得する。
 
 **描画内容**:
 - 緊急地震速報（警報）: 発表地域（強い揺れが予想される地域。府県予報区単位）を`GIS_MAP_WARNING_COLOR`（デフォルト赤）で塗りつぶし＋震源にバツ印
 - 緊急地震速報（予報）・全地震情報（震度速報）: 地域ごとの予想/観測震度を`SHINDO_COLORS`（震度色設定。上記参照）で塗り分け＋震源にバツ印
 - 地震情報（震度速報以外で観測点情報がある場合）: 観測点ごとに震度を表す短いラベル（"1"〜"7"、5弱/5強は"5-"/"5+"、6弱/6強は"6-"/"6+"）付きの色付き四角マーカーを配置
+- 津波情報（2026-09-14追加）: 津波予報区の沿岸線を警報種別の色（`TSUNAMI_COLOR_*`。下記「津波色設定」参照）で塗り分け。津波情報解除（cancelled）の場合は塗るべき対象が無いため描画自体を行わない
 - PLUM法（仮定震源要素）の場合は、震源のバツ印の代わりに`GIS_MAP_WARNING_COLOR`のドーナツ型の円を描画（警報・予報のいずれの場合も）
 - 塗りつぶし区域は半透明フィル＋不透明の輪郭線の二重描画とし、隣接区域との境界が塗りつぶし後も判別できるようにしている
+- 震源のバツ印・PLUMドーナツは、赤系の塗りつぶしに紛れて見えにくくならないよう、白い丸フチ（グレーの輪郭付き）を下地に敷いてから描画する（2026-09-14追加）
 
-投影は緯度経度→ピクセルの簡易正距円筒図法（日本付近の東西縮尺をcos補正）で、`shapely`/`cartopy`/`matplotlib`等の追加依存は使わない。区域ポリゴンのピクセル変換はプロセス内で一度だけ行いメモリ上に保持する（起動のたびの重い処理を避けるため）。`GIS_MAP_ENABLE=false`または外部データ未取得の場合は各描画関数が`None`を返し、画像添付自体が省略される（通知本体の送信は妨げない）。
+**自動ズーム（2026-09-14追加）**: 描画対象（塗りつぶし区域・観測点・震源・津波予報区の沿岸線）の緯度経度から表示範囲を動的に計算し、対象が日本の一部にとどまる場合はその周辺だけを拡大して描画する（余白は表示範囲の35%、最小表示範囲は2度四方を確保）。対象が広範囲、または該当データが無い場合は日本全体表示にフォールバックする。表示範囲外の区域境界線は描画自体をスキップし、Raspberry Pi での負荷を抑えている。
+
+投影は緯度経度→ピクセルの簡易正距円筒図法（表示範囲の中心緯度でcos補正）で、`shapely`/`cartopy`/`matplotlib`等の追加依存は使わない。GeoJSONのパース結果（区域名→生の緯度経度リング＋bbox）はプロセス内で一度だけ行いメモリ上に保持する（ピクセルへの投影は表示範囲ごとに変わるため描画のたびに行うが、900×900px相当の描画で1回あたり数十〜100ms程度）。`GIS_MAP_ENABLE=false`または外部データ未取得の場合は各描画関数が`None`を返し、画像添付自体が省略される（通知本体の送信は妨げない）。
 
 ### 津波情報
 2つの独立した情報源から通知する（それぞれ通知文のテンプレートが異なる）。
@@ -358,6 +363,16 @@ python3 bot.py --check_env
 
 いずれも `0x3098BD` / `#3098BD` / `3098BD` のいずれの表記でも指定可能（`core/config.py` の `_env_hex_color()` が解釈）。不正な値の場合は警告ログを出したうえで既定値にフォールバックする（起動は止めない）。**2026-09-13追加**：それまでは `core/constants.py` にハードコードされていた配色。GIS地図描画機能（下記）の震度分布塗り分けにも同じ配色を使う。
 
+### 津波色設定（Embed配色 / GIS地図描画で共通利用、2026-09-14〜）
+| 変数名 | 既定値 | 説明 |
+|:---|:---|:---|
+| `TSUNAMI_COLOR_MAJOR_WARNING` | `0xD344FC` | 大津波警報のEmbed色・GIS地図の沿岸線色 |
+| `TSUNAMI_COLOR_WARNING` | `0xF93022` | 津波警報のEmbed色・GIS地図の沿岸線色 |
+| `TSUNAMI_COLOR_WATCH` | `0xEEDB2D` | 津波注意報のEmbed色・GIS地図の沿岸線色 |
+| `TSUNAMI_COLOR_UNKNOWN` | `0x56BCFC` | 不明・その他のEmbed色・GIS地図の沿岸線色 |
+
+表記は震度色設定と同じ。従来 `cogs/tsunami.py` にハードコードされていた色を集約したもの（デフォルト値は従来と同一）。
+
 ### GIS地図描画設定（試験導入、2026-09-13〜）
 | 変数名 | 既定値 | 説明 |
 |:---|:---|:---|
@@ -365,7 +380,7 @@ python3 bot.py --check_env
 | `GIS_MAP_DATA_DIR` | `<プロジェクトルート>/data/gis` | GeoJSON・観測点一覧のキャッシュ先ディレクトリ（`.gitignore`登録済み） |
 | `GIS_MAP_WARNING_COLOR` | `0xFF0000` | EEW警報の発表地域の塗り色・輪郭色、およびPLUM法時の震源ドーナツマークの色 |
 
-外部データが未取得の場合、`GIS_MAP_ENABLE=true`でのCogロード時に自動ダウンロードする（初回のみ）。手動で強制再取得したい場合は `python3 bot.py --refresh_gis_data` を使う（stations.jsonの観測点構成が気象庁側で更新された場合など）。
+外部データ（GeoJSON3種・観測点一覧）が未取得の場合、`GIS_MAP_ENABLE=true`でのCogロード時に自動ダウンロードする（初回のみ）。手動で強制再取得したい場合は `python3 bot.py --refresh_gis_data` を使う（stations.jsonの観測点構成が気象庁側で更新された場合など）。
 
 ### 地震情報履歴設定（qtlbot.logベース、地図・表での閲覧機能）
 | 変数名 | 既定値 | 説明 |
@@ -1123,10 +1138,11 @@ QTL_Bot/
     ├── fetch_backoff.py           - HTTPポーリングのCircuit Breaker（連続失敗時のバックオフ）
     ├── eew_convert.py             - P2P地震情報（EEW code=556）→ Wolfx形式変換の純粋関数
     │                                 （EewCog._convert_p2p_eew_to_wolfx等から分離。状態非依存）
-    ├── gis_data.py                 - GIS地図描画（試験導入）用の外部データ（GeoJSON2種・
+    ├── gis_data.py                 - GIS地図描画（試験導入）用の外部データ（GeoJSON3種・
     │                                 stations.json）のダウンロード・キャッシュ管理
     ├── gis_render.py               - GIS地図描画（試験導入）のPillowベース描画エンジン
-    │                                 （EEW警報地域・震度分布・観測点マーカーの地図PNG生成）
+    │                                 （EEW警報地域・震度分布・観測点マーカー・津波予報区
+    │                                 沿岸線の地図PNG生成。表示範囲の自動ズーム対応）
     ├── notification_log.py        - 実際にDiscordへ送信した通知の履歴記録（全Cog共有の
     │                                 メモリ上リングバッファ、最大50件。Web Dashboardの
     │                                 「直近の通知履歴」表示・GET /status/notifications 用）
@@ -1207,5 +1223,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-09-13（P2P地震情報CDNの動的地図画像添付機能（`core/p2p_image.py`の`P2PImageMixin`、`QuakeInfoCog`/`TsunamiCog`/`EewCog`が使用）を廃止し、気象庁シェープファイル/GeoJSONベースの独自GIS地図描画機能（試験導入、`GIS_MAP_ENABLE`でオプトイン）に置き換え。`EewCog`（警報の発表地域塗り／予報・全地震情報の震度分布塗り分け・観測点マーカー、PLUM法はドーナツマーク）・`QuakeInfoCog`（震度速報は区域塗り、それ以外は観測点マーカー）に統合。外部データ（GeoJSON2種・観測点一覧）は初回有効化時に自動ダウンロード・キャッシュ（`python3 bot.py --refresh_gis_data`で手動再取得可）／震度色（Embed配色）を`core/constants.py`のハードコード値から`core/config.py`の`SHINDO_COLOR_*`環境変数へ移行し、`.env`でカスタマイズ可能に（デフォルト値は従来の配色を維持））
+**最終更新**: 2026-09-14（GIS地図描画機能（試験導入）を拡張：①塗りつぶし区域・観測点・震源の位置に応じた表示範囲の自動ズームに対応（対象が日本の一部にとどまる場合はその周辺だけを拡大、余白35%・最小2度四方）②津波情報向けに`render_tsunami_map()`を追加し`TsunamiCog`に統合（`AreaTsunami_GIS`の沿岸線データを警報種別の色で塗り分け、色は`TSUNAMI_COLOR_*`環境変数で設定可能・`cogs/tsunami.py`の既存ハードコード色もここに集約）③震源のバツ印・PLUM法ドーナツに白い丸フチを追加し、赤系の塗りつぶしに紛れて見えにくい問題を解消／EEW警報・予報で使用するGeoJSONのURLを再確認し、既に正しいURLを使用していたことを確認（変更なし））
 **対応 Python**: 3.11+
