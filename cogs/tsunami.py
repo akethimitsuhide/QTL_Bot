@@ -79,6 +79,7 @@ from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
 from core.gis_render import render_tsunami_map
+from core.gis_data import ensure_gis_data_ready
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -161,6 +162,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("TsunamiCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "TsunamiCog")
 
     async def cog_unload(self):
         if self.fetch_tsunami_observation.is_running():

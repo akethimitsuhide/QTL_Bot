@@ -66,6 +66,7 @@ from core.eew_convert import (
     build_region_shindo_map, eew_warn_advisory_note,
 )
 from core.gis_render import render_eew_warn_map, render_shindo_map
+from core.gis_data import ensure_gis_data_ready
 from core.ws_helpers import ws_connect_loop
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
@@ -163,6 +164,7 @@ class EewCog(commands.Cog, AudioClientMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("EewCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "EewCog")
 
     async def cog_unload(self):
         for bg_task in (self.vibration_monitor_task,):

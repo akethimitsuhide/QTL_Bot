@@ -33,6 +33,11 @@ code=551 のメッセージを受け取る方式に移行した（handle_p2p_qua
 - core.helpers     : format_jma_time
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
+- core.gis_render.render_shindo_map / is_outside_japan_bbox : GIS地図描画
+  （試験導入、2026-09-13〜。GIS_MAP_ENABLE=false・外部データ未取得時は
+   Noneを返すのでその場合は画像添付を省略するだけでよい）
+- core.gis_tile_render.render_overseas_map : 震源が日本国外の場合、
+  国土地理院タイルとの重ね合わせ表示に切り替える（2026-09-15追加）
 
 【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付（core.p2p_image.
 P2PImageMixin）は、気象庁シェープファイル/GeoJSONベースの地図描画機能
@@ -67,7 +72,9 @@ from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.quake_history_log import build_quake_record, format_quake_record_log_line
-from core.gis_render import render_shindo_map
+from core.gis_render import render_shindo_map, is_outside_japan_bbox
+from core.gis_tile_render import render_overseas_map
+from core.gis_data import ensure_gis_data_ready
 
 logger = logging.getLogger("QTLBot")
 
@@ -111,6 +118,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("QuakeInfoCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "QuakeInfoCog")
 
     async def cog_unload(self):
         if self.session and not self.session.closed:
@@ -406,7 +414,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         # GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何も無い
         # 場合は render_shindo_map() が None を返すので、その場合は
         # 画像添付自体を単に省略する（通知本体の送信は妨げない）。
-        gis_image_bytes = self._render_quake_gis_map(issue_type, points, latitude, longitude)
+        gis_image_bytes = await self._render_quake_gis_map(issue_type, points, latitude, longitude)
         gis_file = None
         if gis_image_bytes:
             gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
@@ -574,8 +582,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             if self._should_play_ews(eq, hypo, dom_tsunami):
                 await self._play_ews_signal(dom_tsunami)
 
-    @staticmethod
-    def _render_quake_gis_map(issue_type: str, points: list, latitude, longitude) -> bytes | None:
+    async def _render_quake_gis_map(self, issue_type: str, points: list, latitude, longitude) -> bytes | None:
         """
         地震情報通知向けのGIS地図画像（PNG bytes）を生成する
         （GIS地図描画機能、試験導入。core/gis_render.py参照）。
@@ -588,6 +595,11 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
           ごとのマーカーを描画する。
         - points が無くても、震源の緯度経度が有効であればバツ印のみの
           地図を返す（震度分布が不明な情報種別＝Destination等向け）。
+        - 震源が日本国外（遠地地震に関する情報＝Foreign 等）の場合は、
+          core.gis_render の日本限定ベクター地図では震源位置を表現
+          できないため、国土地理院タイルとの重ね合わせ表示
+          （core.gis_tile_render.render_overseas_map）に切り替える
+          （2026-09-15追加）。
 
         GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何もない
         場合は None（core.gis_render.render_shindo_map 参照）。
@@ -595,6 +607,9 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         hypo_lonlat = None
         if latitude != -200 and longitude != -200:
             hypo_lonlat = (longitude, latitude)
+
+        if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
+            return await render_overseas_map(self.session, hypo_lonlat)
 
         region_shindo = None
         station_shindo = None
