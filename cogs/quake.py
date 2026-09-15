@@ -43,6 +43,7 @@ import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
+import io
 import traceback
 from datetime import datetime
 import logging
@@ -66,6 +67,7 @@ from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.quake_history_log import build_quake_record, format_quake_record_log_line
+from core.gis_render import render_shindo_map
 
 logger = logging.getLogger("QTLBot")
 
@@ -396,8 +398,25 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         if footer_parts:
             embed.set_footer(text=" | ".join(footer_parts))
 
+        # ── GIS地図描画（試験導入、2026-09-13〜） ──
+        # 震度速報（ScalePrompt）は区域単位の points（addrが地域名）
+        # しか持たないため区域塗りつぶし、それ以外の種別で points が
+        # あれば観測点単位（addrが観測点名）とみなしマーカー表示、
+        # pointsが無くても震源情報だけあればバツ印のみ描画する。
+        # GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何も無い
+        # 場合は render_shindo_map() が None を返すので、その場合は
+        # 画像添付自体を単に省略する（通知本体の送信は妨げない）。
+        gis_image_bytes = self._render_quake_gis_map(issue_type, points, latitude, longitude)
+        gis_file = None
+        if gis_image_bytes:
+            gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+            embed.set_image(url="attachment://gis_map.png")
+
         try:
-            await channel.send(embed=embed)
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
         except Exception as e:
             # notify_quake は他のCogと異なりメソッド全体を包むtry/exceptを
             # 持たない設計のため、送信箇所をピンポイントでtry/exceptし、
@@ -554,6 +573,47 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         if EWS_ENABLE and not is_test and dom_tsunami in ("Warning", "MajorWarning"):
             if self._should_play_ews(eq, hypo, dom_tsunami):
                 await self._play_ews_signal(dom_tsunami)
+
+    @staticmethod
+    def _render_quake_gis_map(issue_type: str, points: list, latitude, longitude) -> bytes | None:
+        """
+        地震情報通知向けのGIS地図画像（PNG bytes）を生成する
+        （GIS地図描画機能、試験導入。core/gis_render.py参照）。
+
+        - issue_type == "ScalePrompt"（震度速報）: points は区域単位
+          （addrが core.gis_data の local_areas.geojson の区域名と一致
+          する想定）のため、区域を震度で塗りつぶす。
+        - それ以外の種別で points があれば、観測点単位（addrが
+          stations.json の観測点名と一致する想定）とみなし、観測点
+          ごとのマーカーを描画する。
+        - points が無くても、震源の緯度経度が有効であればバツ印のみの
+          地図を返す（震度分布が不明な情報種別＝Destination等向け）。
+
+        GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何もない
+        場合は None（core.gis_render.render_shindo_map 参照）。
+        """
+        hypo_lonlat = None
+        if latitude != -200 and longitude != -200:
+            hypo_lonlat = (longitude, latitude)
+
+        region_shindo = None
+        station_shindo = None
+        if points:
+            shindo_map = {
+                p.get("addr"): p.get("scale")
+                for p in points
+                if p.get("addr") and p.get("scale") is not None
+            }
+            if issue_type == "ScalePrompt":
+                region_shindo = shindo_map
+            else:
+                station_shindo = shindo_map
+
+        return render_shindo_map(
+            region_shindo=region_shindo,
+            station_shindo=station_shindo,
+            hypocenter_lonlat=hypo_lonlat,
+        )
 
     def _should_play_ews(self, eq: dict, hypo: dict, dom_tsunami: str) -> bool:
         """

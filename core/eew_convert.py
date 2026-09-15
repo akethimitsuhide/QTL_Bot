@@ -298,6 +298,46 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
     return dict(forecast_groups)
 
 
+def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool = False) -> dict:
+    """
+    WarnArea配列から「地域名（Chiiki、REGION_MAP変換前の生の名称）→
+    震度コード（int_mapのキー。10,20,...,70）」のフラットな辞書を作る。
+
+    core/gis_render.py のGIS地図描画（震度分布の地域塗りつぶし）向けに、
+    build_forecast_groups（ラベル→地域名リストのグルーピング）とは別に
+    追加した（2026-09-13）。ロジック自体はbuild_forecast_groupsと同様、
+    Shindo1（下限）・Shindo2（上限）のうち高い方を採用する
+    （PLUM法＝is_assumption時はShindo1のみを使う点も同様）。
+    Shindo1・Shindo2とも「不明」の地域は結果に含めない。
+    """
+    result: dict = {}
+    for area in warn_areas:
+        chiiki = area.get("Chiiki")
+        if not chiiki:
+            continue
+        shindo1 = area.get("Shindo1", "不明")
+        shindo2 = area.get("Shindo2", shindo1)
+
+        if is_assumption:
+            display_val = shindo1 if shindo1 != "不明" else shindo2
+            if display_val == "不明":
+                continue
+            code = shindo_rank(display_val, int_map)
+        else:
+            if shindo1 == "不明" and shindo2 == "不明":
+                continue
+            if shindo1 == "不明":
+                code = shindo_rank(shindo2, int_map)
+            elif shindo2 == "不明":
+                code = shindo_rank(shindo1, int_map)
+            else:
+                code = max(shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map))
+
+        if code:  # shindo_rank は未知の値に対して0を返すため、0は除外する
+            result[chiiki] = code
+    return result
+
+
 def sorted_forecast_labels(forecast_groups: dict, int_map: dict) -> list:
     """forecast_groups のラベルを、震度が高い順にソートして返す。"""
     return sorted(

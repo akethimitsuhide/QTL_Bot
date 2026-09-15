@@ -30,10 +30,14 @@ cogs/quake.py の QuakeInfoCog が別Cogとして扱う。
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（未使用だが将来のfetch系拡張に備え保持）
 - core.kyoshin_shared : DualImageFetcher, fetch_vibration_level, shindo_to_color,
                         estimate_max_shindo_from_image（強震モニタ監視ループ用）
+- core.gis_render.render_eew_warn_map / render_shindo_map : GIS地図描画
+  （試験導入、2026-09-13〜。GIS_MAP_ENABLE=false・外部データ未取得時は
+   Noneを返すのでその場合は画像添付を省略するだけでよい）
 """
 import discord
 from discord.ext import commands
 import aiohttp
+import io
 import json
 import asyncio
 import traceback
@@ -59,8 +63,9 @@ from core.eew_history_log import build_eew_record, format_eew_record_log_line
 from core.eew_convert import (
     convert_p2p_eew_to_wolfx, extract_alert_regions,
     build_forecast_groups, format_forecast_section, merge_forecast_groups,
-    eew_warn_advisory_note,
+    build_region_shindo_map, eew_warn_advisory_note,
 )
+from core.gis_render import render_eew_warn_map, render_shindo_map
 from core.ws_helpers import ws_connect_loop
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
@@ -574,8 +579,46 @@ class EewCog(commands.Cog, AudioClientMixin):
             if is_test:
                 embed.set_footer(text="※これはテスト通知です。")
 
+            # ── GIS地図描画（試験導入、2026-09-13〜） ──
+            # isWarn（警報）の場合は発表地域（cumulative_warn_areas。
+            # REGION_MAP変換後の府県予報区名、上記【強い揺れが予想される
+            # 地域】と同じ集合）を塗りつぶし。それ以外（予報）の場合は
+            # 地域ごとの予想震度（WarnAreaのShindo1/2、REGION_MAP変換前の
+            # 生の地域名）で塗り分ける。震源はどちらもバツ印（PLUM法の
+            # 場合はドーナツ）。GIS_MAP_ENABLE=false・外部データ未取得・
+            # 描画対象が何もない場合は各render関数がNoneを返すので、
+            # その場合は画像添付自体を単に省略する。
+            lat = data.get("Latitude", -200)
+            lon = data.get("Longitude", -200)
+            hypo_lonlat = (lon, lat) if lat != -200 and lon != -200 else None
+
+            if data.get("isWarn"):
+                gis_image_bytes = render_eew_warn_map(
+                    warn_region_names=cumulative_warn_areas,
+                    hypocenter_lonlat=hypo_lonlat,
+                    is_plum=is_plum,
+                )
+            else:
+                region_shindo = (
+                    build_region_shindo_map(warn_areas, INT_MAP, is_assumption=is_plum)
+                    if warn_areas else None
+                )
+                gis_image_bytes = render_shindo_map(
+                    region_shindo=region_shindo,
+                    hypocenter_lonlat=hypo_lonlat,
+                    is_plum=is_plum,
+                )
+
+            gis_file = None
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
             try:
-                await channel.send(embed=embed)
+                if gis_file:
+                    await channel.send(embed=embed, file=gis_file)
+                else:
+                    await channel.send(embed=embed)
             except Exception as e:
                 record_delivery(False, "EEW", str(e))
                 raise
@@ -593,10 +636,6 @@ class EewCog(commands.Cog, AudioClientMixin):
                 eew_record = build_eew_record(data, title)
                 if eew_record is not None:
                     logger.info(format_eew_record_log_line(eew_record))
-
-            # 【2026-09-13 廃止】P2P地震情報の地図画像添付（2026-08-19追加）は、
-            # 気象庁シェープファイル/GeoJSONベースの地図描画機能（試験導入予定）
-            # に置き換えるため廃止した。core/p2p_image.py 自体も削除済み。
 
             if (is_final or is_cancel) and event_id == self.monitored_event_id:
                 self.monitored_event_id = None

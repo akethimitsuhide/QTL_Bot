@@ -25,6 +25,8 @@ Cog分割にあたり、単純な module-level 関数として独立させる。
 import logging
 from datetime import datetime
 
+from core.constants import INT_MAP
+
 logger = logging.getLogger("QTLBot")
 
 
@@ -138,3 +140,37 @@ def format_latlon(latitude: float, longitude: float) -> str:
         return f"{_to_dms(latitude)}、{_to_dms(longitude)}"
     except Exception:
         return ""
+
+
+# core.constants.INT_MAP のキー（10,20,...,70）→ 表示ラベル（"1","2",...,"7"）の
+# 逆引き。core/gis_render.py（GIS地図描画、2026-09-13追加）で、地図上の
+# 観測点マーカーに入れる短いラベル（"1"〜"7"、5弱/5強は"5-"/"5+"、
+# 6弱/6強は"6-"/"6+"）を作るために使う。
+_SHINDO_SHORT_LABELS: dict[int, str] = {
+    10: "1", 20: "2", 30: "3", 40: "4",
+    45: "5-", 50: "5+", 55: "6-", 60: "6+", 70: "7",
+}
+
+# INT_MAP の値（"1","5弱"等の表示用文字列）→ キー（10,45等の数値コード）の
+# 逆引き。EEWのWarnArea（Shindo1/Shindo2）は数値コードではなく表示用
+# 文字列で震度を表すため、SHINDO_COLORS 等の数値キー辞書と対応付ける際に
+# 必要になる。
+_SHINDO_LABEL_TO_CODE: dict[str, int] = {v: k for k, v in INT_MAP.items()}
+
+
+def shindo_code_from_label(label: str) -> int:
+    """
+    "1" "5弱" "6強" "不明" 等の震度表示文字列を、core.constants.INT_MAP /
+    SHINDO_COLORS で使われている数値コード（10, 45, 60, -1 等）に変換する。
+    該当なし（未知の文字列）の場合は -1（不明）を返す。
+    """
+    return _SHINDO_LABEL_TO_CODE.get(label, -1)
+
+
+def shindo_short_label(code: int) -> str:
+    """
+    震度コード（core.constants.INT_MAP のキー。10, 45, 60 等）を、
+    GIS地図の観測点マーカーに入れる短い表示ラベルに変換する
+    （例: 10→"1", 45→"5-", 50→"5+", 60→"6+"）。該当なしの場合は "?"。
+    """
+    return _SHINDO_SHORT_LABELS.get(code, "?")

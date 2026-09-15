@@ -589,6 +589,33 @@ SHINDO_COLOR_6_UPPER  = _env_hex_color("SHINDO_COLOR_6_UPPER",  0x86046E)  # 震
 SHINDO_COLOR_7        = _env_hex_color("SHINDO_COLOR_7",        0x54068E)  # 震度7
 
 # ===============================
+# GIS地図描画設定（試験導入、2026-09-13〜）
+# ===============================
+# core/gis_data.py（外部データのダウンロード・キャッシュ）・
+# core/gis_render.py（Pillowによる地図画像生成）参照。
+# 廃止したP2P地震情報CDNの動的地図画像添付機能の置き換えとして、
+# 気象庁のシェープファイル形式のGISデータ（有志によりGeoJSON化された
+# もの、CC-BY-4.0）を用いて震源・震度分布等を独自に描画する。
+#
+# デフォルト無効（EWS_ENABLEと同じオプトイン方式）。試験導入のため。
+GIS_MAP_ENABLE = _env_bool("GIS_MAP_ENABLE", False)
+
+# ダウンロードしたGeoJSON・観測点一覧のキャッシュ先ディレクトリ。
+# GeoJSON配布元はCC-BY-4.0のためリポジトリへの誤コミットを避けたく、
+# このディレクトリは.gitignoreに登録している。LOG_FILE_PATHと同様、
+# 未設定時はプロジェクトルート基準の絶対パスとし、実行時のカレント
+# ディレクトリに依存しないようにする。
+GIS_MAP_DATA_DIR = _getenv_nonempty(
+    "GIS_MAP_DATA_DIR", os.path.join(_PROJECT_ROOT_DIR, "data", "gis")
+)
+
+# 緊急地震速報（警報）の発表地域の塗り色・輪郭色、およびPLUM法時の
+# 震源ドーナツマークの色（共通の「警戒色」として1つの変数で管理）。
+# デフォルトは赤。ユーザーが.envで変更可能（値の表記は震度色と同じ
+# "0xFF0000" / "#FF0000" / "FF0000" のいずれでもよい）。
+GIS_MAP_WARNING_COLOR = _env_hex_color("GIS_MAP_WARNING_COLOR", 0xFF0000)
+
+# ===============================
 # 地震情報 履歴（qtlbot.logベース、地図・表での閲覧機能）
 # ===============================
 # core/quake_history_log.py 参照。Web Dashboard（/status/quake_history,
