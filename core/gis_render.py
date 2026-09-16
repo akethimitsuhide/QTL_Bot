@@ -3,7 +3,24 @@ core/gis_render.py
 ===================
 気象庁シェープファイル由来のGeoJSON（core/gis_data.py が管理）を用いて、
 地震情報・EEW・津波情報向けの簡易地図画像（PNG）をPillowで描画するモジュール
-（GIS地図描画機能、試験導入。2026-09-13〜、津波対応・自動ズームは2026-09-14〜）。
+（GIS地図描画機能、試験導入。2026-09-13〜、津波対応・自動ズームは2026-09-14〜、
+陸地／海の色分け・アンチエイリアスは2026-09-17〜）。
+
+【陸地／海の色分け・アンチエイリアス（2026-09-17追加）】
+「塗られていない区域＝背景と同じ薄灰色」だと日本列島の形そのものが
+把握しにくいとの指摘を受け、区域データを陸地色（_LAND_COLOR）で塗り、
+背景を海色（_SEA_COLOR）にした。加えて、実際のサイズの2倍
+（_SUPERSAMPLE）でキャンバスに描画してから最後にLANCZOSで縮小する
+ことで、県境・海岸線のギザつきを滑らかにしている（_supersampled()）。
+【重要】この2つは本モジュール内の独自ベクター地図（render_eew_warn_map
+/ render_shindo_map / render_tsunami_map）専用。国土地理院タイルとの
+重ね合わせ（core/gis_tile_render.py）には適用していない。あちらは
+実際の地図タイル（海外を含む現実の地理）を背景に使っており、本
+モジュールが持つ区域ポリゴンは日本国内分のみのため、陸地／海の色分け
+をそちらにも適用すると「日本の区域だけ陸地色に塗られ、台湾やカム
+チャツカ半島等の海外の陸地は海のように見えてしまう」誤表示になる。
+そのため意図的に別実装のままにしている（_draw_land_fill()のdocstring
+にも同じ注意書きあり）。
 
 【設計方針】
 - 依存を増やさない：本プロジェクトは「軽量・低依存」方針（requirements.txt
@@ -48,6 +65,7 @@ import io
 import logging
 import math
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -82,8 +100,60 @@ _STATION_ZOOM_MIN_SHINDO = 30    # 観測点マーカーの表示範囲計算で
 _BASE_DIM = 900     # 基準の画像サイズ（px）。表示範囲が横長・縦長どちらでも
 _MAX_DIM = 1400     # 長辺がこのpxを超えないよう、短辺を基準にして縮尺を決める
 
+# ===============================
+# アンチエイリアス（2026-09-17追加）
+# ===============================
+# 実際の画像サイズの _SUPERSAMPLE 倍でキャンバスに描画してから、最後に
+# LANCZOSで縮小することでアンチエイリアスをかける（県境・海岸線の
+# ギザつきを滑らかにする）。_scale は現在の描画倍率で、_supersampled()
+# コンテキスト内でのみ _SUPERSAMPLE になり、それ以外は1（無効）。
+# 本モジュールの描画は常に単一スレッド・同期的に1回の呼び出しで完結する
+# ため、グローバル変数での管理でも競合の心配はない。
+# 【重要】国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）は
+# 本モジュールとは別に独自にアンチエイリアスを適用する（下記の陸地／海
+# 色分けとは異なり、線の縮小処理だけなので重ね合わせの整合性に影響しない）。
+_SUPERSAMPLE = 2
+_scale = 1
+
+
+def _px(value: float) -> int:
+    """現在の描画倍率（_scale）を適用したピクセル値を返す。"""
+    return round(value * _scale)
+
+
+@contextmanager
+def _supersampled():
+    """このwithブロック内でのみ _px() が _SUPERSAMPLE 倍の値を返すようにする。"""
+    global _scale
+    _scale = _SUPERSAMPLE
+    try:
+        yield _scale
+    finally:
+        _scale = 1
+
+# ===============================
+# 陸地／海の色分け（2026-09-17追加）
+# ===============================
+# 「塗られていない区域＝背景と同じ薄灰色」だと日本列島の輪郭そのものが
+# 把握しにくいとの指摘を受け、区域データ（_eew_areas / _local_areas）を
+# 陸地色で塗りつぶし、背景（_finalizeの合成先）を海色にすることで
+# 列島の形を分かりやすくした。
+#
+# 【国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）には適用
+# しないこと】あちらは実際の地図タイル（国土地理院提供、海外を含む
+# 現実の地理）を背景として使っており、本モジュールが持つのは日本の
+# 区域ポリゴンのみ（海外の陸地データは持たない）。もしこの陸地／海の
+# 色分けをタイル重ね合わせ側にも適用すると、「日本の区域だけ陸地色に
+# 塗られ、台湾やカムチャツカ半島等の海外の陸地は（ポリゴンデータが
+# 無いため）海のように見えてしまう」という誤った表示になる。そのため
+# _LAND_COLOR / _SEA_COLOR / _draw_land_fill() は本モジュール内の
+# 独自ベクター地図（render_eew_warn_map / render_shindo_map /
+# render_tsunami_map）専用とし、core/gis_tile_render.py 側では一切
+# 使わない（あちらは国土地理院タイルの実画像をそのまま背景として使う）。
+_LAND_COLOR = (238, 232, 220, 255)   # 陸地（薄いクリーム色）
+_SEA_COLOR = (200, 222, 238, 255)    # 海（薄い水色）。_finalize() の合成背景に使う
+
 # 背景・境界線・図形の見た目
-_BG_COLOR = (245, 245, 245, 255)          # 地図全体の背景（薄いグレー）
 _BOUNDARY_COLOR = (110, 110, 110, 255)     # 区域境界線（2026-09-15: 見づらいとの指摘で濃くした。旧: (170,170,170,255)）
 _BOUNDARY_WIDTH = 1
 _HIGHLIGHT_BORDER_WIDTH = 2               # 塗りつぶし区域の輪郭線の太さ
@@ -430,10 +500,27 @@ def _get_stations() -> dict[str, tuple[float, float]]:
 
 def _font(size: int) -> ImageFont.ImageFont:
     try:
-        return ImageFont.load_default(size=size)
+        return ImageFont.load_default(size=_px(size))
     except TypeError:
         # Pillow<10.1系では load_default() に size 引数が無い
         return ImageFont.load_default()
+
+
+def _draw_land_fill(draw: ImageDraw.ImageDraw, area_set: "_AreaSet",
+                     projector: _Projector, viewport: _BBox) -> None:
+    """
+    区域セット全体を陸地色（_LAND_COLOR）で塗りつぶし、海（_SEA_COLOR。
+    _finalize()の背景）との区別をつきやすくする（2026-09-17追加）。
+    表示範囲と交差しない区域はスキップする。境界線は別途
+    _draw_polygon_boundaries が描くため、ここでは塗りのみ行う。
+    """
+    for shape in area_set.get().values():
+        if not shape.bbox.intersects(viewport):
+            continue
+        for ring in shape.rings:
+            if len(ring) < 3:
+                continue
+            draw.polygon(projector.project_ring(ring), fill=_LAND_COLOR)
 
 
 def _draw_polygon_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
@@ -447,7 +534,7 @@ def _draw_polygon_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
             if len(ring) < 2:
                 continue
             pts = projector.project_ring(ring)
-            draw.line(pts + [pts[0]], fill=_BOUNDARY_COLOR, width=_BOUNDARY_WIDTH)
+            draw.line(pts + [pts[0]], fill=_BOUNDARY_COLOR, width=_px(_BOUNDARY_WIDTH))
 
 
 def _draw_line_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
@@ -460,7 +547,7 @@ def _draw_line_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
             if len(ring) < 2:
                 continue
             pts = projector.project_ring(ring)
-            draw.line(pts, fill=_BOUNDARY_COLOR, width=_BOUNDARY_WIDTH)
+            draw.line(pts, fill=_BOUNDARY_COLOR, width=_px(_BOUNDARY_WIDTH))
 
 
 def _fill_area(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector: _Projector,
@@ -478,7 +565,7 @@ def _fill_area(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector: _Project
         if len(ring) < 2:
             continue
         pts = projector.project_ring(ring)
-        draw.line(pts + [pts[0]], fill=rgb_border, width=_HIGHLIGHT_BORDER_WIDTH)
+        draw.line(pts + [pts[0]], fill=rgb_border, width=_px(_HIGHLIGHT_BORDER_WIDTH))
 
 
 def _draw_line_highlight(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector: _Projector,
@@ -488,7 +575,7 @@ def _draw_line_highlight(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector
         if len(ring) < 2:
             continue
         pts = projector.project_ring(ring)
-        draw.line(pts, fill=rgb_color, width=_TSUNAMI_LINE_WIDTH, joint="curve")
+        draw.line(pts, fill=rgb_color, width=_px(_TSUNAMI_LINE_WIDTH), joint="curve")
 
 
 def _draw_x_mark(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: tuple) -> None:
@@ -498,12 +585,12 @@ def _draw_x_mark(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: 
     （2026-09-14追加）。
     """
     x, y = xy
-    s = _HYPO_MARK_SIZE
-    halo_r = s + _HYPO_HALO_PAD
+    s = _px(_HYPO_MARK_SIZE)
+    halo_r = s + _px(_HYPO_HALO_PAD)
     draw.ellipse([x - halo_r, y - halo_r, x + halo_r, y + halo_r],
-                 fill=_HALO_COLOR, outline=_HALO_OUTLINE_COLOR, width=1)
-    draw.line([(x - s, y - s), (x + s, y + s)], fill=rgb_color, width=_HYPO_MARK_WIDTH)
-    draw.line([(x - s, y + s), (x + s, y - s)], fill=rgb_color, width=_HYPO_MARK_WIDTH)
+                 fill=_HALO_COLOR, outline=_HALO_OUTLINE_COLOR, width=_px(1))
+    draw.line([(x - s, y - s), (x + s, y + s)], fill=rgb_color, width=_px(_HYPO_MARK_WIDTH))
+    draw.line([(x - s, y + s), (x + s, y - s)], fill=rgb_color, width=_px(_HYPO_MARK_WIDTH))
 
 
 def _draw_plum_donut(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: tuple) -> None:
@@ -512,13 +599,13 @@ def _draw_plum_donut(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_col
     バツ印と同様、白フチを下地に敷いてから描画する（2026-09-14追加）。
     """
     x, y = xy
-    outer = _PLUM_OUTER_R
-    inner = _PLUM_INNER_R
-    halo_r = outer + _PLUM_HALO_PAD
+    outer = _px(_PLUM_OUTER_R)
+    inner = _px(_PLUM_INNER_R)
+    halo_r = outer + _px(_PLUM_HALO_PAD)
     draw.ellipse([x - halo_r, y - halo_r, x + halo_r, y + halo_r],
-                 fill=_HALO_COLOR, outline=_HALO_OUTLINE_COLOR, width=1)
-    draw.ellipse([x - outer, y - outer, x + outer, y + outer], outline=rgb_color, width=3)
-    draw.ellipse([x - inner, y - inner, x + inner, y + inner], outline=rgb_color, width=2)
+                 fill=_HALO_COLOR, outline=_HALO_OUTLINE_COLOR, width=_px(1))
+    draw.ellipse([x - outer, y - outer, x + outer, y + outer], outline=rgb_color, width=_px(3))
+    draw.ellipse([x - inner, y - inner, x + inner, y + inner], outline=rgb_color, width=_px(2))
 
 
 def _draw_hypocenter(draw: ImageDraw.ImageDraw, lon: Optional[float], lat: Optional[float],
@@ -543,9 +630,9 @@ def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: i
     アイコン追加時に共通化）。
     """
     x, y = xy
-    half = size / 2
+    half = _px(size) / 2
     rgb = _rgb_to_rgba(SHINDO_COLORS.get(code, SHINDO_COLORS[-1]))[:3]
-    draw.rectangle([x - half, y - half, x + half, y + half], fill=rgb, outline=outline)
+    draw.rectangle([x - half, y - half, x + half, y + half], fill=rgb, outline=outline, width=_px(1))
     font = _font(max(round(size), 11))
     label = shindo_short_label(code)
     # テキストは黒固定（マーカー色が薄い場合でも視認性を確保するため）
@@ -596,10 +683,17 @@ def _draw_region_icons(draw: ImageDraw.ImageDraw, matched_regions: list, project
         _draw_shindo_square(draw, xy, code, _REGION_ICON_SIZE, outline=(20, 20, 20, 255))
 
 
-def _finalize(canvas: Image.Image) -> bytes:
-    """RGBAキャンバスを背景と合成し、PNGバイト列にして返す。"""
-    bg = Image.new("RGBA", canvas.size, _BG_COLOR)
+def _finalize(canvas: Image.Image, target_size: Optional[tuple] = None) -> bytes:
+    """
+    RGBAキャンバスを背景（海色）と合成し、PNGバイト列にして返す。
+    target_size が指定され、かつcanvasのサイズと異なる場合（＝
+    _supersampled()で拡大して描画した場合）、LANCZOSで指定サイズへ
+    縮小することでアンチエイリアスをかける（2026-09-17追加）。
+    """
+    bg = Image.new("RGBA", canvas.size, _SEA_COLOR)
     composed = Image.alpha_composite(bg, canvas)
+    if target_size and target_size != composed.size:
+        composed = composed.resize(target_size, Image.LANCZOS)
     buf = io.BytesIO()
     composed.convert("RGB").save(buf, format="PNG", optimize=True)
     return buf.getvalue()
@@ -669,22 +763,26 @@ def render_eew_warn_map(
                 viewport_points.extend(ring)
         viewport = _compute_viewport(viewport_points)
         width, height = _dimensions_for_bbox(viewport)
-        projector = _Projector(viewport, width, height)
 
-        canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(canvas)
-        _draw_polygon_boundaries(draw, _eew_areas, projector, viewport)
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
 
-        fill_rgba = _rgb_to_rgba(GIS_MAP_WARNING_COLOR, _FILL_ALPHA)
-        border_rgb = _darken_rgb(_rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3])
-        for shape in matched_shapes:
-            _fill_area(draw, shape, projector, fill_rgba, border_rgb)
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            _draw_land_fill(draw, _eew_areas, projector, viewport)
+            _draw_polygon_boundaries(draw, _eew_areas, projector, viewport)
 
-        if hypo_points:
-            lon, lat = hypo_points[0]
-            _draw_hypocenter(draw, lon, lat, is_plum, border_rgb, projector)
+            fill_rgba = _rgb_to_rgba(GIS_MAP_WARNING_COLOR, _FILL_ALPHA)
+            border_rgb = _darken_rgb(_rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3])
+            for shape in matched_shapes:
+                _fill_area(draw, shape, projector, fill_rgba, border_rgb)
 
-        return _finalize(canvas)
+            if hypo_points:
+                lon, lat = hypo_points[0]
+                _draw_hypocenter(draw, lon, lat, is_plum, border_rgb, projector)
+
+            return _finalize(canvas, (width, height))
     except Exception:
         logger.error("GIS地図(EEW警報)描画エラー", exc_info=True)
         return None
@@ -769,30 +867,34 @@ def render_shindo_map(
 
         viewport = _compute_viewport(viewport_points)
         width, height = _dimensions_for_bbox(viewport)
-        projector = _Projector(viewport, width, height)
 
-        canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(canvas)
-        _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
 
-        for shape, code in matched_regions:
-            color = SHINDO_COLORS.get(code, SHINDO_COLORS[-1])
-            fill_rgba = _rgb_to_rgba(color, _FILL_ALPHA)
-            border_rgb = _darken_rgb(_rgb_to_rgba(color)[:3])
-            _fill_area(draw, shape, projector, fill_rgba, border_rgb)
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            _draw_land_fill(draw, _local_areas, projector, viewport)
+            _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
 
-        if show_region_icons and matched_regions:
-            _draw_region_icons(draw, matched_regions, projector)
+            for shape, code in matched_regions:
+                color = SHINDO_COLORS.get(code, SHINDO_COLORS[-1])
+                fill_rgba = _rgb_to_rgba(color, _FILL_ALPHA)
+                border_rgb = _darken_rgb(_rgb_to_rgba(color)[:3])
+                _fill_area(draw, shape, projector, fill_rgba, border_rgb)
 
-        if matched_stations:
-            _draw_station_markers(draw, matched_stations, projector)
+            if show_region_icons and matched_regions:
+                _draw_region_icons(draw, matched_regions, projector)
 
-        if hypo_points:
-            lon, lat = hypo_points[0]
-            warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
-            _draw_hypocenter(draw, lon, lat, is_plum, warn_rgb, projector)
+            if matched_stations:
+                _draw_station_markers(draw, matched_stations, projector)
 
-        return _finalize(canvas)
+            if hypo_points:
+                lon, lat = hypo_points[0]
+                warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
+                _draw_hypocenter(draw, lon, lat, is_plum, warn_rgb, projector)
+
+            return _finalize(canvas, (width, height))
     except Exception:
         logger.error("GIS地図(震度分布)描画エラー", exc_info=True)
         return None
@@ -843,16 +945,23 @@ def render_tsunami_map(area_grades: dict) -> Optional[bytes]:
                 viewport_points.extend(ring)
         viewport = _compute_viewport(viewport_points)
         width, height = _dimensions_for_bbox(viewport)
-        projector = _Projector(viewport, width, height)
 
-        canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(canvas)
-        _draw_line_boundaries(draw, _tsunami_areas, projector, viewport)
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
 
-        for shape, color in matched:
-            _draw_line_highlight(draw, shape, projector, _rgb_to_rgba(color)[:3])
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            # 津波予報区（_tsunami_areas）は海岸線のみの線データで陸地の
+            # 塗りつぶしはできないため、陸地の下地には _local_areas
+            # （細分区域ポリゴン）を代わりに使う（2026-09-17追加）。
+            _draw_land_fill(draw, _local_areas, projector, viewport)
+            _draw_line_boundaries(draw, _tsunami_areas, projector, viewport)
 
-        return _finalize(canvas)
+            for shape, color in matched:
+                _draw_line_highlight(draw, shape, projector, _rgb_to_rgba(color)[:3])
+
+            return _finalize(canvas, (width, height))
     except Exception:
         logger.error("GIS地図(津波)描画エラー", exc_info=True)
         return None
