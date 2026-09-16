@@ -872,9 +872,20 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # 予報情報（参考）
             forecast = tsunami.get("Forecast", {})
             forecast_items = forecast.get("Item", [])
+            area_grades = {}
             if forecast_items:
                 # 最大の警報レベルを取得
                 max_grade = "Unknown"
+                # ── GIS地図描画用：区域ごとの警報種別（2026-09-16追加） ──
+                # notify_tsunami_forecastと同じ理由で追加。この関数は
+                # Category.Kind.Name（テキスト）で判定する設計のため、
+                # 文字列の部分一致で判定する（"大津波警報"は"津波警報"の
+                # 文字列を含むため、必ず大津波警報を先に判定すること）。
+                grade_text_map = [
+                    ("大津波警報", "MajorWarning"),
+                    ("津波警報", "Warning"),
+                    ("津波注意報", "Watch"),
+                ]
                 for fcast in forecast_items:
                     cat = fcast.get("Category", {})
                     kind = cat.get("Kind", {}).get("Name", "")
@@ -885,6 +896,14 @@ class TsunamiCog(commands.Cog, AudioMixin):
                         max_grade = "Warning"
                     elif "津波注意報" in kind and max_grade == "Unknown":
                         max_grade = "Watch"
+
+                    area_name = fcast.get("Area", {}).get("Name")
+                    if not area_name:
+                        continue
+                    for text, grade in grade_text_map:
+                        if text in kind:
+                            area_grades[area_name] = grade
+                            break
                 
                 # 警報ステータスを追加
                 if max_grade == "MajorWarning":
@@ -906,8 +925,18 @@ class TsunamiCog(commands.Cog, AudioMixin):
             mention = ""
             if any("大津波警報" in str(x) for x in forecast_items):
                 mention = f"{self.bot.user.mention} "
-            
-            await channel.send(mention, embed=embed)
+
+            # ── GIS地図描画（試験導入、2026-09-16〜） ──
+            gis_file = None
+            gis_image_bytes = render_tsunami_map(area_grades)
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(mention, embed=embed, file=gis_file)
+            else:
+                await channel.send(mention, embed=embed)
             if not is_test:
                 record_delivery(True, "津波観測情報")
                 record_notification("津波観測情報", title)
@@ -1138,7 +1167,34 @@ class TsunamiCog(commands.Cog, AudioMixin):
             if footer_parts:
                 embed.set_footer(text=" | ".join(footer_parts))
 
-            await channel.send(embed=embed)
+            # ── GIS地図描画（試験導入、2026-09-16〜） ──
+            # notify_tsunami（P2P地震情報経由）とは別に、気象庁配信の
+            # 津波予報・警報（本メソッド）でもGIS地図を添付するよう追加した
+            # （2026-09-15の実装漏れ。notify_tsunamiにしか配線しておらず、
+            # 気象庁形式の通知では地図が添付されない不具合があった）。
+            # level_height_areas（{震度コード: {予想高さ: [区域名]}}）を
+            # 平坦化し、{区域名: grade文字列} に変換して再利用する
+            # （区域名の抽出処理自体は上のループで既に完了しているため、
+            # ここで二重にループし直さない）。level=1（津波予報。若干の
+            # 海面変動）は警報・注意報ほど緊急性が高くないため地図には
+            # 含めない（Embed本文には引き続き表示される）。
+            gis_file = None
+            if not is_cancelled:
+                level_to_grade = {5: "MajorWarning", 4: "Warning", 2: "Watch"}
+                area_grades = {
+                    area_name: grade
+                    for lv, grade in level_to_grade.items()
+                    for area_name in [n for names in level_height_areas.get(lv, {}).values() for n in names]
+                }
+                gis_image_bytes = render_tsunami_map(area_grades)
+                if gis_image_bytes:
+                    gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                    embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "津波予報")
                 record_notification("津波予報", title)

@@ -77,6 +77,7 @@ _JAPAN_LAT_MIN, _JAPAN_LAT_MAX = 23.0, 46.0
 # ===============================
 _VIEWPORT_PADDING_RATIO = 0.35   # 対象のbboxに対して、上下左右に足す余白の比率
 _VIEWPORT_MIN_SPAN_DEG = 2.0     # 最小表示範囲（これより小さくズームしない）
+_STATION_ZOOM_MIN_SHINDO = 30    # 観測点マーカーの表示範囲計算で「拡大対象」とする震度コードの下限（30=震度3。2026-09-16追加）
 
 _BASE_DIM = 900     # 基準の画像サイズ（px）。表示範囲が横長・縦長どちらでも
 _MAX_DIM = 1400     # 長辺がこのpxを超えないよう、短辺を基準にして縮尺を決める
@@ -458,12 +459,18 @@ def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, proje
     観測点ごとの震度マーカー（色付き正方形＋短い震度ラベル）を描画する。
     station_shindo: {観測点名(stations.jsonのname): 震度コード(INT_MAPのキー)}
     stations.json 上に見つからない観測点名は描画をスキップする（ログのみ）。
+
+    観測点が密集していて互いに重なる場合、震度が大きい観測点ほど
+    手前（後から描画＝上に重なる）に来るよう、震度コードの昇順で
+    描画する（2026-09-16追加。従来は station_shindo の辞書順＝データ
+    ソース側の並び順のままだったため、震度の小さい観測点が大きい
+    観測点を覆い隠してしまうことがあった）。
     """
     stations = _get_stations()
     font = _font(11)
     half = _STATION_MARKER_SIZE / 2
     missing = 0
-    for name, code in station_shindo.items():
+    for name, code in sorted(station_shindo.items(), key=lambda item: item[1]):
         latlon = stations.get(name)
         if latlon is None:
             missing += 1
@@ -630,9 +637,21 @@ def render_shindo_map(
         for shape, _code in matched_regions:
             for ring in shape.rings:
                 viewport_points.extend(ring)
-        for name in matched_stations:
+
+        # 観測点は、震度3以上（_STATION_ZOOM_MIN_SHINDO）の地点があれば
+        # そちらだけを表示範囲の計算対象にし、その周辺を拡大表示する
+        # （2026-09-16追加。全観測点を含めると、震度1程度の遠方の観測点
+        # 1件のせいで震度の大きい地域がズームアウトされ見づらくなる
+        # ため）。震度3以上の観測点が1件もない場合（震度1〜2程度の
+        # 小規模な地震等）は、従来通り全観測点を対象に含める。
+        station_points_all = []
+        station_points_strong = []
+        for name, code in matched_stations.items():
             lat, lon = stations[name]
-            viewport_points.append((lon, lat))
+            station_points_all.append((lon, lat))
+            if code >= _STATION_ZOOM_MIN_SHINDO:
+                station_points_strong.append((lon, lat))
+        viewport_points.extend(station_points_strong or station_points_all)
 
         viewport = _compute_viewport(viewport_points)
         width, height = _dimensions_for_bbox(viewport)
