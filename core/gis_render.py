@@ -106,9 +106,11 @@ _HYPO_HALO_PAD = 5                        # バツ印の白フチの余白（px�
 _PLUM_OUTER_R = 14                        # PLUM法ドーナツの外半径（px）
 _PLUM_INNER_R = 7                         # PLUM法ドーナツの内半径（px）
 _PLUM_HALO_PAD = 4                        # ドーナツの白フチの余白（px）
-_STATION_MARKER_SIZE = 16                 # 観測点マーカー（正方形）の一辺（px）。
+_STATION_MARKER_SIZE = 24                 # 観測点マーカー（正方形）の一辺（px）。
                                            # 2026-09-16: 「小さくて見づらい」との
-                                           # 指摘を受け、11→16に拡大（旧: 11px）。
+                                           # 指摘を受け、11→16→24に拡大
+                                           # （S/M/Lの比較サンプルを提示し、
+                                           # Lの24pxを採用）。
 _REGION_ICON_SIZE = 28                    # 震度速報時、区域中央に置くアイコンの一辺（px）。
                                            # 観測点マーカーより一回り大きくする（2026-09-16追加）
 _TSUNAMI_LINE_WIDTH = 6                   # 津波予報区の色付き沿岸線の太さ（px）
