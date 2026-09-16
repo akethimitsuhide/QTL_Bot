@@ -628,6 +628,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             region_shindo=region_shindo,
             station_shindo=station_shindo,
             hypocenter_lonlat=hypo_lonlat,
+            show_region_icons=(issue_type == "ScalePrompt"),
         )
 
     def _should_play_ews(self, eq: dict, hypo: dict, dom_tsunami: str) -> bool:

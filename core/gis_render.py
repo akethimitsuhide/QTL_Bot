@@ -87,10 +87,17 @@ _BG_COLOR = (245, 245, 245, 255)          # 地図全体の背景（薄いグレ
 _BOUNDARY_COLOR = (110, 110, 110, 255)     # 区域境界線（2026-09-15: 見づらいとの指摘で濃くした。旧: (170,170,170,255)）
 _BOUNDARY_WIDTH = 1
 _HIGHLIGHT_BORDER_WIDTH = 2               # 塗りつぶし区域の輪郭線の太さ
-_FILL_ALPHA = 150                         # 塗りつぶしの不透明度（0-255）。
-                                           # 隣接区域との境界が塗りつぶし後も
-                                           # 見えるよう、輪郭線は別途不透明で
-                                           # 描く。
+_FILL_ALPHA = 255                         # 塗りつぶしの不透明度（0-255）。
+                                           # 2026-09-16: 「震度の色が薄い」との
+                                           # 指摘を受け、半透明(150)から不透明
+                                           # (255=設定色そのまま)に変更した。
+                                           # 隣接区域との境界は、フィルと同じ
+                                           # 色に頼らず「フィルより暗い色」の
+                                           # 輪郭線（_darken_rgb）で確保する
+                                           # （同じ震度＝同じ色の区域が隣接
+                                           # していても境界が見えるようにする
+                                           # ため）。
+_BORDER_DARKEN_FACTOR = 0.55              # 輪郭線の明度（フィル色に掛ける係数。小さいほど暗い）
 _HALO_COLOR = (255, 255, 255, 255)        # 震源マークの視認性向上用の白フチ
 _HALO_OUTLINE_COLOR = (90, 90, 90, 255)   # 白フチ自体の輪郭（薄い背景に対する視認性確保）
 _HYPO_MARK_SIZE = 10                      # 震源バツ印の半径（px）
@@ -99,12 +106,26 @@ _HYPO_HALO_PAD = 5                        # バツ印の白フチの余白（px�
 _PLUM_OUTER_R = 14                        # PLUM法ドーナツの外半径（px）
 _PLUM_INNER_R = 7                         # PLUM法ドーナツの内半径（px）
 _PLUM_HALO_PAD = 4                        # ドーナツの白フチの余白（px）
-_STATION_MARKER_SIZE = 11                 # 観測点マーカー（正方形）の一辺（px）
+_STATION_MARKER_SIZE = 16                 # 観測点マーカー（正方形）の一辺（px）。
+                                           # 2026-09-16: 「小さくて見づらい」との
+                                           # 指摘を受け、11→16に拡大（旧: 11px）。
+_REGION_ICON_SIZE = 28                    # 震度速報時、区域中央に置くアイコンの一辺（px）。
+                                           # 観測点マーカーより一回り大きくする（2026-09-16追加）
 _TSUNAMI_LINE_WIDTH = 6                   # 津波予報区の色付き沿岸線の太さ（px）
 
 
 def _rgb_to_rgba(color: int, alpha: int = 255) -> tuple[int, int, int, int]:
     return ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF, alpha)
+
+
+def _darken_rgb(rgb: tuple, factor: float = _BORDER_DARKEN_FACTOR) -> tuple:
+    """
+    輪郭線用に、フィルと同じ色相のまま明度だけ落とした色を作る。
+    フィルを不透明にした（2026-09-16）ことで、フィルと同じ色の輪郭線では
+    隣接区域との境界が見えなくなるため、常にフィルより暗い色を使う。
+    """
+    r, g, b = rgb[0], rgb[1], rgb[2]
+    return (round(r * factor), round(g * factor), round(b * factor))
 
 
 @dataclass
@@ -284,6 +305,63 @@ def _rings_bbox(rings: list) -> Optional[_BBox]:
     return _BBox(lon_min, lon_max, lat_min, lat_max)
 
 
+def _polygon_centroid(ring: list) -> Optional[tuple]:
+    """
+    1つの閉じたリング（多角形の外側の頂点列）の重心（面積重心）を、
+    測量分野で使われる標準的なshoelace公式で計算する。単純な頂点の
+    平均（各点を等しく重み付けして足すだけ）だと、海岸線のようにギザ
+    ギザした部分の頂点密度に引きずられて実際の図形の中心からずれる
+    ことがあるため、面積に基づく重心を使う。
+    """
+    if len(ring) < 3:
+        return None
+    area2 = 0.0
+    cx = 0.0
+    cy = 0.0
+    n = len(ring)
+    for i in range(n):
+        x0, y0 = ring[i]
+        x1, y1 = ring[(i + 1) % n]
+        cross = x0 * y1 - x1 * y0
+        area2 += cross
+        cx += (x0 + x1) * cross
+        cy += (y0 + y1) * cross
+    if abs(area2) < 1e-12:
+        # 退化した（面積がほぼ0の）リング。単純平均にフォールバックする
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
+    area = area2 / 2.0
+    cx /= (6.0 * area)
+    cy /= (6.0 * area)
+    return (cx, cy)
+
+
+def _shape_main_centroid(shape: "_AreaShape") -> Optional[tuple]:
+    """
+    区域（複数リング＝本土＋離島等を持ちうる）の「主要な部分」の重心を
+    返す。単純に全リングの頂点を平均すると、本土から離れた小さな離島に
+    引っ張られてアイコンが海上に配置されてしまうことがあるため、
+    最も面積（bboxの面積で近似）が大きいリングを選び、その重心のみを
+    使う（2026-09-16追加、震度速報時の区域アイコン配置用）。
+    """
+    if not shape.rings:
+        return None
+    best_ring = None
+    best_area = -1.0
+    for ring in shape.rings:
+        bbox = _rings_bbox([ring])
+        if bbox is None:
+            continue
+        area = (bbox.lon_max - bbox.lon_min) * (bbox.lat_max - bbox.lat_min)
+        if area > best_area:
+            best_area = area
+            best_ring = ring
+    if best_ring is None:
+        return None
+    return _polygon_centroid(best_ring)
+
+
 @dataclass
 class _AreaShape:
     code: str
@@ -454,6 +532,24 @@ def _draw_hypocenter(draw: ImageDraw.ImageDraw, lon: Optional[float], lat: Optio
         _draw_x_mark(draw, xy, rgb_color)
 
 
+def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: int,
+                         outline: tuple = (40, 40, 40, 255)) -> None:
+    """
+    震度を表す色付き正方形＋短いラベル（"1"〜"7"等）を1つ描く共通処理。
+    観測点マーカー（_draw_station_markers）と、震度速報時の区域中央
+    アイコン（_draw_region_icons）の両方から使う（2026-09-16、区域
+    アイコン追加時に共通化）。
+    """
+    x, y = xy
+    half = size / 2
+    rgb = _rgb_to_rgba(SHINDO_COLORS.get(code, SHINDO_COLORS[-1]))[:3]
+    draw.rectangle([x - half, y - half, x + half, y + half], fill=rgb, outline=outline)
+    font = _font(max(round(size), 11))
+    label = shindo_short_label(code)
+    # テキストは黒固定（マーカー色が薄い場合でも視認性を確保するため）
+    draw.text((x, y), label, fill=(20, 20, 20, 255), font=font, anchor="mm")
+
+
 def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, projector: _Projector) -> None:
     """
     観測点ごとの震度マーカー（色付き正方形＋短い震度ラベル）を描画する。
@@ -467,8 +563,6 @@ def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, proje
     観測点を覆い隠してしまうことがあった）。
     """
     stations = _get_stations()
-    font = _font(11)
-    half = _STATION_MARKER_SIZE / 2
     missing = 0
     for name, code in sorted(station_shindo.items(), key=lambda item: item[1]):
         latlon = stations.get(name)
@@ -476,16 +570,28 @@ def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, proje
             missing += 1
             continue
         lat, lon = latlon
-        x, y = projector.project(lon, lat)
-        rgb = _rgb_to_rgba(SHINDO_COLORS.get(code, SHINDO_COLORS[-1]))[:3]
-        draw.rectangle([x - half, y - half, x + half, y + half], fill=rgb, outline=(40, 40, 40, 255))
-
-        label = shindo_short_label(code)
-        # テキストは黒固定（マーカー色が薄い場合でも視認性を確保するため）
-        draw.text((x, y), label, fill=(20, 20, 20, 255), font=font, anchor="mm")
+        xy = projector.project(lon, lat)
+        _draw_shindo_square(draw, xy, code, _STATION_MARKER_SIZE)
 
     if missing:
         logger.debug(f"GIS地図: stations.jsonに見つからない観測点を{missing}件スキップしました")
+
+
+def _draw_region_icons(draw: ImageDraw.ImageDraw, matched_regions: list, projector: _Projector) -> None:
+    """
+    震度速報（ScalePrompt）向け：塗りつぶしだけでは震度が分かりにくいとの
+    指摘を受け、区域ごとに震度ラベル付きの大きめアイコンをその区域の
+    重心（_shape_main_centroid）へ追加で配置する（2026-09-16追加）。
+    観測点マーカーと同様、震度が大きい区域のアイコンほど前面に来る
+    よう震度コード昇順で描画する。
+    """
+    for shape, code in sorted(matched_regions, key=lambda item: item[1]):
+        centroid = _shape_main_centroid(shape)
+        if centroid is None:
+            continue
+        lon, lat = centroid
+        xy = projector.project(lon, lat)
+        _draw_shindo_square(draw, xy, code, _REGION_ICON_SIZE, outline=(20, 20, 20, 255))
 
 
 def _finalize(canvas: Image.Image) -> bytes:
@@ -568,7 +674,7 @@ def render_eew_warn_map(
         _draw_polygon_boundaries(draw, _eew_areas, projector, viewport)
 
         fill_rgba = _rgb_to_rgba(GIS_MAP_WARNING_COLOR, _FILL_ALPHA)
-        border_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
+        border_rgb = _darken_rgb(_rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3])
         for shape in matched_shapes:
             _fill_area(draw, shape, projector, fill_rgba, border_rgb)
 
@@ -587,6 +693,7 @@ def render_shindo_map(
     station_shindo: Optional[dict] = None,
     hypocenter_lonlat: Optional[tuple[float, float]] = None,
     is_plum: bool = False,
+    show_region_icons: bool = False,
 ) -> Optional[bytes]:
     """
     緊急地震速報（予報）・地震情報向け：地域ごとの震度色分け塗りつぶし、
@@ -602,6 +709,11 @@ def render_shindo_map(
         地震情報の points[] 等、観測点ごとの震度が得られる場合に使う。
     hypocenter_lonlat   : (経度, 緯度)。震源不明の場合は None
     is_plum             : PLUM法の場合 True
+    show_region_icons   : True の場合、region_shindo で塗りつぶした各区域の
+        中央（重心）に、震度ラベル付きの大きめアイコンを追加で配置する
+        （2026-09-16追加。震度速報＝ScalePromptは塗りつぶしだけでは
+        震度が分かりにくいとの指摘のため。QuakeInfoCogがScalePrompt
+        判定時のみTrueを渡す想定。EEW予報側は今のところFalseのまま）。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -664,8 +776,11 @@ def render_shindo_map(
         for shape, code in matched_regions:
             color = SHINDO_COLORS.get(code, SHINDO_COLORS[-1])
             fill_rgba = _rgb_to_rgba(color, _FILL_ALPHA)
-            border_rgb = _rgb_to_rgba(color)[:3]
+            border_rgb = _darken_rgb(_rgb_to_rgba(color)[:3])
             _fill_area(draw, shape, projector, fill_rgba, border_rgb)
+
+        if show_region_icons and matched_regions:
+            _draw_region_icons(draw, matched_regions, projector)
 
         if matched_stations:
             _draw_station_markers(draw, matched_stations, projector)
