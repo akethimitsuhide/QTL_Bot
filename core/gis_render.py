@@ -12,15 +12,17 @@ core/gis_render.py
 背景を海色（_SEA_COLOR）にした。加えて、実際のサイズの2倍
 （_SUPERSAMPLE）でキャンバスに描画してから最後にLANCZOSで縮小する
 ことで、県境・海岸線のギザつきを滑らかにしている（_supersampled()）。
-【重要】この2つは本モジュール内の独自ベクター地図（render_eew_warn_map
-/ render_shindo_map / render_tsunami_map）専用。国土地理院タイルとの
-重ね合わせ（core/gis_tile_render.py）には適用していない。あちらは
-実際の地図タイル（海外を含む現実の地理）を背景に使っており、本
-モジュールが持つ区域ポリゴンは日本国内分のみのため、陸地／海の色分け
-をそちらにも適用すると「日本の区域だけ陸地色に塗られ、台湾やカム
-チャツカ半島等の海外の陸地は海のように見えてしまう」誤表示になる。
-そのため意図的に別実装のままにしている（_draw_land_fill()のdocstring
-にも同じ注意書きあり）。
+この2つ（塗りの実装・アンチエイリアスの実装そのもの）は本モジュール
+内の独自ベクター地図（render_eew_warn_map / render_shindo_map /
+render_tsunami_map）専用で、国土地理院タイルとの重ね合わせ
+（core/gis_tile_render.py）には使っていない（投影方式がWeb Mercator
+で異なる上、ラスター画像＝タイルの縮小はベクター線の縮小とは事情が
+異なるため）。ただし _LAND_COLOR/_SEA_COLOR の色定数自体は
+core/gis_tile_render.py 側でも「国土地理院タイルが取得できなかった
+海外の箇所を、世界の国境データ（countries.geojson）で補う下地」として
+再利用している（詳細はそちらのモジュールdocstring参照。当初は
+海外の陸地データを持たずこの色分けを適用できなかったが、
+countries.geojsonの追加により解消した）。
 
 【設計方針】
 - 依存を増やさない：本プロジェクトは「軽量・低依存」方針（requirements.txt
@@ -109,9 +111,11 @@ _MAX_DIM = 1400     # 長辺がこのpxを超えないよう、短辺を基準�
 # コンテキスト内でのみ _SUPERSAMPLE になり、それ以外は1（無効）。
 # 本モジュールの描画は常に単一スレッド・同期的に1回の呼び出しで完結する
 # ため、グローバル変数での管理でも競合の心配はない。
-# 【重要】国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）は
-# 本モジュールとは別に独自にアンチエイリアスを適用する（下記の陸地／海
-# 色分けとは異なり、線の縮小処理だけなので重ね合わせの整合性に影響しない）。
+# 【重要】国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）には
+# このアンチエイリアス（_supersampled）は適用していない。あちらは実際の
+# 地図タイル（ラスター画像）を合成するため、こちら側の縮小処理をそのまま
+# 使うとタイル画像自体がぼやけてしまう可能性があり、ベクター線の
+# 縮小とは事情が異なるため、意図的に別実装のままにしている。
 _SUPERSAMPLE = 2
 _scale = 1
 
@@ -139,17 +143,23 @@ def _supersampled():
 # 陸地色で塗りつぶし、背景（_finalizeの合成先）を海色にすることで
 # 列島の形を分かりやすくした。
 #
-# 【国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）には適用
-# しないこと】あちらは実際の地図タイル（国土地理院提供、海外を含む
-# 現実の地理）を背景として使っており、本モジュールが持つのは日本の
-# 区域ポリゴンのみ（海外の陸地データは持たない）。もしこの陸地／海の
-# 色分けをタイル重ね合わせ側にも適用すると、「日本の区域だけ陸地色に
-# 塗られ、台湾やカムチャツカ半島等の海外の陸地は（ポリゴンデータが
-# 無いため）海のように見えてしまう」という誤った表示になる。そのため
-# _LAND_COLOR / _SEA_COLOR / _draw_land_fill() は本モジュール内の
+# 【国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）における
+# 扱いに注意】2026-09-17: 当初は「本モジュールは日本の区域ポリゴンしか
+# 持たないため、タイル重ね合わせ側にこの陸地／海の色分けをそのまま
+# 適用すると、日本だけ陸地色に塗られ、台湾やカムチャツカ半島等の
+# 海外の陸地がポリゴンデータの無さから海のように見えてしまう」ため
+# 適用を避けていたが、その後 core/gis_tile_render.py 側で世界の国境
+# データ（countries.geojson、日本を除く）を読み込むようにしたことで
+# この問題は解消した。そちらでは _LAND_COLOR/_SEA_COLOR を
+# 「国土地理院タイルが取得できなかった箇所の下地」として再利用して
+# いる（日本自体は自前のGeoJSONの方が精密なため国境データから除外し、
+# 実際の地図タイルをそのまま前面に見せる。詳細は
+# core/gis_tile_render.py のモジュールdocstring参照）。
+# _draw_land_fill() 自体（区域全体を一括で塗る関数）は本モジュール内の
 # 独自ベクター地図（render_eew_warn_map / render_shindo_map /
-# render_tsunami_map）専用とし、core/gis_tile_render.py 側では一切
-# 使わない（あちらは国土地理院タイルの実画像をそのまま背景として使う）。
+# render_tsunami_map）専用。core/gis_tile_render.py 側は国境データの
+# 座標系（Web Mercator）が異なるため、_LAND_COLOR/_SEA_COLOR の色定数
+# だけを再利用し、塗り自体は独自に実装している（_get_countries等）。
 _LAND_COLOR = (238, 232, 220, 255)   # 陸地（薄いクリーム色）
 _SEA_COLOR = (200, 222, 238, 255)    # 海（薄い水色）。_finalize() の合成背景に使う
 
@@ -170,9 +180,10 @@ _FILL_ALPHA = 255                         # 塗りつぶしの不透明度（0-2
 _BORDER_DARKEN_FACTOR = 0.55              # 輪郭線の明度（フィル色に掛ける係数。小さいほど暗い）
 _HALO_COLOR = (255, 255, 255, 255)        # 震源マークの視認性向上用の白フチ
 _HALO_OUTLINE_COLOR = (90, 90, 90, 255)   # 白フチ自体の輪郭（薄い背景に対する視認性確保）
-_HYPO_MARK_SIZE = 10                      # 震源バツ印の半径（px）
-_HYPO_MARK_WIDTH = 3
-_HYPO_HALO_PAD = 5                        # バツ印の白フチの余白（px）
+_HYPO_MARK_SIZE = 10                      # 震源バツ印（赤）の半径（px）
+_HYPO_MARK_WIDTH = 3                       # 震源バツ印（赤）の線の太さ（px）
+_HYPO_MARK_OUTLINE_PAD = 3                 # 白フチのバツ印を赤バツ印より一回り大きくする分（px）
+_HYPO_MARK_OUTLINE_EXTRA_WIDTH = 4         # 白フチのバツ印の線の太さを赤バツ印より太くする分（px）
 _PLUM_OUTER_R = 14                        # PLUM法ドーナツの外半径（px）
 _PLUM_INNER_R = 7                         # PLUM法ドーナツの内半径（px）
 _PLUM_HALO_PAD = 4                        # ドーナツの白フチの余白（px）
@@ -580,17 +591,28 @@ def _draw_line_highlight(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector
 
 def _draw_x_mark(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: tuple) -> None:
     """
-    震源のバツ印を描く。地図の塗り色（赤系）に紛れて見づらくなるのを
-    防ぐため、白い丸フチ（グレーの輪郭付き）を下地に敷いてから描画する
-    （2026-09-14追加）。
+    震源のバツ印を描く。2026-09-17: 「警察署の地図記号のよう」との
+    指摘を受け、白い丸フチ（_HALO_COLORの円）を敷く方式から、
+    「一回り大きい白いバツ印（背面）＋赤バツ印（最前面）」という、
+    バツ印そのものに白い縁取りをする方式に変更した。同じ形（X）を
+    白フチ側は少し大きく・太く、赤側は元のサイズで重ね描きすることで、
+    赤いバツ印の輪郭に沿った白い縁取りとして見えるようにしている。
     """
     x, y = xy
     s = _px(_HYPO_MARK_SIZE)
-    halo_r = s + _px(_HYPO_HALO_PAD)
-    draw.ellipse([x - halo_r, y - halo_r, x + halo_r, y + halo_r],
-                 fill=_HALO_COLOR, outline=_HALO_OUTLINE_COLOR, width=_px(1))
-    draw.line([(x - s, y - s), (x + s, y + s)], fill=rgb_color, width=_px(_HYPO_MARK_WIDTH))
-    draw.line([(x - s, y + s), (x + s, y - s)], fill=rgb_color, width=_px(_HYPO_MARK_WIDTH))
+    s_outline = _px(_HYPO_MARK_SIZE + _HYPO_MARK_OUTLINE_PAD)
+    outline_width = _px(_HYPO_MARK_WIDTH + _HYPO_MARK_OUTLINE_EXTRA_WIDTH)
+    red_width = _px(_HYPO_MARK_WIDTH)
+
+    # 白フチのバツ印（一回り大きく・太め、背面）
+    draw.line([(x - s_outline, y - s_outline), (x + s_outline, y + s_outline)],
+              fill=_HALO_COLOR, width=outline_width)
+    draw.line([(x - s_outline, y + s_outline), (x + s_outline, y - s_outline)],
+              fill=_HALO_COLOR, width=outline_width)
+
+    # 赤バツ印（最前面）
+    draw.line([(x - s, y - s), (x + s, y + s)], fill=rgb_color, width=red_width)
+    draw.line([(x - s, y + s), (x + s, y - s)], fill=rgb_color, width=red_width)
 
 
 def _draw_plum_donut(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: tuple) -> None:
