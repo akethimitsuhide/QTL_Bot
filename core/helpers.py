@@ -23,6 +23,7 @@ Cog分割にあたり、単純な module-level 関数として独立させる。
 元 bot.py の safe_float() 〜 format_jma_time() 定義（旧 1513〜1591行目付近）。
 """
 import logging
+import re
 from datetime import datetime
 
 from core.constants import INT_MAP
@@ -174,3 +175,42 @@ def shindo_short_label(code: int) -> str:
     （例: 10→"1", 45→"5-", 50→"5+", 60→"6+"）。該当なしの場合は "?"。
     """
     return _SHINDO_SHORT_LABELS.get(code, "?")
+
+
+_JMA_COORDINATE_RE = re.compile(r'^([+-]\d+\.?\d*)([+-]\d+\.?\d*)([+-]\d+)?')
+
+
+def parse_jma_coordinate(coord: str):
+    """
+    JMAの "Coordinate" / "Coordinate_WGS" 形式の緯度経度文字列
+    （例: "+35.1+139.2-20000/"。度単位の緯度・経度と、続けてメートル
+    単位の深さ〈標高。地下は負〉が連結された形式）を
+    (緯度, 経度, 深さkm) のタプルに変換する。
+
+    core/other.py の notify_long_period（長周期地震動、Coordinateフィールド）
+    ・notify_hypocenter_update（顕著な地震の震源要素更新、Coordinate_WGS
+    フィールド）でGIS地図描画用の震源座標を取り出すために使う
+    （2026-09-17追加）。
+
+    解析できない場合（空文字列・想定外の形式等）は None を返す。
+    深さ部分が無い/解析できない場合、タプルの3要素目（深さ）はNoneに
+    なる（緯度経度だけは取れた場合はそこだけでも活用できるように）。
+    """
+    if not coord:
+        return None
+    m = _JMA_COORDINATE_RE.match(coord.strip())
+    if not m:
+        return None
+    try:
+        lat = float(m.group(1))
+        lon = float(m.group(2))
+    except (TypeError, ValueError):
+        return None
+
+    depth_km = None
+    if m.group(3):
+        try:
+            depth_km = abs(int(m.group(3))) // 1000
+        except ValueError:
+            depth_km = None
+    return (lat, lon, depth_km)

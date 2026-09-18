@@ -48,7 +48,7 @@ GIS_MAP_ENABLE=true で GIS地図描画機能を使うCogがロードされた�
 stations.json は気象庁側で観測点構成が変わることがあるため、他の
 GeoJSON同様の「キャッシュがなければ取得」方式に加えて、明示的に
 再取得したい場合のために `python3 bot.py --refresh_gis_data` で
-4ファイルすべてを強制的に再ダウンロードできるようにする
+5ファイルすべてを強制的に再ダウンロードできるようにする
 （core/gis_data_refresh.py 参照）。
 """
 import os
@@ -73,6 +73,9 @@ TSUNAMI_AREA_GEOJSON_URL = (
     "https://raw.githubusercontent.com/Ichihai1415/JMA-GIS-GeoJSON/"
     "refs/heads/release/AreaTsunami_GIS_20240520_01.geojson"
 )
+COUNTRIES_GEOJSON_URL = (
+    "https://raw.githubusercontent.com/datasets/geo-countries/main/data/countries.geojson"
+)
 STATIONS_JSON_URL = "https://www.jma.go.jp/jma/kishou/know/jishin/intens-st/stations.json"
 
 # キー → (取得元URL, キャッシュ先ファイル名)
@@ -80,6 +83,7 @@ _FILES: dict[str, tuple[str, str]] = {
     "eew_areas":     (EEW_AREA_GEOJSON_URL,     "eew_areas.geojson"),
     "local_areas":   (LOCAL_AREA_GEOJSON_URL,   "local_areas.geojson"),
     "tsunami_areas": (TSUNAMI_AREA_GEOJSON_URL, "tsunami_areas.geojson"),
+    "countries":     (COUNTRIES_GEOJSON_URL,    "countries.geojson"),
     "stations":      (STATIONS_JSON_URL,        "stations.json"),
 }
 
@@ -91,7 +95,7 @@ def _path_for(key: str) -> str:
 
 async def ensure_gis_data(session: aiohttp.ClientSession, force: bool = False) -> bool:
     """
-    GIS地図描画に必要な4種の外部データがキャッシュ済みであることを
+    GIS地図描画に必要な5種の外部データがキャッシュ済みであることを
     保証する。キャッシュディレクトリが無ければ作成する。
 
     Parameters
@@ -105,7 +109,7 @@ async def ensure_gis_data(session: aiohttp.ClientSession, force: bool = False) -
 
     戻り値
     ------
-    bool : 4ファイルすべての準備に成功した場合 True。
+    bool : 5ファイルすべての準備に成功した場合 True。
         1つでも失敗した場合 False（呼び出し元は GIS地図描画機能を
         今回の起動では無効化する等、フォールバック動作を行うこと。
         次回のダウンロード再試行は次回のCogロード時に行われる）。
@@ -157,7 +161,7 @@ async def _download(session: aiohttp.ClientSession, url: str, path: str) -> bool
 
 
 def gis_data_ready() -> bool:
-    """4種のキャッシュファイルが全て揃っているか（サイズ0のものは未整備扱い）を返す。"""
+    """5種のキャッシュファイルが全て揃っているか（サイズ0のものは未整備扱い）を返す。"""
     return all(
         os.path.exists(_path_for(key)) and os.path.getsize(_path_for(key)) > 0
         for key in _FILES
@@ -217,6 +221,18 @@ def load_tsunami_areas() -> list[dict]:
     合わせ、塗りつぶしではなく色付き沿岸線として描画する想定）。
     """
     return _load_geojson_features(_path_for("tsunami_areas"))
+
+
+def load_countries() -> list[dict]:
+    """
+    世界の国境データ（datasets/geo-countries、258カ国）のfeatures配列を
+    返す。読み込み失敗時は空リスト。遠地地震（震源が日本国外）向けの
+    国土地理院タイル重ね合わせ（core/gis_tile_render.py）で、国土地理院
+    タイルが十分なデータを持たない海外の陸地を表現するための背景として
+    使う（日本自体は自前のGeoJSON（AreaForecastLocalE_GIS）の方が精密
+    なため、この国境データからは除外して使う）。
+    """
+    return _load_geojson_features(_path_for("countries"))
 
 
 def _load_geojson_features(path: str) -> list[dict]:

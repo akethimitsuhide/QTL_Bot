@@ -133,7 +133,7 @@ Discordへの接続は不要なため、Botを起動せずここで完結して�
 
 【GISデータの手動再取得（2026-09-13 追加, core/gis_data.py）】
 GIS地図描画機能（試験導入）が使う外部データ（気象庁シェープファイル
-由来のGeoJSON3種＋観測点一覧 stations.json）を強制的に再取得する：
+由来のGeoJSON3種＋世界の国境データ＋観測点一覧 stations.json）を強制的に再取得する：
 
     python3 bot.py --refresh_gis_data
 
@@ -185,7 +185,7 @@ if "--backfill_quake_history" in sys.argv[1:]:
 
 # ── --refresh_gis_data（2026-09-13 追加, core/gis_data.py）
 # GIS地図描画機能（試験導入）が使う外部データ（気象庁シェープファイル
-# 由来のGeoJSON3種＋気象庁の観測点一覧 stations.json）を強制的に
+# 由来のGeoJSON3種＋世界の国境データ＋気象庁の観測点一覧 stations.json）を強制的に
 # 再ダウンロードする。通常は GIS_MAP_ENABLE=true でのCogロード時に
 # 「キャッシュが無ければ取得」する方式のため、初回セットアップでは
 # このコマンドは不要。stations.json は気象庁側で観測点構成が変わる
@@ -204,7 +204,7 @@ if "--refresh_gis_data" in sys.argv[1:]:
 
     _ok = _asyncio.run(_refresh_gis_data())
     if _ok:
-        print("[GIS] GISデータ（GeoJSON3種・観測点一覧）を再取得しました。")
+        print("[GIS] GISデータ（GeoJSON3種・国境データ・観測点一覧）を再取得しました。")
         sys.exit(0)
     else:
         print("[GIS] GISデータの再取得に一部失敗しました。ログを確認してください。")

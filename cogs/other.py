@@ -38,6 +38,7 @@ cogs/other.py
 - core.audio.AudioMixin : speak_local, play_mp3（多重継承で利用）
 """
 import os
+import io
 import discord
 from discord.ext import commands, tasks
 import aiohttp
@@ -53,10 +54,13 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
-from core.helpers import format_jma_time, truncate_embed_description
+from core.helpers import format_jma_time, truncate_embed_description, parse_jma_coordinate
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.gis_render import render_shindo_map, is_outside_japan_bbox
+from core.gis_tile_render import render_overseas_map
+from core.gis_data import ensure_gis_data_ready
 
 logger = logging.getLogger("QTLBot")
 
@@ -104,6 +108,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("OtherInfoCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "OtherInfoCog")
 
     async def cog_unload(self):
         for loop_task in (self.fetch_long_period, self.fetch_quake_advisory):
@@ -117,6 +122,24 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         if self.session and not self.session.closed:
             await self.session.close()
             logger.info("OtherInfoCog: aiohttp セッションを閉じました")
+
+    async def _render_hypocenter_gis_map(self, lat, lon) -> bytes | None:
+        """
+        震源の緯度経度だけからGIS地図画像（PNG bytes）を生成する共通処理
+        （2026-09-17追加。notify_long_period・notify_hypocenter_update
+        で使用）。震源が日本国外の場合は国土地理院タイルとの重ね合わせ
+        （core.gis_tile_render.render_overseas_map）に切り替える
+        （cogs/quake.py の _render_quake_gis_map と同じ判定方法）。
+
+        lat, lon が None（震源座標を取得できなかった場合）は None を返す。
+        GIS_MAP_ENABLE=false・外部データ未取得の場合も各render関数が
+        Noneを返すため、その場合も同様にNoneを返す。
+        """
+        if lat is None or lon is None:
+            return None
+        if is_outside_japan_bbox(lon, lat):
+            return await render_overseas_map(self.session, (lon, lat))
+        return render_shindo_map(hypocenter_lonlat=(lon, lat))
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -271,15 +294,14 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             max_lg = str(intensity.get("MaxLgInt", "不明"))
 
             depth_str = "不明"
+            hypo_lat = None
+            hypo_lon = None
             coord = eq.get("Hypocenter", {}).get("Area", {}).get("Coordinate", "")
-            if coord and '-' in coord:
-                try:
-                    depth_m = int(coord.split('-')[-1].split('/')[0])
-                    depth_km = abs(depth_m) // 1000
-                    if depth_km > 0:
-                        depth_str = f"{depth_km}km"
-                except Exception:
-                    pass
+            parsed_coord = parse_jma_coordinate(coord)
+            if parsed_coord:
+                hypo_lat, hypo_lon, depth_km = parsed_coord
+                if depth_km is not None and depth_km > 0:
+                    depth_str = f"{depth_km}km"
 
             lg_groups = defaultdict(list)
             for pref in intensity.get("Pref", []):
@@ -322,7 +344,22 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if footer:
                 embed.set_footer(text=footer)
 
-            await channel.send(embed=embed)
+            # ── GIS地図描画（試験導入、2026-09-17〜） ──
+            # 長周期地震動階級（1〜4）はSHINDO_COLORSの震度スケールとは
+            # 別の尺度のため、地域ごとの色分けは行わず震源のバツ印のみ
+            # 描画する（Destination等、震度情報が無い地震情報と同様の
+            # 扱い）。GIS_MAP_ENABLE=false・外部データ未取得・震源不明
+            # の場合はNoneが返るので、その場合は画像添付自体を省略する。
+            gis_file = None
+            gis_image_bytes = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "長周期地震動")
                 record_notification("長周期地震動", "長周期地震動に関する観測情報", hypo_name)
@@ -537,6 +574,10 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             hypo_name = hypo.get("Area", {}).get("Name", "不明")
             magnitude = eq.get("Magnitude", "不明")
 
+            coord = hypo.get("Area", {}).get("Coordinate_WGS", "")
+            parsed_coord = parse_jma_coordinate(coord)
+            hypo_lat, hypo_lon = (parsed_coord[0], parsed_coord[1]) if parsed_coord else (None, None)
+
             free_form = body.get("Comments", {}).get("FreeFormComment", "")
 
             description = (
@@ -564,7 +605,17 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if is_test:
                 embed.set_footer(text="※これはテスト通知です。")
 
-            await channel.send(embed=embed)
+            # ── GIS地図描画（試験導入、2026-09-17〜） ──
+            gis_file = None
+            gis_image_bytes = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "震源要素更新")
                 record_notification("震源要素更新", title)
