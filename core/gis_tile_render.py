@@ -2,9 +2,22 @@
 core/gis_tile_render.py
 ========================
 遠地地震（震源が日本国外）向けに、国土地理院（GSI）の淡色地図タイルを
-背景に、日本の細分区域境界線（core.gis_render が保持する
-AreaForecastLocalE_GIS データを再利用）と震源のバツ印を重ね描きした
-PNG画像を生成するモジュール（2026-09-15追加）。
+背景に、世界の国境データ（countries.geojson、日本を除く）・日本の
+細分区域境界線（core.gis_render が保持する AreaForecastLocalE_GIS
+データを再利用）・震源のバツ印を重ね描きしたPNG画像を生成するモジュール
+（2026-09-15追加、countries.geojsonの重ね合わせは2026-09-17追加）。
+
+【「震源が日本国外」の判定方法】
+core.gis_render.is_outside_japan_bbox(lon, lat) が、震源の緯度経度が
+core.gis_render の「日本全体」表示範囲（_JAPAN_LON_MIN/MAX,
+_JAPAN_LAT_MIN/MAX＝およそ経度122〜155度・緯度23〜46度の固定の
+バウンディングボックス）の外にあるかどうかで判定する（単純な範囲外
+判定であり、実際の国境線やJMAの発表種別コード等は見ていない）。
+呼び出し元（cogs/quake.py の _render_quake_gis_map、
+cogs/other.py の _render_hypocenter_gis_map）が、通知に含まれる震源の
+緯度経度に対してこの関数を呼び、Trueなら本モジュールの
+render_overseas_map() に、Falseなら core.gis_render 側の通常の
+ベクター地図に処理を振り分ける。
 
 【なぜ別モジュールにしたか】
 core/gis_render.py は「外部データはGeoJSONのみ・プロセス内メモリキャッシュ
@@ -18,8 +31,20 @@ core.gis_render は簡易正距円筒図法（cos補正）だが、国土地理�
 Web Mercator（EPSG:3857）で配信されているため、本モジュールは独自に
 Web Mercator用の投影（緯度経度⇔グローバルピクセル座標）を実装している
 （_lonlat_to_mercator_px）。2つの図法を混在させると重ね合わせがずれる
-ため、日本の区域境界線・震源マークの重ね描きも必ずこのモジュール内の
-Web Mercator投影で行う（core.gis_render側の投影関数は流用しない）。
+ため、日本の区域境界線・国境データ・震源マークの重ね描きも必ずこの
+モジュール内のWeb Mercator投影で行う（core.gis_render側の投影関数
+自体は使わないが、_LAND_COLOR/_SEA_COLOR/_BOUNDARY_COLOR等の配色
+定数、および_extract_rings/_rings_bbox/_BBoxといったGeoJSONパース用の
+汎用ヘルパーはcore.gis_renderから再利用している）。
+
+【レイヤー構成（render_overseas_map()のdocstring参照）】
+国土地理院タイルは日本国内データが中心で、海外（震源が遠地の場合の
+相手国）の陸地についてはタイルが取得できない／内容が薄いことがある。
+そこで、海色の背景→世界の国境データ（countries.geojson、日本を除く。
+陸地色で塗りつぶし）→国土地理院タイル（取得できた範囲のみ。空白は
+透明）→日本の区域境界線（線のみ）→震源マーク、の順に重ねることで、
+国土地理院タイルが無い／薄い海外地域でも陸地か海かが常に判別できる
+ようにしている。
 
 【タイル取得とキャッシュ】
 - 淡色地図: https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png
@@ -28,22 +53,24 @@ Web Mercator投影で行う（core.gis_render側の投影関数は流用しな�
   抑えるため）。
 - タイル画像はズーム/x/y ごとに GIS_MAP_DATA_DIR/tiles/ 配下へ永続
   キャッシュする（地図タイルは内容が変化しない静的データのため）。
-- 取得失敗（404・タイムアウト等）のタイルは1枚ずつ空白（背景色）として
-  扱い、処理全体は継続する（GSI側が日本国外のデータを持たない可能性が
-  あるため。震源位置の相対関係を示す区域線・バツ印は国土地理院タイルの
-  有無に関わらず正しく重ね描きされる）。
+  国境データ（countries.geojson）は core/gis_data.py が管理する他の
+  GeoJSONと同様、GIS_MAP_DATA_DIR 直下にキャッシュされる。
+- 取得失敗（404・タイムアウト等）のタイルは1枚ずつ透明のまま（背後の
+  国境データ・海色が透けて見える）とし、処理全体は継続する。
 - 国土地理院コンテンツ利用規約に基づき、画像内に「出典：国土地理院」の
   出典表示を必ず入れる。
 
-GIS_MAP_ENABLE=false、または細分区域データ未取得の場合は None を返す。
-タイル取得に全面的に失敗した場合でも、区域線・震源マークのみの画像は
-返す（国土地理院タイルは「あれば表示する」付加情報という位置づけ）。
+GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
+未取得の場合は None を返す。タイル取得に全面的に失敗した場合でも、
+国境データ・区域線・震源マークのみの画像は返す（国土地理院タイルは
+「あれば表示する」付加情報という位置づけ）。
 """
 import asyncio
 import io
 import logging
 import math
 import os
+import threading
 from typing import Optional
 
 import aiohttp
@@ -54,8 +81,10 @@ from core.gis_render import (
     _ready, _rgb_to_rgba, _draw_x_mark,
     get_local_area_shapes,
     _JAPAN_LON_MIN, _JAPAN_LON_MAX, _JAPAN_LAT_MIN, _JAPAN_LAT_MAX,
-    _BOUNDARY_COLOR, _BOUNDARY_WIDTH,
+    _BOUNDARY_COLOR, _BOUNDARY_WIDTH, _LAND_COLOR, _SEA_COLOR,
+    _extract_rings, _rings_bbox, _BBox,
 )
+from core import gis_data
 
 logger = logging.getLogger("QTLBot")
 
@@ -88,6 +117,50 @@ _JP_FONT_CANDIDATES = (
 
 def _tile_cache_path(z: int, x: int, y: int) -> str:
     return os.path.join(GIS_MAP_DATA_DIR, "tiles", str(z), str(x), f"{y}.png")
+
+
+# ===============================
+# 世界の国境データ（countries.geojson、2026-09-17追加）
+# ===============================
+# 国土地理院タイルは日本国内データが中心のため、海外（震源が遠地の場合の
+# 相手国）の陸地についてはタイルが取得できない／内容が薄いことがある。
+# その場合に陸地か海か判別すらできず見づらくなるのを防ぐため、世界の
+# 国境データ（datasets/geo-countries）を背景の下地として使う。日本自体は
+# 自前のGeoJSON（AreaForecastLocalE_GIS）の方が精密なため、この国境
+# データからは除外する（プロパティ name が "Japan" のfeatureをスキップ）。
+_countries_cache: Optional[list] = None
+_countries_lock = threading.Lock()
+
+
+def _get_countries() -> list:
+    """
+    (rings_bbox, rings) のリストを返す（日本を除く）。プロセス内で
+    一度だけパースし、以降はキャッシュを再利用する
+    （core.gis_render._AreaSet と同じ考え方）。
+    """
+    global _countries_cache
+    if _countries_cache is not None:
+        return _countries_cache
+    with _countries_lock:
+        if _countries_cache is not None:
+            return _countries_cache
+        countries = []
+        skipped = 0
+        for feature in gis_data.load_countries():
+            props = feature.get("properties", {}) or {}
+            if props.get("name") == "Japan":
+                continue
+            rings = _extract_rings(feature.get("geometry"), kind="polygon")
+            bbox = _rings_bbox(rings) if rings else None
+            if not rings or bbox is None:
+                skipped += 1
+                continue
+            countries.append((bbox, rings))
+        if skipped:
+            logger.debug(f"GIS地図(海外): geometryが空のため{skipped}件の国をスキップしました")
+        logger.debug(f"GIS地図(海外): 国境データを{len(countries)}件読み込みました（日本を除く）")
+        _countries_cache = countries
+        return _countries_cache
 
 
 def _lonlat_to_mercator_px(lon: float, lat: float, zoom: int) -> tuple[float, float]:
@@ -172,7 +245,10 @@ async def _build_basemap(session: aiohttp.ClientSession, bbox: tuple, zoom: int)
 
     canvas_w = (tile_x_max - tile_x_min + 1) * _TILE_SIZE
     canvas_h = (tile_y_max - tile_y_min + 1) * _TILE_SIZE
-    tile_canvas = Image.new("RGBA", (canvas_w, canvas_h), (235, 235, 235, 255))
+    # 2026-09-17: 取得できなかったタイルは不透明の灰色ではなく透明にし、
+    # 下に敷く国境データ（陸地）・海色のレイヤーが透けて見えるようにする
+    # （国土地理院タイルが海外のデータを持たない場合の見やすさ対策）。
+    tile_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
     sem = asyncio.Semaphore(_TILE_FETCH_CONCURRENCY)
     tasks = []
@@ -275,15 +351,33 @@ def _draw_attribution(draw: ImageDraw.ImageDraw, size: tuple) -> None:
 async def render_overseas_map(session: aiohttp.ClientSession,
                                hypocenter_lonlat: tuple) -> Optional[bytes]:
     """
-    震源が日本国外の場合向け：国土地理院の淡色地図タイルを背景に、日本の
-    細分区域境界線と震源のバツ印を重ね描きしたPNG画像を返す。
+    震源が日本国外の場合向け：国土地理院の淡色地図タイルを背景に、
+    世界の国境データ（日本を除く。countries.geojson）・日本の細分区域
+    境界線・震源のバツ印を重ね描きしたPNG画像を返す。
+
+    レイヤー構成（背面から前面）:
+      1. 海色の背景（_SEA_COLOR。core.gis_renderの独自ベクター地図と
+         共通の配色）
+      2. 世界の国境データ（日本を除く）を陸地色（_LAND_COLOR）で塗り
+         つぶした下地（2026-09-17追加。国土地理院タイルが海外のデータを
+         十分に持たない場合でも、陸地か海かが常に判別できるようにする
+         ための保険。国土地理院タイルが実際に取得できた範囲は3の
+         レイヤーがこの上から完全に覆うため、両方のデータが「二重に」
+         見えることはない）
+      3. 国土地理院タイル（取得できた範囲のみ。失敗したタイルは透明の
+         ままなので、2のレイヤーがそのまま透けて見える）
+      4. 日本の細分区域境界線（塗りつぶしはせず線のみ。日本については
+         3の実際の地図タイルをそのまま見せ、行政区分の参考として線だけ
+         重ねる）
+      5. 震源のバツ印
+      6. 出典表示
 
     hypocenter_lonlat : (経度, 緯度)。震源不明の場合は呼び出し側で判定し、
         このプロパティ自体を呼ばないこと（本関数は必須パラメータとして扱う）。
 
-    GIS_MAP_ENABLE=false、または細分区域データ未取得の場合は None。
-    国土地理院タイルの取得に失敗した場合でも、区域線・震源マークのみの
-    画像を返す（タイルは付加情報という位置づけ）。
+    GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
+    未取得の場合は None。国土地理院タイルの取得に失敗した場合でも、
+    国境データ・区域線・震源マークだけの画像は返す。
     """
     if not _ready():
         return None
@@ -301,13 +395,35 @@ async def render_overseas_map(session: aiohttp.ClientSession,
         lon_min, lon_max, lat_min, lat_max = bbox
         zoom = _choose_zoom(lon_min, lon_max, lat_min, lat_max)
 
-        basemap, (origin_x, origin_y) = await _build_basemap(session, bbox, zoom)
+        tile_layer, (origin_x, origin_y) = await _build_basemap(session, bbox, zoom)
+        canvas_size = tile_layer.size
 
         def project(plon: float, plat: float) -> tuple:
             px, py = _lonlat_to_mercator_px(plon, plat, zoom)
             return px - origin_x, py - origin_y
 
-        overlay = Image.new("RGBA", basemap.size, (0, 0, 0, 0))
+        # 1. 海色の背景
+        composed = Image.new("RGBA", canvas_size, _SEA_COLOR)
+
+        # 2. 世界の国境データ（日本を除く）
+        viewport_bbox = _BBox(lon_min, lon_max, lat_min, lat_max)
+        country_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+        cdraw = ImageDraw.Draw(country_layer)
+        for country_bbox, rings in _get_countries():
+            if not country_bbox.intersects(viewport_bbox):
+                continue
+            for ring in rings:
+                if len(ring) < 3:
+                    continue
+                pts = [project(plon, plat) for plon, plat in ring]
+                cdraw.polygon(pts, fill=_LAND_COLOR)
+        composed = Image.alpha_composite(composed, country_layer)
+
+        # 3. 国土地理院タイル（取得できた範囲のみ。空白は透明なので2が透ける）
+        composed = Image.alpha_composite(composed, tile_layer)
+
+        # 4・5. 日本の区域境界線＋震源マーク
+        overlay = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
         # 日本の細分区域境界線（Web Mercator投影で重ね描き。
@@ -322,7 +438,9 @@ async def render_overseas_map(session: aiohttp.ClientSession,
         warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
         _draw_x_mark(draw, project(lon, lat), warn_rgb)
 
-        composed = Image.alpha_composite(basemap.convert("RGBA"), overlay)
+        composed = Image.alpha_composite(composed, overlay)
+
+        # 6. 出典表示
         _draw_attribution(ImageDraw.Draw(composed), composed.size)
 
         buf = io.BytesIO()
