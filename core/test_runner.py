@@ -349,6 +349,17 @@ TEST_TARGETS = {
         "data_kwarg": "list_item",
         "expected_fields": [],
     },
+    "other_long_period_detail": {
+        # 【2026-09-18追加】気象庁HPから直接ダウンロードした完全な
+        # 詳細JSON（Control/Head/Body形式）専用。other_quake_advisory_detail
+        # と同じ理由（list_item形式は"json"キーのファイル名しか持たず、
+        # 完全な詳細データはHTTPで別途取得する前提のため、フルJSONを
+        # そのまま渡したい場合は detail_data 引数を使う必要がある）。
+        "cog_name": "OtherInfoCog",
+        "method": "notify_long_period",
+        "data_kwarg": "detail_data",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
     "other_quake_advisory": {
         # list_item形式（quake/data/list.jsonの1エントリ。"json"キーで
         # 詳細JSONのファイル名を指すだけの小さい構造）専用。
@@ -591,6 +602,17 @@ def sniff_test_target(data) -> list[str]:
                 # 意図された重複配信（上記と同様の理由で両方提示）
                 matches.append("hypocenter_update")
                 matches.append("other_quake_advisory_detail")
+            elif "長周期地震動" in title_text or isinstance(body.get("Intensity"), dict):
+                # 【2026-09-18追加】長周期地震動に関する観測情報
+                # （Control/Head/Body形式）も Body.Earthquake を持つため、
+                # タイトルが取得できない場合に下のelseへ落ちて
+                # hypocenter_update と誤判定されるバグがあった
+                # （実機テストで発覚：長周期地震動のJSONを渡したのに
+                # 「顕著な地震の震源要素更新のお知らせ」として通知された）。
+                # 長周期地震動データは Body.Intensity（観測情報）を持つ点が
+                # hypocenter_update（震源要素のみ）との構造上の違いのため、
+                # タイトル文字列に加えてこちらでも判定する。
+                matches.append("other_long_period_detail")
             else:
                 # hypocenter_update: cogs/other.py notify_hypocenter_update
                 # （2026-09-01移設。Tsunamiを持たずEarthquakeのみ＝

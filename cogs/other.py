@@ -58,9 +58,10 @@ from core.helpers import format_jma_time, truncate_embed_description, parse_jma_
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
-from core.gis_render import render_shindo_map, is_outside_japan_bbox
+from core.gis_render import render_shindo_map, render_long_period_map, is_outside_japan_bbox
 from core.gis_tile_render import render_overseas_map
 from core.gis_data import ensure_gis_data_ready
+from core.gis_discord import build_gis_message_kwargs
 
 logger = logging.getLogger("QTLBot")
 
@@ -263,7 +264,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         await self.bot.wait_until_ready()
 
 
-    async def notify_long_period(self, list_item, is_test=False, extra_note=None):
+    async def notify_long_period(self, list_item=None, is_test=False, extra_note=None, detail_data=None):
         if not ENABLE_LONG_PERIOD and not is_test:
             return
         channel = self.other_channel or self.channel
@@ -271,15 +272,23 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             return
 
         try:
-            json_filename = list_item.get("json")
-            if not json_filename:
-                return
-
-            detail_url = f"https://www.jma.go.jp/bosai/ltpgm/data/{json_filename}"
-            async with self.session.get(detail_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
-                if resp.status != 200:
+            if detail_data is None:
+                json_filename = list_item.get("json")
+                if not json_filename:
                     return
-                detail = await resp.json()
+
+                detail_url = f"https://www.jma.go.jp/bosai/ltpgm/data/{json_filename}"
+                async with self.session.get(detail_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    if resp.status != 200:
+                        return
+                    detail = await resp.json()
+            else:
+                # 【2026-09-18追加】CLIテスト（core/test_runner.py の
+                # other_long_period_detail）から、気象庁HPで直接ダウン
+                # ロードした完全な詳細JSON（Control/Head/Body形式）を
+                # そのまま渡せるようにするための経路。notify_quake_advisory
+                # の detail_data 引数と同じパターン。
+                detail = detail_data
 
             source = detail.get("Control", {}).get("PublishingOffice", "気象庁")
 
@@ -304,12 +313,14 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                     depth_str = f"{depth_km}km"
 
             lg_groups = defaultdict(list)
+            lg_areas = {}  # {観測点名: 階級文字列}。GIS地図描画用（2026-09-18追加）
             for pref in intensity.get("Pref", []):
                 for area in pref.get("Area", []):
                     area_name = area.get("Name", "")
                     lg_int = area.get("MaxLgInt", "不明")
                     if lg_int != "不明" and area_name:
                         lg_groups[lg_int].append(area_name)
+                        lg_areas[area_name] = lg_int
 
             description = (
                 f"**発表機関： {source}**\n"
@@ -344,22 +355,26 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if footer:
                 embed.set_footer(text=footer)
 
-            # ── GIS地図描画（試験導入、2026-09-17〜） ──
-            # 長周期地震動階級（1〜4）はSHINDO_COLORSの震度スケールとは
-            # 別の尺度のため、地域ごとの色分けは行わず震源のバツ印のみ
-            # 描画する（Destination等、震度情報が無い地震情報と同様の
-            # 扱い）。GIS_MAP_ENABLE=false・外部データ未取得・震源不明
-            # の場合はNoneが返るので、その場合は画像添付自体を省略する。
-            gis_file = None
-            gis_image_bytes = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
-            if gis_image_bytes:
-                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
-                embed.set_image(url="attachment://gis_map.png")
+            # ── GIS地図描画（試験導入、2026-09-17〜。観測点マップは2026-09-18追加） ──
+            # 1枚目: 震源のバツ印マップ（長周期地震動階級はSHINDO_COLORSの
+            # 震度スケールとは別の尺度のため、震源マップ側には地域色分けを
+            # 行わない）。震源が海外の場合は国土地理院タイルに自動切替。
+            # 2枚目: 地震情報向けの観測点座標データ（stations.json）を
+            # 使って、観測点ごとの長周期地震動階級を色分けしたマップ
+            # （render_long_period_map、LG_COLORS使用）。いずれかが
+            # 存在しない/GIS_MAP_ENABLE=falseの場合はNoneが返るので、
+            # その場合は該当する方の画像添付を単に省略する。
+            gis_images = []
+            hypo_map = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
+            if hypo_map:
+                gis_images.append(hypo_map)
+            station_map = render_long_period_map(lg_areas=lg_areas, hypocenter_lonlat=(
+                (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
+            ))
+            if station_map:
+                gis_images.append(station_map)
 
-            if gis_file:
-                await channel.send(embed=embed, file=gis_file)
-            else:
-                await channel.send(embed=embed)
+            await channel.send(**build_gis_message_kwargs(gis_images, embed))
             if not is_test:
                 record_delivery(True, "長周期地震動")
                 record_notification("長周期地震動", "長周期地震動に関する観測情報", hypo_name)
