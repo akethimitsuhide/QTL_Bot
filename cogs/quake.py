@@ -48,7 +48,6 @@ import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
-import io
 import traceback
 from datetime import datetime
 import logging
@@ -72,9 +71,10 @@ from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.quake_history_log import build_quake_record, format_quake_record_log_line
-from core.gis_render import render_shindo_map, is_outside_japan_bbox
+from core.gis_render import render_shindo_map, is_outside_japan_bbox, _STATION_ZOOM_MIN_SHINDO
 from core.gis_tile_render import render_overseas_map
 from core.gis_data import ensure_gis_data_ready
+from core.gis_discord import build_gis_message_kwargs
 
 logger = logging.getLogger("QTLBot")
 
@@ -411,20 +411,17 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         # しか持たないため区域塗りつぶし、それ以外の種別で points が
         # あれば観測点単位（addrが観測点名）とみなしマーカー表示、
         # pointsが無くても震源情報だけあればバツ印のみ描画する。
-        # GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何も無い
-        # 場合は render_shindo_map() が None を返すので、その場合は
+        # 観測点マーカーの場合、震度3以上の観測点があれば拡大表示に
+        # 加えて全観測点を見渡せる通常表示も2枚目として添付する
+        # （2026-09-18追加。_render_quake_gis_map は0〜2枚のPNGを
+        # リストで返す）。GIS_MAP_ENABLE=false・外部データ未取得・
+        # 描画対象が何も無い場合は空リストになるので、その場合は
         # 画像添付自体を単に省略する（通知本体の送信は妨げない）。
-        gis_image_bytes = await self._render_quake_gis_map(issue_type, points, latitude, longitude)
-        gis_file = None
-        if gis_image_bytes:
-            gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
-            embed.set_image(url="attachment://gis_map.png")
+        gis_images = await self._render_quake_gis_map(issue_type, points, latitude, longitude)
+        send_kwargs = build_gis_message_kwargs(gis_images, embed)
 
         try:
-            if gis_file:
-                await channel.send(embed=embed, file=gis_file)
-            else:
-                await channel.send(embed=embed)
+            await channel.send(**send_kwargs)
         except Exception as e:
             # notify_quake は他のCogと異なりメソッド全体を包むtry/exceptを
             # 持たない設計のため、送信箇所をピンポイントでtry/exceptし、
@@ -582,34 +579,42 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             if self._should_play_ews(eq, hypo, dom_tsunami):
                 await self._play_ews_signal(dom_tsunami)
 
-    async def _render_quake_gis_map(self, issue_type: str, points: list, latitude, longitude) -> bytes | None:
+    async def _render_quake_gis_map(self, issue_type: str, points: list, latitude, longitude) -> list:
         """
-        地震情報通知向けのGIS地図画像（PNG bytes）を生成する
-        （GIS地図描画機能、試験導入。core/gis_render.py参照）。
+        地震情報通知向けのGIS地図画像（PNG bytes）のリストを生成する
+        （GIS地図描画機能、試験導入。core/gis_render.py参照）。0〜2枚を
+        返す（呼び出し側は core.gis_discord.build_gis_message_kwargs()
+        にそのまま渡せばよい）。
 
         - issue_type == "ScalePrompt"（震度速報）: points は区域単位
           （addrが core.gis_data の local_areas.geojson の区域名と一致
-          する想定）のため、区域を震度で塗りつぶす。
+          する想定）のため、区域を震度で塗りつぶす（1枚のみ）。
         - それ以外の種別で points があれば、観測点単位（addrが
           stations.json の観測点名と一致する想定）とみなし、観測点
-          ごとのマーカーを描画する。
+          ごとのマーカーを描画する。震度3以上の観測点が1件でもあれば、
+          その周辺への拡大表示（1枚目）に加えて、震度3未満の場合と
+          同じ拡大縮小方法（全観測点を見渡せる通常表示）の画像も
+          2枚目として添付する（2026-09-18追加。「拡大表示しか無く
+          全体像が分かりにくい」との指摘のため。震度3以上の観測点が
+          無い場合は両者が同じ画像になるため1枚のみ返す）。
         - points が無くても、震源の緯度経度が有効であればバツ印のみの
           地図を返す（震度分布が不明な情報種別＝Destination等向け）。
         - 震源が日本国外（遠地地震に関する情報＝Foreign 等）の場合は、
           core.gis_render の日本限定ベクター地図では震源位置を表現
           できないため、国土地理院タイルとの重ね合わせ表示
           （core.gis_tile_render.render_overseas_map）に切り替える
-          （2026-09-15追加）。
+          （2026-09-15追加。この場合は1枚のみ）。
 
         GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何もない
-        場合は None（core.gis_render.render_shindo_map 参照）。
+        場合は空リストを返す（core.gis_render.render_shindo_map 参照）。
         """
         hypo_lonlat = None
         if latitude != -200 and longitude != -200:
             hypo_lonlat = (longitude, latitude)
 
         if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
-            return await render_overseas_map(self.session, hypo_lonlat)
+            overseas = await render_overseas_map(self.session, hypo_lonlat)
+            return [overseas] if overseas else []
 
         region_shindo = None
         station_shindo = None
@@ -624,12 +629,27 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             else:
                 station_shindo = shindo_map
 
-        return render_shindo_map(
+        primary = render_shindo_map(
             region_shindo=region_shindo,
             station_shindo=station_shindo,
             hypocenter_lonlat=hypo_lonlat,
             show_region_icons=(issue_type == "ScalePrompt"),
         )
+        images = [primary] if primary else []
+
+        has_strong_station = station_shindo and any(
+            code >= _STATION_ZOOM_MIN_SHINDO for code in station_shindo.values()
+        )
+        if has_strong_station:
+            normal_view = render_shindo_map(
+                station_shindo=station_shindo,
+                hypocenter_lonlat=hypo_lonlat,
+                station_zoom_priority=False,
+            )
+            if normal_view:
+                images.append(normal_view)
+
+        return images
 
     def _should_play_ews(self, eq: dict, hypo: dict, dom_tsunami: str) -> bool:
         """

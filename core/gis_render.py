@@ -78,7 +78,7 @@ from core.config import (
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
     TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_UNKNOWN,
 )
-from core.constants import SHINDO_COLORS
+from core.constants import SHINDO_COLORS, LG_COLORS
 from core.helpers import shindo_short_label
 from core import gis_data
 
@@ -816,6 +816,7 @@ def render_shindo_map(
     hypocenter_lonlat: Optional[tuple[float, float]] = None,
     is_plum: bool = False,
     show_region_icons: bool = False,
+    station_zoom_priority: bool = True,
 ) -> Optional[bytes]:
     """
     緊急地震速報（予報）・地震情報向け：地域ごとの震度色分け塗りつぶし、
@@ -836,6 +837,14 @@ def render_shindo_map(
         （2026-09-16追加。震度速報＝ScalePromptは塗りつぶしだけでは
         震度が分かりにくいとの指摘のため。QuakeInfoCogがScalePrompt
         判定時のみTrueを渡す想定。EEW予報側は今のところFalseのまま）。
+    station_zoom_priority : True（デフォルト）の場合、震度3以上の観測点が
+        あればその周辺だけに表示範囲を絞る（_STATION_ZOOM_MIN_SHINDO
+        参照）。False を渡すと、この優先ズームを行わず常に station_shindo
+        の全観測点を表示範囲の計算対象にする（2026-09-18追加。「各地の
+        震度に関する情報」で、拡大表示に加えて全観測点を見渡せる通常
+        表示の画像も併せて見たいとの要望のため。呼び出し側で
+        station_zoom_priority=True/False の2回呼び出し、2枚を添付する
+        想定。region_shindo・PLUM法には影響しない）。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -885,7 +894,10 @@ def render_shindo_map(
             station_points_all.append((lon, lat))
             if code >= _STATION_ZOOM_MIN_SHINDO:
                 station_points_strong.append((lon, lat))
-        viewport_points.extend(station_points_strong or station_points_all)
+        if station_zoom_priority:
+            viewport_points.extend(station_points_strong or station_points_all)
+        else:
+            viewport_points.extend(station_points_all)
 
         viewport = _compute_viewport(viewport_points)
         width, height = _dimensions_for_bbox(viewport)
@@ -986,4 +998,82 @@ def render_tsunami_map(area_grades: dict) -> Optional[bytes]:
             return _finalize(canvas, (width, height))
     except Exception:
         logger.error("GIS地図(津波)描画エラー", exc_info=True)
+        return None
+
+
+def render_long_period_map(
+    lg_areas: Optional[dict] = None,
+    hypocenter_lonlat: Optional[tuple[float, float]] = None,
+) -> Optional[bytes]:
+    """
+    長周期地震動に関する観測情報向け：観測点ごとの長周期地震動階級
+    （"1"〜"4"）を色分けしたマーカー地図を返す（2026-09-18追加）。
+
+    長周期地震動階級は震度スケール（core.constants.SHINDO_COLORS、
+    10,20,...,70）とは別の尺度・配色（core.constants.LG_COLORS、
+    "1"〜"4"の文字列キー）のため、render_shindo_map とは別関数にして
+    いる（観測点の描画自体は同じ _get_stations() / stations.json を
+    使うが、色とラベルの意味が異なるため共通化はしない）。
+
+    lg_areas          : {観測点名(stations.jsonのname): 階級文字列("1"〜"4")}
+        cogs/other.py の notify_long_period が、地震情報向けの観測点
+        座標データ（stations.json）と同じ名前解決で観測点名を渡す想定。
+    hypocenter_lonlat  : (経度, 緯度)。震源不明の場合は None
+
+    GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
+    """
+    if not _ready():
+        return None
+    try:
+        stations = _get_stations()
+        matched = {}
+        missing = 0
+        for name, level in (lg_areas or {}).items():
+            if name in stations:
+                matched[name] = level
+            else:
+                missing += 1
+        if missing:
+            logger.debug(f"GIS地図(長周期地震動): stations.jsonに見つからない観測点を{missing}件スキップしました")
+
+        hypo_points = _hypocenter_point(hypocenter_lonlat)
+        if not matched and not hypo_points:
+            return None
+
+        viewport_points = list(hypo_points)
+        for name in matched:
+            lat, lon = stations[name]
+            viewport_points.append((lon, lat))
+        viewport = _compute_viewport(viewport_points)
+        width, height = _dimensions_for_bbox(viewport)
+
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
+
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            _draw_land_fill(draw, _local_areas, projector, viewport)
+            _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+
+            half = _px(_STATION_MARKER_SIZE) / 2
+            font = _font(max(_STATION_MARKER_SIZE, 11))
+            # 階級が大きい観測点ほど前面に描画する（観測点マーカーと同じ考え方）
+            for name, level in sorted(matched.items(), key=lambda item: item[1]):
+                lat, lon = stations[name]
+                x, y = projector.project(lon, lat)
+                color_hex = LG_COLORS.get(level, LG_COLORS["不明"])
+                rgb = _rgb_to_rgba(color_hex)[:3]
+                draw.rectangle([x - half, y - half, x + half, y + half],
+                                fill=rgb, outline=(40, 40, 40, 255), width=_px(1))
+                draw.text((x, y), level, fill=(20, 20, 20, 255), font=font, anchor="mm")
+
+            if hypo_points:
+                lon, lat = hypo_points[0]
+                warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
+                _draw_hypocenter(draw, lon, lat, False, warn_rgb, projector)
+
+            return _finalize(canvas, (width, height))
+    except Exception:
+        logger.error("GIS地図(長周期地震動)描画エラー", exc_info=True)
         return None
