@@ -34,6 +34,7 @@ import discord
 from discord.ext import commands, tasks
 import aiohttp
 import asyncio
+import io
 import traceback
 import time
 from datetime import datetime
@@ -51,6 +52,9 @@ from core.config import (
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.gis_render import render_shindo_map, is_outside_japan_bbox
+from core.gis_tile_render import render_overseas_map
+from core.gis_data import ensure_gis_data_ready
 
 logger = logging.getLogger("QTLBot")
 
@@ -126,6 +130,7 @@ class UsgsCog(commands.Cog, AudioMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("UsgsCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "UsgsCog")
 
     async def cog_unload(self):
         if self.fetch_usgs_quake.is_running():
@@ -371,8 +376,29 @@ class UsgsCog(commands.Cog, AudioMixin):
             # USGS リンク
             usgs_url = f"https://earthquake.usgs.gov/earthquakes/eventpage/{event_id}/executive/"
             embed.add_field(name="詳細情報", value=f"[USGS]({usgs_url})", inline=False)
-            
-            await channel.send(embed=embed)
+
+            # ── GIS地図描画（試験導入、2026-09-18〜） ──
+            # USGSの震源はGeoJSON標準の[経度,緯度,深さ]順で既に得られて
+            # いるため、座標文字列のパースは不要。USGSはそもそも世界中の
+            # 地震を対象とするため、震源が日本国内／近海の場合は通常の
+            # ベクター地図、日本国外の場合は国土地理院タイル＋国境データ
+            # の重ね合わせに自動で切り替わる（cogs/other.pyの
+            # _render_hypocenter_gis_map と同じ判定方法）。
+            gis_file = None
+            gis_image_bytes = None
+            if lon is not None and lat is not None:
+                if is_outside_japan_bbox(lon, lat):
+                    gis_image_bytes = await render_overseas_map(self.session, (lon, lat))
+                else:
+                    gis_image_bytes = render_shindo_map(hypocenter_lonlat=(lon, lat))
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
             record_delivery(True, "USGS")
             record_notification("USGS", title, place)
             
