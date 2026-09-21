@@ -59,6 +59,7 @@ from core.config import (
     ENABLE_KYOSHIN,
     QUAKE_HISTORY_DEFAULT_LIMIT, QUAKE_HISTORY_CACHE_TTL_SEC,
     DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_ID,
+    GIS_MAP_ENABLE,
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
@@ -66,6 +67,7 @@ from core.notification_log import load_notification_history
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
 from core.eew_history_log import load_eew_history, display_record as display_eew_record
+from core import gis_data
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -535,6 +537,19 @@ L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
   attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>',
   maxZoom: 18,
 }).addTo(map);
+
+// 【2026-09-18追加】保存済みの細分区域GeoJSON（GIS地図描画機能で
+// キャッシュ済みのもの）があれば、区域境界線をうっすら重ね描きする。
+// GIS_MAP_ENABLE=false・GeoJSON未取得の場合は404が返り、その場合は
+// 何もせず従来通り（区域境界線なし）の地図のまま動作する。
+fetch('/status/gis_local_areas')
+  .then(r => { if (!r.ok) throw new Error('not available'); return r.json(); })
+  .then(features => {
+    L.geoJSON(features, {
+      style: { color: '#6e6e6e', weight: 1, fillOpacity: 0, interactive: false },
+    }).addTo(map);
+  })
+  .catch(() => { /* GeoJSON未取得時は何もしない（従来通りの地図のまま） */ });
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -1881,6 +1896,31 @@ class SystemCog(commands.Cog):
             """
             return web.Response(text=_QUAKE_MAP_HTML, content_type="text/html")
 
+        async def gis_local_areas_handler(request):
+            """
+            GET /status/gis_local_areas - GIS地図描画機能（試験導入）用に
+            キャッシュ済みの細分区域GeoJSON（AreaForecastLocalE_GIS）の
+            features配列をそのまま返す（2026-09-18追加）。
+
+            /quake_map ページが、区域境界線をLeaflet上に重ね描きする
+            オプション表示に使う。GIS_MAP_ENABLE=false、またはキャッシュ
+            未取得（core/gis_data.pyがまだダウンロードしていない）の場合は
+            404を返す。ブラウザ側はこれを「使えない」扱いにして、従来通り
+            区域境界線なしの地図（マーカーのみ）を表示すればよい
+            （保存されているGeoJSONがあればそれを使い、無ければ従来通りの
+            Web地図のまま、という要件のための切り替え）。
+            """
+            if not GIS_MAP_ENABLE:
+                return web.json_response({"error": "GIS_MAP_ENABLE is false"}, status=404)
+            try:
+                features = gis_data.load_local_areas()
+            except Exception as e:
+                logger.error(f"/status/gis_local_areas エラー: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+            if not features:
+                return web.json_response({"error": "local_areas.geojson not cached yet"}, status=404)
+            return web.json_response(features)
+
         async def dashboard_handler(request):
             """
             GET /dashboard - システムリソース・受信件数の推移をグラフ表示
@@ -1900,6 +1940,7 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status/quake_history", quake_history_handler)
             self._web_app.router.add_get("/status/eew_history", eew_history_handler)
             self._web_app.router.add_get("/quake_map", quake_map_handler)
+            self._web_app.router.add_get("/status/gis_local_areas", gis_local_areas_handler)
             self._web_app.router.add_get("/dashboard", dashboard_handler)
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
