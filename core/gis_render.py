@@ -184,6 +184,12 @@ _HYPO_MARK_SIZE = 10                      # 震源バツ印（赤）の半径（
 _HYPO_MARK_WIDTH = 3                       # 震源バツ印（赤）の線の太さ（px）
 _HYPO_MARK_OUTLINE_PAD = 3                 # 白フチのバツ印を赤バツ印より一回り大きくする分（px）
 _HYPO_MARK_OUTLINE_EXTRA_WIDTH = 4         # 白フチのバツ印の線の太さを赤バツ印より太くする分（px）
+# EEW地図の震源バツ印の拡大率（2026-09-22追加。「バツ印が見づらい」との
+# 指摘を受け、現行の1.5〜2倍程度に拡大。表示範囲の広さに応じて連続的に
+# 変え、日本全体表示で _EEW_MARK_SCALE_MIN、最大ズーム
+# （_VIEWPORT_MIN_SPAN_DEG四方）で _EEW_MARK_SCALE_MAX になる）。
+_EEW_MARK_SCALE_MIN = 1.5
+_EEW_MARK_SCALE_MAX = 2.0
 _PLUM_OUTER_R = 14                        # PLUM法ドーナツの外半径（px）
 _PLUM_INNER_R = 7                         # PLUM法ドーナツの内半径（px）
 _PLUM_HALO_PAD = 4                        # ドーナツの白フチの余白（px）
@@ -589,7 +595,8 @@ def _draw_line_highlight(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector
         draw.line(pts, fill=rgb_color, width=_px(_TSUNAMI_LINE_WIDTH), joint="curve")
 
 
-def _draw_x_mark(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: tuple) -> None:
+def _draw_x_mark(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: tuple,
+                 scale: float = 1.0) -> None:
     """
     震源のバツ印を描く。2026-09-17: 「警察署の地図記号のよう」との
     指摘を受け、白い丸フチ（_HALO_COLORの円）を敷く方式から、
@@ -599,10 +606,12 @@ def _draw_x_mark(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_color: 
     赤いバツ印の輪郭に沿った白い縁取りとして見えるようにしている。
     """
     x, y = xy
-    s = _px(_HYPO_MARK_SIZE)
-    s_outline = _px(_HYPO_MARK_SIZE + _HYPO_MARK_OUTLINE_PAD)
-    outline_width = _px(_HYPO_MARK_WIDTH + _HYPO_MARK_OUTLINE_EXTRA_WIDTH)
-    red_width = _px(_HYPO_MARK_WIDTH)
+    # scale: バツ印全体（大きさ・線幅・白フチ）の拡大率。既定1.0は従来と同じ
+    # （2026-09-22追加。EEW地図が表示範囲に応じた拡大率を渡す）。
+    s = _px(_HYPO_MARK_SIZE * scale)
+    s_outline = _px((_HYPO_MARK_SIZE + _HYPO_MARK_OUTLINE_PAD) * scale)
+    outline_width = _px((_HYPO_MARK_WIDTH + _HYPO_MARK_OUTLINE_EXTRA_WIDTH) * scale)
+    red_width = _px(_HYPO_MARK_WIDTH * scale)
 
     # 白フチのバツ印（一回り大きく・太め、背面）
     draw.line([(x - s_outline, y - s_outline), (x + s_outline, y + s_outline)],
@@ -631,7 +640,8 @@ def _draw_plum_donut(draw: ImageDraw.ImageDraw, xy: tuple[float, float], rgb_col
 
 
 def _draw_hypocenter(draw: ImageDraw.ImageDraw, lon: Optional[float], lat: Optional[float],
-                      is_plum: bool, rgb_color: tuple, projector: _Projector) -> None:
+                      is_plum: bool, rgb_color: tuple, projector: _Projector,
+                      mark_scale: float = 1.0) -> None:
     if lon is None or lat is None:
         return
     if lon <= -180 or lat <= -90:  # -200等のダミー値（震源不明）を弾く
@@ -640,7 +650,28 @@ def _draw_hypocenter(draw: ImageDraw.ImageDraw, lon: Optional[float], lat: Optio
     if is_plum:
         _draw_plum_donut(draw, xy, rgb_color)
     else:
-        _draw_x_mark(draw, xy, rgb_color)
+        _draw_x_mark(draw, xy, rgb_color, scale=mark_scale)
+
+
+def _zoom_mark_scale(viewport: _BBox) -> float:
+    """
+    表示範囲（自動ズーム後）の広さに応じた震源バツ印の拡大率を返す
+    （2026-09-22追加。EEW地図用）。日本全体を表示しているときは
+    _EEW_MARK_SCALE_MIN、_VIEWPORT_MIN_SPAN_DEG 四方まで拡大した
+    ときは _EEW_MARK_SCALE_MAX、その間は表示範囲の対数に比例して
+    連続的に変化する。
+    """
+    full_lon = _JAPAN_LON_MAX - _JAPAN_LON_MIN
+    full_lat = _JAPAN_LAT_MAX - _JAPAN_LAT_MIN
+    frac = max(
+        (viewport.lon_max - viewport.lon_min) / full_lon,
+        (viewport.lat_max - viewport.lat_min) / full_lat,
+    )
+    frac = min(max(frac, 1e-6), 1.0)
+    frac_min = _VIEWPORT_MIN_SPAN_DEG / full_lon
+    t = math.log(1.0 / frac) / math.log(1.0 / frac_min)
+    t = min(max(t, 0.0), 1.0)
+    return _EEW_MARK_SCALE_MIN + (_EEW_MARK_SCALE_MAX - _EEW_MARK_SCALE_MIN) * t
 
 
 def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: int,
@@ -802,7 +833,8 @@ def render_eew_warn_map(
 
             if hypo_points:
                 lon, lat = hypo_points[0]
-                _draw_hypocenter(draw, lon, lat, is_plum, border_rgb, projector)
+                _draw_hypocenter(draw, lon, lat, is_plum, border_rgb, projector,
+                                 mark_scale=_zoom_mark_scale(viewport))
 
             return _finalize(canvas, (width, height))
     except Exception:
@@ -817,6 +849,7 @@ def render_shindo_map(
     is_plum: bool = False,
     show_region_icons: bool = False,
     station_zoom_priority: bool = True,
+    enlarge_hypocenter_mark: bool = False,
 ) -> Optional[bytes]:
     """
     緊急地震速報（予報）・地震情報向け：地域ごとの震度色分け塗りつぶし、
@@ -845,6 +878,10 @@ def render_shindo_map(
         表示の画像も併せて見たいとの要望のため。呼び出し側で
         station_zoom_priority=True/False の2回呼び出し、2枚を添付する
         想定。region_shindo・PLUM法には影響しない）。
+    enlarge_hypocenter_mark : True の場合、震源のバツ印を表示範囲に応じて
+        1.5〜2.0倍に拡大する（_zoom_mark_scale。2026-09-22追加。EEWの
+        地図用。地震情報の地図は従来の大きさのままとするため既定は
+        False）。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -926,7 +963,10 @@ def render_shindo_map(
             if hypo_points:
                 lon, lat = hypo_points[0]
                 warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
-                _draw_hypocenter(draw, lon, lat, is_plum, warn_rgb, projector)
+                _draw_hypocenter(
+                    draw, lon, lat, is_plum, warn_rgb, projector,
+                    mark_scale=_zoom_mark_scale(viewport) if enlarge_hypocenter_mark else 1.0,
+                )
 
             return _finalize(canvas, (width, height))
     except Exception:
@@ -1002,7 +1042,7 @@ def render_tsunami_map(area_grades: dict) -> Optional[bytes]:
 
 
 def render_long_period_map(
-    lg_areas: Optional[dict] = None,
+    lg_stations: Optional[list] = None,
     hypocenter_lonlat: Optional[tuple[float, float]] = None,
 ) -> Optional[bytes]:
     """
@@ -1012,38 +1052,47 @@ def render_long_period_map(
     長周期地震動階級は震度スケール（core.constants.SHINDO_COLORS、
     10,20,...,70）とは別の尺度・配色（core.constants.LG_COLORS、
     "1"〜"4"の文字列キー）のため、render_shindo_map とは別関数にして
-    いる（観測点の描画自体は同じ _get_stations() / stations.json を
-    使うが、色とラベルの意味が異なるため共通化はしない）。
+    いる（マーカーの見た目は同じだが、色とラベルの意味が異なるため
+    共通化はしない）。
 
-    lg_areas          : {観測点名(stations.jsonのname): 階級文字列("1"〜"4")}
-        cogs/other.py の notify_long_period が、地震情報向けの観測点
-        座標データ（stations.json）と同じ名前解決で観測点名を渡す想定。
+    lg_stations       : [{"lat": 緯度, "lon": 経度, "level": 階級文字列("1"〜"4")}, ...]
+        cogs/other.py の notify_long_period が、観測情報JSONの
+        Body.Intensity.Observation...IntensityStation[]（Name/LgInt/latlon）
+        から組み立てて渡す。
+
+        【2026-09-22 修正】以前は {観測点名: 階級} を受け取り、座標を
+        stations.json（地震情報の観測点一覧）の名前引きで得ていたが、
+        呼び出し側が渡していたのは観測点名ではなく「地域名」
+        （埼玉県南部 等）だったため1件も一致せず、観測点が描画されない
+        （震源のバツ印だけの、1枚目と同一の画像になる）不具合があった。
+        観測情報JSONの各観測点には latlon（座標）が含まれているため、
+        名前引きをやめて座標を直接受け取る方式に変更した
+        （stations.json の観測点名と表記が一致しない場合の取りこぼしも
+        無くなる）。
     hypocenter_lonlat  : (経度, 緯度)。震源不明の場合は None
 
-    GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
+    描画できる観測点が1件も無い場合は None を返す（震源だけの地図は
+    呼び出し側が別途描画する1枚目と重複するため作らない）。
+    GIS_MAP_ENABLE=false、または外部データ未取得の場合も None を返す。
     """
     if not _ready():
         return None
     try:
-        stations = _get_stations()
-        matched = {}
-        missing = 0
-        for name, level in (lg_areas or {}).items():
-            if name in stations:
-                matched[name] = level
-            else:
-                missing += 1
-        if missing:
-            logger.debug(f"GIS地図(長周期地震動): stations.jsonに見つからない観測点を{missing}件スキップしました")
-
-        hypo_points = _hypocenter_point(hypocenter_lonlat)
-        if not matched and not hypo_points:
+        valid = []
+        for st in lg_stations or []:
+            try:
+                lat, lon = float(st["lat"]), float(st["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            level = str(st.get("level", "")).strip()
+            if not level or level == "不明":
+                continue
+            valid.append((lon, lat, level))
+        if not valid:
             return None
 
-        viewport_points = list(hypo_points)
-        for name in matched:
-            lat, lon = stations[name]
-            viewport_points.append((lon, lat))
+        hypo_points = _hypocenter_point(hypocenter_lonlat)
+        viewport_points = list(hypo_points) + [(lon, lat) for lon, lat, _ in valid]
         viewport = _compute_viewport(viewport_points)
         width, height = _dimensions_for_bbox(viewport)
 
@@ -1059,8 +1108,7 @@ def render_long_period_map(
             half = _px(_STATION_MARKER_SIZE) / 2
             font = _font(max(_STATION_MARKER_SIZE, 11))
             # 階級が大きい観測点ほど前面に描画する（観測点マーカーと同じ考え方）
-            for name, level in sorted(matched.items(), key=lambda item: item[1]):
-                lat, lon = stations[name]
+            for lon, lat, level in sorted(valid, key=lambda item: item[2]):
                 x, y = projector.project(lon, lat)
                 color_hex = LG_COLORS.get(level, LG_COLORS["不明"])
                 rgb = _rgb_to_rgba(color_hex)[:3]

@@ -313,14 +313,26 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                     depth_str = f"{depth_km}km"
 
             lg_groups = defaultdict(list)
-            lg_areas = {}  # {観測点名: 階級文字列}。GIS地図描画用（2026-09-18追加）
+            # GIS地図（観測点マップ）用の観測点リスト [{"lat","lon","level"}]。
+            # 【2026-09-22 修正】以前は地域名（Area.Name）と地域の最大階級を
+            # 「観測点名→階級」として渡していたため、stations.json の名前引きで
+            # 1件も一致せず観測点が描画されなかった。観測情報JSONの
+            # IntensityStation[]（Name/LgInt/latlon）から、座標ごと直接組み立てる。
+            lg_stations = []
             for pref in intensity.get("Pref", []):
                 for area in pref.get("Area", []):
                     area_name = area.get("Name", "")
                     lg_int = area.get("MaxLgInt", "不明")
                     if lg_int != "不明" and area_name:
                         lg_groups[lg_int].append(area_name)
-                        lg_areas[area_name] = lg_int
+                    for st in area.get("IntensityStation", []) or []:
+                        latlon = st.get("latlon") or {}
+                        st_lg = st.get("LgInt")
+                        if st_lg in (None, "") or "lat" not in latlon or "lon" not in latlon:
+                            continue
+                        lg_stations.append({
+                            "lat": latlon["lat"], "lon": latlon["lon"], "level": str(st_lg),
+                        })
 
             description = (
                 f"**発表機関： {source}**\n"
@@ -359,16 +371,17 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             # 1枚目: 震源のバツ印マップ（長周期地震動階級はSHINDO_COLORSの
             # 震度スケールとは別の尺度のため、震源マップ側には地域色分けを
             # 行わない）。震源が海外の場合は国土地理院タイルに自動切替。
-            # 2枚目: 地震情報向けの観測点座標データ（stations.json）を
-            # 使って、観測点ごとの長周期地震動階級を色分けしたマップ
-            # （render_long_period_map、LG_COLORS使用）。いずれかが
-            # 存在しない/GIS_MAP_ENABLE=falseの場合はNoneが返るので、
-            # その場合は該当する方の画像添付を単に省略する。
+            # 2枚目: 観測情報JSON内の観測点座標（IntensityStation[].latlon）
+            # を使って、観測点ごとの長周期地震動階級を色分けしたマップ
+            # （render_long_period_map、LG_COLORS使用。2026-09-22に
+            # stations.json 依存から変更）。いずれかが存在しない/
+            # GIS_MAP_ENABLE=falseの場合はNoneが返るので、その場合は
+            # 該当する方の画像添付を単に省略する。
             gis_images = []
             hypo_map = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
             if hypo_map:
                 gis_images.append(hypo_map)
-            station_map = render_long_period_map(lg_areas=lg_areas, hypocenter_lonlat=(
+            station_map = render_long_period_map(lg_stations=lg_stations, hypocenter_lonlat=(
                 (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
             ))
             if station_map:
