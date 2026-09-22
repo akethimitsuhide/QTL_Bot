@@ -37,7 +37,6 @@ cogs/quake.py の QuakeInfoCog が別Cogとして扱う。
 import discord
 from discord.ext import commands
 import aiohttp
-import io
 import json
 import asyncio
 import traceback
@@ -55,6 +54,7 @@ from core.config import (
 from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP, collapse_regions_if_needed
 from core.helpers import (
     safe_int, safe_float, safe_bool, truncate_embed_description,
+    shindo_code_from_max_label,
 )
 from core.audio import AudioClientMixin
 from core.notification_log import record_notification
@@ -67,10 +67,11 @@ from core.eew_convert import (
 )
 from core.gis_render import render_eew_warn_map, render_shindo_map
 from core.gis_data import ensure_gis_data_ready
+from core.gis_discord import build_gis_message_kwargs
 from core.ws_helpers import ws_connect_loop
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
-    estimate_max_shindo_from_image,
+    estimate_max_shindo_from_image, vibration_tier, VIBRATION_TIER_MP3,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -450,7 +451,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                         any_warn = True
                         # 複数EEW中、警報が発表されているものの予想最大震度の
                         # うち最も大きい値を注意喚起文の判定に使う（安全側）。
-                        warn_code = next((k for k, v in INT_MAP.items() if v == max_int), None)
+                        warn_code = shindo_code_from_max_label(max_int)
                         if warn_code is not None and (
                             max_warn_shindo_code is None or warn_code > max_warn_shindo_code
                         ):
@@ -522,7 +523,9 @@ class EewCog(commands.Cog, AudioClientMixin):
                 depth = safe_int(depth_str)
 
             max_int_str = data.get("MaxIntensity", "不明")
-            max_int_val = next((k for k, v in INT_MAP.items() if v == max_int_str), None)
+            # 「5弱以上」等、末尾に「以上」が付く表記（P2Pの scaleTo=99 由来）も
+            # 元の階級のコードとして扱う（2026-09-22。色・注意喚起文の取りこぼし防止）
+            max_int_val = shindo_code_from_max_label(max_int_str)
             color = SHINDO_COLORS.get(max_int_val, 0x62626B)
 
             embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
@@ -594,33 +597,41 @@ class EewCog(commands.Cog, AudioClientMixin):
             lon = data.get("Longitude", -200)
             hypo_lonlat = (lon, lat) if lat != -200 and lon != -200 else None
 
+            #
+            # 【2026-09-22 変更】警報（isWarn）の場合は、発表地域の地図に
+            # 加えて、地域ごとの予想震度の地図（予報と同じ描画）も2枚目として
+            # 添付する。震源のバツ印は表示範囲に応じて1.5〜2.0倍に拡大して
+            # 描画する（enlarge_hypocenter_mark / core.gis_render._zoom_mark_scale）。
+            region_shindo = (
+                build_region_shindo_map(warn_areas, INT_MAP, is_assumption=is_plum)
+                if warn_areas else None
+            )
+            gis_images = []
             if data.get("isWarn"):
-                gis_image_bytes = render_eew_warn_map(
+                gis_images.append(render_eew_warn_map(
                     warn_region_names=cumulative_warn_areas,
                     hypocenter_lonlat=hypo_lonlat,
                     is_plum=is_plum,
-                )
+                ))
+                # 地域別震度が無い場合、render_shindo_map は震源のみの地図に
+                # なり1枚目と重複するため、描画自体を行わない。
+                if region_shindo:
+                    gis_images.append(render_shindo_map(
+                        region_shindo=region_shindo,
+                        hypocenter_lonlat=hypo_lonlat,
+                        is_plum=is_plum,
+                        enlarge_hypocenter_mark=True,
+                    ))
             else:
-                region_shindo = (
-                    build_region_shindo_map(warn_areas, INT_MAP, is_assumption=is_plum)
-                    if warn_areas else None
-                )
-                gis_image_bytes = render_shindo_map(
+                gis_images.append(render_shindo_map(
                     region_shindo=region_shindo,
                     hypocenter_lonlat=hypo_lonlat,
                     is_plum=is_plum,
-                )
-
-            gis_file = None
-            if gis_image_bytes:
-                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
-                embed.set_image(url="attachment://gis_map.png")
+                    enlarge_hypocenter_mark=True,
+                ))
 
             try:
-                if gis_file:
-                    await channel.send(embed=embed, file=gis_file)
-                else:
-                    await channel.send(embed=embed)
+                await channel.send(**build_gis_message_kwargs(gis_images, embed))
             except Exception as e:
                 record_delivery(False, "EEW", str(e))
                 raise
@@ -728,7 +739,10 @@ class EewCog(commands.Cog, AudioClientMixin):
         self.last_eew_data = data.copy()
 
     def _is_intensity_changed_significantly(self, prev: str, current: str) -> bool:
-        order = ["不明", "1", "2", "3", "4", "5弱", "推定5弱以上", "5強", "6弱", "6強", "7", "7以上"]
+        order = [
+            "不明", "1", "2", "3", "4", "5弱", "推定5弱以上", "5弱以上",
+            "5強", "5強以上", "6弱", "6弱以上", "6強", "6強以上", "7", "7以上",
+        ]
         try:
             idx_prev = order.index(prev)
             idx_cur = order.index(current)
@@ -799,8 +813,8 @@ class EewCog(commands.Cog, AudioClientMixin):
             logger.debug(f"音声: high_alert (地域数: {len(current_warn_areas)})")
             return
 
-        int3_or_higher = ["3", "4", "5弱", "5強", "6弱", "6強", "7", "推定5弱以上"]
-        if not is_warn and max_int_str in int3_or_higher:
+        max_int_code = shindo_code_from_max_label(max_int_str)
+        if not is_warn and max_int_code is not None and max_int_code >= 30:
             if not audio_flags.get("int3"):
                 await self.play_mp3("eew3")
                 audio_flags["int3"] = True
@@ -856,18 +870,11 @@ class EewCog(commands.Cog, AudioClientMixin):
                 jma_s_url, lmoni_url = await image_fetcher.fetch_urls(self.session)
 
                 if level is not None:
-                    if level >= 2000:
-                        cur_tier = 3
-                    elif level >= 1000:
-                        cur_tier = 2
-                    elif level >= 100:
-                        cur_tier = 1
-                    else:
-                        cur_tier = 0
+                    cur_tier = vibration_tier(level)
                     if cur_tier != _prev_vib_tier:
                         logger.info(f"振動レベル tier 変化: {_prev_vib_tier} → {cur_tier} (level={level})")
                         _prev_vib_tier = cur_tier
-                    mp3_key = {3: "lv2000", 2: "lv1000", 1: "lv100"}.get(cur_tier)
+                    mp3_key = VIBRATION_TIER_MP3.get(cur_tier)
                     if mp3_key:
                         await self.play_mp3(mp3_key)
                         logger.debug(f"振動レベル MP3 再生: {mp3_key} (level={level})")

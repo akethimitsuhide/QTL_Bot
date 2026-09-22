@@ -168,6 +168,26 @@ def shindo_code_from_label(label: str) -> int:
     return _SHINDO_LABEL_TO_CODE.get(label, -1)
 
 
+def shindo_code_from_max_label(label: str) -> int | None:
+    """
+    EEWの「予想最大震度」表示文字列（Wolfx形式dictの MaxIntensity）を、
+    INT_MAP / SHINDO_COLORS の数値コードへ変換する。見つからなければ None。
+
+    INT_MAP の値（"1"〜"7"・"推定5弱以上" 等）に加え、P2P地震情報の
+    scaleTo=99（「以上」＝上限なし）由来の「5弱以上」「6強以上」等、
+    末尾に「以上」が付いた表記は、付いていない元の階級（5弱→45 等）
+    のコードとして扱う（下限値で判定するため。警報の注意喚起文の
+    出し分け・Embed色・音声の要否判定を、「以上」の有無で取りこぼさない
+    ための共通処理。2026-09-22追加）。
+    """
+    code = _SHINDO_LABEL_TO_CODE.get(label)
+    if code is not None:
+        return code
+    if isinstance(label, str) and label.endswith("以上"):
+        return _SHINDO_LABEL_TO_CODE.get(label[: -len("以上")])
+    return None
+
+
 def shindo_short_label(code: int) -> str:
     """
     震度コード（core.constants.INT_MAP のキー。10, 45, 60 等）を、

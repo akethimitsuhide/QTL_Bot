@@ -29,8 +29,7 @@ import json
 import logging
 from typing import Iterator
 
-from core.constants import INT_MAP
-from core.helpers import format_jma_time, safe_float, safe_int
+from core.helpers import format_jma_time, safe_float, safe_int, shindo_code_from_max_label
 from core.qtlbot_log_files import discover_qtlbot_log_paths
 
 logger = logging.getLogger("QTLBot")
@@ -39,8 +38,9 @@ EEW_RECORD_TAG = "EEW_RECORD_V1"
 
 
 def _shindo_label_to_code(label: str) -> int | None:
-    """"5弱" のような震度ラベル文字列を INT_MAP の数値コードへ変換する。"""
-    return next((k for k, v in INT_MAP.items() if v == label), None)
+    """"5弱" のような震度ラベル文字列を INT_MAP の数値コードへ変換する。
+    「5弱以上」等、末尾に「以上」が付く表記も元の階級のコードとして扱う。"""
+    return shindo_code_from_max_label(label)
 
 
 def build_eew_record(data: dict, title: str) -> dict | None:
