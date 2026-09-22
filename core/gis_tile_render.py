@@ -57,8 +57,9 @@ Web Mercator用の投影（緯度経度⇔グローバルピクセル座標）�
   GeoJSONと同様、GIS_MAP_DATA_DIR 直下にキャッシュされる。
 - 取得失敗（404・タイムアウト等）のタイルは1枚ずつ透明のまま（背後の
   国境データ・海色が透けて見える）とし、処理全体は継続する。
-- 国土地理院コンテンツ利用規約に基づき、画像内に「出典：国土地理院」の
-  出典表示を必ず入れる。
+- 国土地理院コンテンツ利用規約に基づき、画像内に出典表示を必ず入れる。
+  本モジュールは地理院タイルに国境データ・区域境界線・震源マークを重ねて
+  加工しているため、「加工して作成」の旨も併記する（2026-09-22追加）。
 
 GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
 未取得の場合は None を返す。タイル取得に全面的に失敗した場合でも、
@@ -96,8 +97,13 @@ _TILE_FETCH_TIMEOUT = 8
 _TILE_FETCH_CONCURRENCY = 6
 _VIEWPORT_PADDING_RATIO = 0.15   # 日本+震源のbboxに対する余白比率
 
-_ATTRIBUTION_TEXT_JA = "出典：国土地理院"
-_ATTRIBUTION_TEXT_FALLBACK = "Source: GSI, Japan"  # 日本語グリフを持つフォントが無い環境向け
+# 【2026-09-22 変更】地理院タイルを加工（他データの重ね描き）して作成した
+# 画像であることを出典表示に明記する。画像幅が足りない場合は
+# _ATTRIBUTION_TEXT_JA_SHORT へ、日本語フォントが無い環境では
+# _ATTRIBUTION_TEXT_FALLBACK へフォールバックする。
+_ATTRIBUTION_TEXT_JA = "出典：国土地理院（地理院タイル〈淡色地図〉を加工して作成）"
+_ATTRIBUTION_TEXT_JA_SHORT = "出典：国土地理院（加工して作成）"
+_ATTRIBUTION_TEXT_FALLBACK = "Source: GSI, Japan (pale tiles, modified)"  # 日本語グリフを持つフォントが無い環境向け
 
 # Raspberry Pi OS（Debian系）で見つかる可能性のある日本語フォントの
 # 候補パス。PILの組み込みデフォルトフォントは日本語グリフを持たない
@@ -319,9 +325,9 @@ def _compute_overseas_viewport(hypo_lonlat: tuple) -> tuple:
 
 def _attribution_font_and_text(size: int = 15):
     """
-    日本語グリフを持つフォントが見つかればそれを使い「出典：国土地理院」を、
-    見つからなければPILの組み込みデフォルトフォントで英語表記
-    "Source: GSI, Japan" を返す。(font, text) のタプル。
+    日本語グリフを持つフォントが見つかればそれを使い「出典：国土地理院
+    （…加工して作成）」を、見つからなければPILの組み込みデフォルト
+    フォントで英語表記を返す。(font, text) のタプル。
     """
     for path in _JP_FONT_CANDIDATES:
         if os.path.exists(path):
@@ -341,6 +347,12 @@ def _draw_attribution(draw: ImageDraw.ImageDraw, size: tuple) -> None:
     # 文字の視認性確保のため、半透明の背景帯を敷く
     bbox = draw.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    # 画像幅に収まらない場合（表示範囲が狭くタイル枚数が少ない等）は、
+    # 「加工して作成」は残したまま短い文言に切り替える。
+    if text == _ATTRIBUTION_TEXT_JA and tw + margin * 3 > w:
+        text = _ATTRIBUTION_TEXT_JA_SHORT
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.rectangle(
         [w - tw - margin * 3, h - th - margin * 3, w, h],
         fill=(255, 255, 255, 180),
