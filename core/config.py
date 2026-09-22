@@ -358,6 +358,12 @@ KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 
 KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "1.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
 KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "1.0")) # 秒。イベント継続中の画像通知の再送間隔
 
+# 【2026-09-22 追加】強震モニタの画像解析検知の通知時にも、EEW発表時の
+# 振動モニタ（cogs/eew.py vibration_monitor_loop）と同じ「振動レベル音」
+# （lv100 / lv1000 / lv2000）を鳴らすか。レベル判定は共通
+# （core.kyoshin_shared.vibration_tier）。
+KYOSHIN_DETECT_VIBRATION_SOUND = _env_bool("KYOSHIN_DETECT_VIBRATION_SOUND", True)
+
 # HSVマスク処理で「揺れ候補ピクセル」とみなす実震度の下限値。
 # core.kyoshin_shared.estimate_max_shindo_from_image
 # （EEW発表時トリガーの振動モニタ機能）が引き続き使用する。

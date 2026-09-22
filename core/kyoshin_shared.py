@@ -23,6 +23,7 @@ cogs/kyoshin_monitor.py（画像解析による揺れ検知トリガー）が、
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from dataclasses import dataclass, field
@@ -112,6 +113,26 @@ def estimate_max_shindo_from_image(image_bytes: bytes) -> float | None:
     return max(r.shindo for r in readings)
 
 
+# ===============================
+# 振動レベル → 効果音（EEW発表時の振動モニタ・画像解析検知の両方で共通）
+# ===============================
+# 【2026-09-22 追加】cogs/eew.py の vibration_monitor_loop にだけあった
+# 判定（2000以上=tier3 / 1000以上=tier2 / 100以上=tier1）を、強震モニタの
+# 画像解析検知（cogs/kyoshin_monitor.py）でも同じ基準で使えるよう共通化した。
+VIBRATION_TIER_MP3: dict[int, str] = {3: "lv2000", 2: "lv1000", 1: "lv100"}
+
+
+def vibration_tier(level: int) -> int:
+    """振動レベル(kwatch-24h.net)を効果音の段階（0=無音, 1〜3）に変換する。"""
+    if level >= 2000:
+        return 3
+    if level >= 1000:
+        return 2
+    if level >= 100:
+        return 1
+    return 0
+
+
 @dataclass
 class DualImageFetcher:
     """
@@ -172,15 +193,35 @@ class DualImageFetcher:
         現在時刻）を起点に行う（_find_image のdocstring参照）。
         """
         reference_now = datetime.now(JST)
-        self._last_jma_s_url, self._last_jma_s_ts = await self._find_image(
-            session, JMA_S_BASE, "jma_s", self._last_jma_s_url, self._last_jma_s_ts,
-            reference_now,
-        )
-        self._last_lmoni_url, self._last_lmoni_ts = await self._find_image(
-            session, LMONI_BASE, "abrspmx_s", self._last_lmoni_url, self._last_lmoni_ts,
-            reference_now,
+        # 【2026-09-22 変更】2系統を直列ではなく並列に探索する（HEAD探索は
+        # 失敗時に最大3秒×リトライ回数かかるため、直列だと最悪その2倍。
+        # 基準時刻は共通のため、2系統のタイムスタンプがずれることはない）。
+        (self._last_jma_s_url, self._last_jma_s_ts), (self._last_lmoni_url, self._last_lmoni_ts) = (
+            await asyncio.gather(
+                self._find_image(
+                    session, JMA_S_BASE, "jma_s", self._last_jma_s_url, self._last_jma_s_ts,
+                    reference_now,
+                ),
+                self._find_image(
+                    session, LMONI_BASE, "abrspmx_s", self._last_lmoni_url, self._last_lmoni_ts,
+                    reference_now,
+                ),
+            )
         )
         return self._last_jma_s_url, self._last_lmoni_url
+
+    async def fetch_lmoni_url(self, session: aiohttp.ClientSession) -> str | None:
+        """
+        abrspmx_s(LMoni)系統の画像URLのみを探索して返す。jma_s系統の画像を
+        別経路（画像解析で実際に取得済みのフレーム）から得られる呼び出し側
+        （cogs/kyoshin_monitor.py、2026-09-22追加）が、不要なjma_s側の
+        HEAD探索を省くために使う。
+        """
+        self._last_lmoni_url, self._last_lmoni_ts = await self._find_image(
+            session, LMONI_BASE, "abrspmx_s", self._last_lmoni_url, self._last_lmoni_ts,
+            datetime.now(JST),
+        )
+        return self._last_lmoni_url
 
     async def fetch_jma_s_bytes(self, session: aiohttp.ClientSession) -> bytes | None:
         """

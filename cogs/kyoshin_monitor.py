@@ -108,7 +108,9 @@ from core.config import (
     KYOSHIN_SLOW_FETCH_THRESHOLD_SEC,
     KYOSHIN_PATCH_RADIUS, KYOSHIN_PATCH_AGGREGATION,
     KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC,
+    KYOSHIN_DETECT_VIBRATION_SOUND,
 )
+from core.audio import AudioClientMixin
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
 from core.kyoshin_image_monitor import KyoshinImageMonitor
 from core.kyoshin_stations import (
@@ -117,6 +119,7 @@ from core.kyoshin_stations import (
 )
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color,
+    vibration_tier, VIBRATION_TIER_MP3,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -160,7 +163,7 @@ def _phase_index(phase: str) -> int:
         return 0
 
 
-class KyoshinMonitorCog(commands.Cog):
+class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
     """強震モニタ画像の解析（震度の時系列上昇幅＋K近傍同時上昇の検証）による揺れ検知・Discord通知を行う Cog。"""
 
     def __init__(self, bot: commands.Bot):
@@ -201,7 +204,16 @@ class KyoshinMonitorCog(commands.Cog):
             )
 
         self._last_image_url: str | None = None
+        # 【2026-09-22 追加】検知に使った最新フレームの取得時刻（monotonic）と
+        # 画像自体の時刻（latest.json の latest_time）。通知では、この
+        # フレームのURLをそのまま表示に再利用し（_send_kyoshin_image）、
+        # 通知遅延の計測ログ（画像の古さ）にも使う。
+        self._last_image_at: float | None = None
+        self._last_image_time_jst: datetime | None = None
         self._dual_image_fetcher = DualImageFetcher()
+        # イベントID -> 初回通知を送った時刻(loop time)。検知→初回通知の
+        # 遅延をINFOログに1回だけ出すための管理（_on_event_endedで削除）。
+        self._notified_events: dict[str, float] = {}
 
         # 【2026-09-09 追加】画像デコード失敗ログの集約カウンタ。
         # _log_decode_failure 参照。1秒間隔ポーリングでは画像が生成
@@ -449,6 +461,7 @@ class KyoshinMonitorCog(commands.Cog):
             return {}
 
         self._last_image_url = url
+        self._last_image_at = time.monotonic()
 
         t_decode_start = time.perf_counter()
         try:
@@ -562,6 +575,7 @@ class KyoshinMonitorCog(commands.Cog):
         フォールバックする。
         """
         latest_dt = await self._fetch_latest_image_time()
+        self._last_image_time_jst = latest_dt  # 取得失敗時は None（画像の古さの計測は省略）
         if latest_dt is not None:
             ts = latest_dt.strftime("%Y%m%d%H%M%S")
             url = f"{JMA_S_BASE}/{latest_dt.strftime('%Y%m%d')}/{ts}.jma_s.gif"
@@ -649,11 +663,40 @@ class KyoshinMonitorCog(commands.Cog):
             )
             return
 
-        jma_s_url, lmoni_url = await self._dual_image_fetcher.fetch_urls(self.session)
+        # 【2026-09-22 変更】通知の遅延短縮。
+        # 従来は通知のたびに jma_s→LMoni の画像を「現在時刻の4秒以上前」から
+        # HEADで探索し、続けて振動レベルを取得していた（すべて直列。探索が
+        # 失敗すると数秒単位で遅れ、表示される画像も4〜13秒前のものに
+        # なっていた）。
+        #  - jma_s画像: 検知（画像解析）に使った最新フレームのURLをそのまま
+        #    表示に再利用する（追加のHEADリクエスト不要・検知と同じ画像）。
+        #    フレームが古い（10秒超）・未取得の場合のみ従来の探索へ戻る。
+        #  - LMoni画像と振動レベルは互いに独立なため並列に取得する。
+        frame_is_fresh = (
+            self._last_image_url is not None
+            and self._last_image_at is not None
+            and time.monotonic() - self._last_image_at <= 10.0
+        )
+        if frame_is_fresh:
+            jma_s_url = self._last_image_url
+            lmoni_url, vib_level = await asyncio.gather(
+                self._dual_image_fetcher.fetch_lmoni_url(self.session),
+                fetch_vibration_level(self.session),
+            )
+        else:
+            (jma_s_url, lmoni_url), vib_level = await asyncio.gather(
+                self._dual_image_fetcher.fetch_urls(self.session),
+                fetch_vibration_level(self.session),
+            )
         if not jma_s_url and not lmoni_url:
             return
 
-        vib_level = await fetch_vibration_level(self.session)
+        # 【2026-09-22 追加】振動レベル音（EEW発表時の振動モニタと同じ
+        # lv100/lv1000/lv2000）。Discord送信より先に鳴らす（送信待ちで音を
+        # 遅らせないため）。通知は1秒間隔で繰り返されるため、前の音が
+        # まだ再生待ちの間は積み増さない（_play_vibration_sound参照）。
+        if KYOSHIN_DETECT_VIBRATION_SOUND and vib_level is not None:
+            await self._play_vibration_sound(vib_level)
 
         phase_label = PHASE_LABEL_JA.get(event.phase, "揺れを検知")
         color = shindo_to_color(event.max_shindo)
@@ -681,7 +724,49 @@ class KyoshinMonitorCog(commands.Cog):
         self._last_recv["kyoshin"] = datetime.now()
         self._recv_count["kyoshin"] += 1
 
+        # 【2026-09-22 追加】検知→初回通知の遅延の計測ログ（イベントごとに1回）。
+        # 「他のソフトより通知が遅い」原因が、検知アルゴリズム側（イベント
+        # 生成そのものが遅い）か、通知ゲート（観測点数・フェーズ）待ちか、
+        # 画像自体の古さかを、実機ログから切り分けるための情報。
+        if event.event_id not in self._notified_events:
+            now_loop = asyncio.get_running_loop().time()
+            # マージで消えたイベントは _on_event_ended が呼ばれず残るため、
+            # 溜まり続けないよう古いものから間引く。
+            if len(self._notified_events) >= 100:
+                for old_id in sorted(self._notified_events, key=self._notified_events.get)[:50]:
+                    del self._notified_events[old_id]
+            self._notified_events[event.event_id] = now_loop
+            image_age = (
+                f"{(datetime.now(JST) - self._last_image_time_jst).total_seconds():.1f}秒"
+                if self._last_image_time_jst is not None else "不明"
+            )
+            logger.info(
+                f"KyoshinMonitorCog: イベント {event.event_id[:8]} 初回通知 "
+                f"(イベント生成→通知={now_loop - event.created_at:.1f}秒, "
+                f"検出観測点={member_count}件, フェーズ={event.phase}, "
+                f"実震度={event.max_shindo:.1f}, 解析画像の古さ={image_age})"
+            )
+
+    async def _play_vibration_sound(self, vib_level: int) -> None:
+        """
+        振動レベルに応じた効果音（lv100/lv1000/lv2000）を鳴らす。
+
+        通知ループは1秒間隔で繰り返し呼ばれるため、そのまま毎回キューへ
+        積むと再生が実時間より遅れて溜まっていく（MP3の再生時間の方が
+        長い）。共通AudioCogのMP3キューに未再生の音が残っている間は
+        積み増さず、EEWの効果音（high_alert等）を待たせないようにもする。
+        """
+        key = VIBRATION_TIER_MP3.get(vibration_tier(vib_level))
+        if key is None:
+            return
+        audio_cog = self.bot.get_cog("AudioCog")
+        if audio_cog is not None and audio_cog.mp3_queue.qsize() > 0:
+            logger.debug(f"KyoshinMonitorCog: 再生待ちの音声があるため振動レベル音をスキップ ({key})")
+            return
+        await self.play_mp3(key)
+
     async def _on_event_ended(self, event_id: str) -> None:
+        self._notified_events.pop(event_id, None)
         logger.info(f"KyoshinMonitorCog: イベント {event_id[:8]} の揺れ検知が終了しました")
 
     # ===============================
