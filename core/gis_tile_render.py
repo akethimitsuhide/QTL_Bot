@@ -84,6 +84,7 @@ from core.gis_render import (
     _JAPAN_LON_MIN, _JAPAN_LON_MAX, _JAPAN_LAT_MIN, _JAPAN_LAT_MAX,
     _BOUNDARY_COLOR, _BOUNDARY_WIDTH, _LAND_COLOR, _SEA_COLOR,
     _extract_rings, _rings_bbox, _BBox,
+    _HYPO_MARK_SIZE, _HYPO_MARK_OUTLINE_PAD,
 )
 from core import gis_data
 
@@ -339,12 +340,47 @@ def _attribution_font_and_text(size: int = 15):
     return _font(size), _ATTRIBUTION_TEXT_FALLBACK
 
 
-def _draw_attribution(draw: ImageDraw.ImageDraw, size: tuple) -> None:
-    """国土地理院コンテンツ利用規約に基づく出典表示を右下に描く。"""
+# 出典帯を置く候補位置（優先順）。右下がデフォルト（従来通り）で、
+# 震源のバツ印と重なる場合のみ他の角へずらす（2026-09-22追加）。
+_ATTRIBUTION_CORNERS = ("bottom-right", "bottom-left", "top-right", "top-left")
+
+
+def _attribution_rect(corner: str, w: int, h: int, tw: float, th: float, margin: int) -> tuple:
+    """出典帯の矩形 [x0, y0, x1, y1] を角の指定から算出する。"""
+    box_w, box_h = tw + margin * 3, th + margin * 3
+    if corner == "bottom-right":
+        return (w - box_w, h - box_h, w, h)
+    if corner == "bottom-left":
+        return (0, h - box_h, box_w, h)
+    if corner == "top-right":
+        return (w - box_w, 0, w, box_h)
+    return (0, 0, box_w, box_h)  # top-left
+
+
+def _rect_intersects_circle(rect: tuple, cx: float, cy: float, radius: float) -> bool:
+    """矩形と円（震源バツ印を囲む簡易的な当たり判定用の円）が重なるか。"""
+    x0, y0, x1, y1 = rect
+    nearest_x = min(max(cx, x0), x1)
+    nearest_y = min(max(cy, y0), y1)
+    return (cx - nearest_x) ** 2 + (cy - nearest_y) ** 2 <= radius ** 2
+
+
+def _draw_attribution(draw: ImageDraw.ImageDraw, size: tuple,
+                       avoid_xy: Optional[tuple] = None) -> None:
+    """
+    国土地理院コンテンツ利用規約に基づく出典表示を描く（既定は右下）。
+
+    avoid_xy : 震源のバツ印の描画位置（px）。指定された場合、出典帯が
+        バツ印と重なって読めなくなる・バツ印を隠してしまうのを避けるため、
+        重なりが生じる角を避けて別の角へずらす（2026-09-22追加。日本の
+        遠地――特にUSGS由来の海外地震情報で、震源が右下付近になり
+        出典表示と重なって両方とも見えづらくなる報告があったための対応）。
+        すべての角で重なる場合（画像が極端に小さい等）は、従来通り
+        右下に描画する（出典表示自体を省略すると規約違反になるため）。
+    """
     w, h = size
     font, text = _attribution_font_and_text()
     margin = 6
-    # 文字の視認性確保のため、半透明の背景帯を敷く
     bbox = draw.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     # 画像幅に収まらない場合（表示範囲が狭くタイル枚数が少ない等）は、
@@ -353,11 +389,22 @@ def _draw_attribution(draw: ImageDraw.ImageDraw, size: tuple) -> None:
         text = _ATTRIBUTION_TEXT_JA_SHORT
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.rectangle(
-        [w - tw - margin * 3, h - th - margin * 3, w, h],
-        fill=(255, 255, 255, 180),
-    )
-    draw.text((w - tw - margin * 2, h - th - margin * 2), text, fill=(30, 30, 30, 255), font=font)
+
+    corner = _ATTRIBUTION_CORNERS[0]
+    if avoid_xy is not None:
+        cx, cy = avoid_xy
+        # バツ印本体（白フチ込み）に、文字が隣接していても読める程度の
+        # 余白を足した半径を当たり判定に使う。
+        radius = _HYPO_MARK_SIZE + _HYPO_MARK_OUTLINE_PAD + margin * 2
+        for candidate in _ATTRIBUTION_CORNERS:
+            rect = _attribution_rect(candidate, w, h, tw, th, margin)
+            if not _rect_intersects_circle(rect, cx, cy, radius):
+                corner = candidate
+                break
+
+    x0, y0, x1, y1 = _attribution_rect(corner, w, h, tw, th, margin)
+    draw.rectangle([x0, y0, x1, y1], fill=(255, 255, 255, 180))
+    draw.text((x1 - tw - margin, y1 - th - margin), text, fill=(30, 30, 30, 255), font=font)
 
 
 async def render_overseas_map(session: aiohttp.ClientSession,
@@ -452,8 +499,8 @@ async def render_overseas_map(session: aiohttp.ClientSession,
 
         composed = Image.alpha_composite(composed, overlay)
 
-        # 6. 出典表示
-        _draw_attribution(ImageDraw.Draw(composed), composed.size)
+        # 6. 出典表示（震源のバツ印と重なる場合は別の角へずらす）
+        _draw_attribution(ImageDraw.Draw(composed), composed.size, avoid_xy=project(lon, lat))
 
         buf = io.BytesIO()
         composed.convert("RGB").save(buf, format="PNG", optimize=True)
