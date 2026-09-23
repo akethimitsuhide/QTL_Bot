@@ -161,12 +161,28 @@ def _supersampled():
 # 座標系（Web Mercator）が異なるため、_LAND_COLOR/_SEA_COLOR の色定数
 # だけを再利用し、塗り自体は独自に実装している（_get_countries等）。
 _LAND_COLOR = (238, 232, 220, 255)   # 陸地（薄いクリーム色）
-_SEA_COLOR = (200, 222, 238, 255)    # 海（薄い水色）。_finalize() の合成背景に使う
+# 海（水色）。_finalize() の合成背景に使う。
+# 【2026-09-22変更】旧色(200,222,238)は陸地色との明度差が小さく（陸地
+# 平均輝度≒230に対し海は≒220）、縮小表示（Discordのサムネイル表示等）
+# では遠目に判別しづらいとの指摘のため、明度差を広げつつ彩度を少し
+# 上げて「水色」とわかりやすい色に変更した（平均輝度≒203。陸地との
+# 差は約10→約27に拡大）。
+_SEA_COLOR = (178, 205, 227, 255)
 
 # 背景・境界線・図形の見た目
-_BOUNDARY_COLOR = (110, 110, 110, 255)     # 区域境界線（2026-09-15: 見づらいとの指摘で濃くした。旧: (170,170,170,255)）
+# 区域境界線（2026-09-15: 見づらいとの指摘で(170,170,170,255)→濃くした。
+# 【2026-09-22変更】(110,110,110,255)→さらに濃くした。縮小表示時、細い
+# 境界線が背景色に埋もれて判別しづらいとの指摘のため）
+_BOUNDARY_COLOR = (80, 80, 80, 255)
 _BOUNDARY_WIDTH = 1
 _HIGHLIGHT_BORDER_WIDTH = 2               # 塗りつぶし区域の輪郭線の太さ
+# 【2026-09-22追加】震度速報（ScalePrompt）・緊急地震速報の予想震度など、
+# SHINDO_COLORS を地図に塗る際の明度係数。SHINDO_COLORSはDiscord Embed の
+# 色（cogs/eew.py・cogs/quake.py等）と共通の定数だが、Embedの帯のように
+# 小さい面積で見る色と、地図全体を塗る面積とでは同じ色でも「薄い」印象の
+# 出方が異なる。地図の色だけが薄く感じるとの指摘を受け、地図描画時のみ
+# （Embed色自体は変更せず）_darken_rgbで明度を90%に落として塗る。
+_SHINDO_FILL_DARKEN_FACTOR = 0.9
 _FILL_ALPHA = 255                         # 塗りつぶしの不透明度（0-255）。
                                            # 2026-09-16: 「震度の色が薄い」との
                                            # 指摘を受け、半透明(150)から不透明
@@ -684,7 +700,8 @@ def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: i
     """
     x, y = xy
     half = _px(size) / 2
-    rgb = _rgb_to_rgba(SHINDO_COLORS.get(code, SHINDO_COLORS[-1]))[:3]
+    rgb = _darken_rgb(_rgb_to_rgba(SHINDO_COLORS.get(code, SHINDO_COLORS[-1]))[:3],
+                       _SHINDO_FILL_DARKEN_FACTOR)
     draw.rectangle([x - half, y - half, x + half, y + half], fill=rgb, outline=outline, width=_px(1))
     font = _font(max(round(size), 11))
     label = shindo_short_label(code)
@@ -950,8 +967,9 @@ def render_shindo_map(
 
             for shape, code in matched_regions:
                 color = SHINDO_COLORS.get(code, SHINDO_COLORS[-1])
-                fill_rgba = _rgb_to_rgba(color, _FILL_ALPHA)
-                border_rgb = _darken_rgb(_rgb_to_rgba(color)[:3])
+                fill_rgb = _darken_rgb(_rgb_to_rgba(color)[:3], _SHINDO_FILL_DARKEN_FACTOR)
+                fill_rgba = (*fill_rgb, _FILL_ALPHA)
+                border_rgb = _darken_rgb(fill_rgb)
                 _fill_area(draw, shape, projector, fill_rgba, border_rgb)
 
             if show_region_icons and matched_regions:
