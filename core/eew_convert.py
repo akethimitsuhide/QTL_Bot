@@ -136,14 +136,20 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             # 扱っていたため、PLUM法（各地を「5弱以上」等と推定する）の
             # 発表で、全体の予想最大震度が実態と無関係に「7以上」と
             # 表示され、地域内訳（5弱・5強等）とも食い違っていた。
-            # 「以上」のエリアは下限（scaleFrom）をその地域の震度として
-            # 採用し、予想最大震度は全エリアの最大値（「以上」由来の
-            # 場合は「5弱以上」のように末尾に「以上」を付けて表示）とする。
-            # 下限が不明(-1)のまま上限だけ「以上」のエリアは震度の手掛かりが
-            # 無いため最大震度の判定には使わない。
-            if st == 99:
+            #
+            # 【2026-09-24 訂正】上記修正は「以上」表記自体をPLUM法にも
+            # 一律適用してしまっており、これが新たな不具合だった
+            # （タローさんからの指摘: Wolfx側はPLUM法で「以上」を出さず
+            # 「震度X程度」のみを表示しており、P2P側も同様に処理すべき）。
+            # scaleTo=99を「以上」として扱う（is_open）のは非PLUM法の
+            # エリアに限定する。PLUM法（is_plum）のエリアは、scaleTo=99を
+            # st=-1（不明）と同様に無視し、常にscaleFrom（下限＝PLUM法の
+            # 推定値そのもの）を採用する。これにより、後段の
+            # build_forecast_groups等は「震度X程度」ラベルを持つ
+            # is_assumption分岐（Wolfx側と共通のロジック）に流れる。
+            if st == 99 and not is_plum:
                 effective, is_open = sf, sf != -1
-            elif st != -1:
+            elif st != -1 and st != 99:
                 effective, is_open = st, False
             else:
                 effective, is_open = sf, False
@@ -158,9 +164,13 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
                 has_warn = True
 
             shindo1 = scale_map.get(sf, "不明")
-            if st == 99:
+            if st == 99 and not is_plum:
                 # 上限なし（「以上」）。build_forecast_groups 等が
                 # 「震度5弱以上」と表示できるよう、専用の表記で渡す。
+                # PLUM法（is_plum）の場合はこの分岐に入らず、下の
+                # scale_map.get(st, shindo1) が st=99 に対応するキーを
+                # 持たないため自然に shindo1 へフォールバックする
+                # （＝Wolfx側のPLUM法表示と同じ「程度」表記になる）。
                 shindo2 = OPEN_UPPER_LABEL
             else:
                 shindo2 = scale_map.get(st, shindo1)
@@ -303,12 +313,14 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
         shindo2 = area.get("Shindo2", shindo1)
 
         if _is_open_upper(shindo2):
-            # 【2026-09-22 追加】上限なし（「震度5弱以上」）。P2P地震情報の
-            # scaleTo=99（気象庁電文 To="over"）由来。従来は99を震度7として
-            # 扱っていたため「震度7〜5弱程度」のような誤った上限付きの表示に
-            # なっていた。下限が不明なら表示できる情報が無いため除外する。
-            # PLUM法かどうかに関わらず、上限が無いという情報自体は
-            # そのまま表示する。
+            # 【2026-09-22 追加、2026-09-24 訂正】上限なし（「震度5弱以上」）。
+            # P2P地震情報の scaleTo=99（気象庁電文 To="over"）由来。
+            # convert_p2p_eew_to_wolfx側でPLUM法（is_assumption）のエリアは
+            # scaleTo=99でもこの表記（Shindo2="以上"）にならないよう
+            # 処理しているため、この分岐に到達するのは非PLUM法のエリアのみ
+            # （PLUM法は下の is_assumption 分岐で「震度X程度」表記になる。
+            # Wolfx側のPLUM法表示と揃えるための仕様）。下限が不明なら
+            # 表示できる情報が無いため除外する。
             if shindo1 != "不明":
                 forecast_groups[f"震度{shindo1}以上"].append(chiiki)
             continue
