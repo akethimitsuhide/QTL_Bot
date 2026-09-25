@@ -454,6 +454,24 @@ async def render_overseas_map(session: aiohttp.ClientSession,
         lon_min, lon_max, lat_min, lat_max = bbox
         zoom = _choose_zoom(lon_min, lon_max, lat_min, lat_max)
 
+        # 【2026-09-25修正】_compute_overseas_viewportは、日付変更線をまたぐ
+        # 表示範囲（南北アメリカ等、震源の経度が西経で、太平洋を挟んだ東回り
+        # の方が表示範囲が短くなるケース）で、震源の経度を+360（または-360）
+        # シフトした値をbboxの算出に使うことがある（例: コロンビア
+        # lon=-74.1 → 実際にはlon_min=97.4〜lon_max=310.5という、+360した
+        # 286.9相当の範囲が選ばれる）。しかし後段でバツ印・出典表示の位置を
+        # 求めるproject(lon, lat)には、このシフトを反映していない元の生の
+        # 経度（-74.1）をそのまま渡していたため、算出されるピクセル座標が
+        # キャンバス範囲外（西へ丸々1周分ずれた位置）になり、バツ印が
+        # 描画されない（または端にわずかに掛かるだけで小さく見える）
+        # 不具合があった。viewportの範囲[lon_min, lon_max]に収まるよう、
+        # 震源の経度を同じ±360シフトで正規化してから使う。
+        draw_lon = lon
+        for candidate in (lon, lon + 360, lon - 360):
+            if lon_min <= candidate <= lon_max:
+                draw_lon = candidate
+                break
+
         tile_layer, (origin_x, origin_y) = await _build_basemap(session, bbox, zoom)
         canvas_size = tile_layer.size
 
@@ -495,12 +513,12 @@ async def render_overseas_map(session: aiohttp.ClientSession,
                 draw.line(pts + [pts[0]], fill=_BOUNDARY_COLOR, width=_BOUNDARY_WIDTH)
 
         warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
-        _draw_x_mark(draw, project(lon, lat), warn_rgb)
+        _draw_x_mark(draw, project(draw_lon, lat), warn_rgb)
 
         composed = Image.alpha_composite(composed, overlay)
 
         # 6. 出典表示（震源のバツ印と重なる場合は別の角へずらす）
-        _draw_attribution(ImageDraw.Draw(composed), composed.size, avoid_xy=project(lon, lat))
+        _draw_attribution(ImageDraw.Draw(composed), composed.size, avoid_xy=project(draw_lon, lat))
 
         buf = io.BytesIO()
         composed.convert("RGB").save(buf, format="PNG", optimize=True)
