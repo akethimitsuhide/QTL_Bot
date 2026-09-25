@@ -901,7 +901,17 @@ class SystemCog(commands.Cog):
                 "CLIテストモードのため Web ダッシュボードの起動をスキップします"
                 "（本番プロセスとのポート衝突を回避）"
             )
-        elif os.getenv("WEB_DASHBOARD_ENABLED", "true").lower() == "true":
+        elif WEB_DASHBOARD_ENABLED:
+            # 【2026-09-24 修正】以前はここで
+            # os.getenv("WEB_DASHBOARD_ENABLED", "true") と直接・重複して
+            # 読み込んでおり、既定値が"true"だった。上部（本ファイル
+            # 76〜83行目）の2026-08-27修正で「既定値をfalseに統一した」
+            # はずが、この箇所だけ修正が反映されておらず、.env に
+            # WEB_DASHBOARD_ENABLEDを書かなければ、ドキュメント上は
+            # 無効なはずのWeb Dashboardが実際には起動してしまう状態が
+            # 残っていた（コードとREADME/.env.exampleの記載を突き合わせる
+            # 監査で発見）。モジュールレベル定数WEB_DASHBOARD_ENABLED
+            # （既定false）を参照するよう修正し、重複読み込みを解消した。
             self.bot.loop.create_task(self.start_web_dashboard())
 
         # スラッシュコマンドを同期
