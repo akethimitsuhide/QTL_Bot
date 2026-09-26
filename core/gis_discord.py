@@ -1,7 +1,8 @@
 """
 core/gis_discord.py
 ====================
-GIS地図描画機能（core/gis_render.py, core/gis_tile_render.py）が生成した
+GIS地図描画機能（core/gis_render.py。日本国内向け・海外〈render_overseas_map〉
+とも2026-09-26からこのモジュール1本に統合済み）が生成した
 PNGバイト列を、Discordの複数埋め込み画像として送信する際の共通処理
 （2026-09-18追加）。
 

@@ -52,8 +52,7 @@ from core.config import (
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
-from core.gis_render import render_shindo_map, is_outside_japan_bbox
-from core.gis_tile_render import render_overseas_map
+from core.gis_render import render_shindo_map, is_outside_japan_bbox, render_overseas_map
 from core.gis_data import ensure_gis_data_ready
 
 logger = logging.getLogger("QTLBot")
@@ -381,14 +380,15 @@ class UsgsCog(commands.Cog, AudioMixin):
             # USGSの震源はGeoJSON標準の[経度,緯度,深さ]順で既に得られて
             # いるため、座標文字列のパースは不要。USGSはそもそも世界中の
             # 地震を対象とするため、震源が日本国内／近海の場合は通常の
-            # ベクター地図、日本国外の場合は国土地理院タイル＋国境データ
-            # の重ね合わせに自動で切り替わる（cogs/other.pyの
-            # _render_hypocenter_gis_map と同じ判定方法）。
+            # ベクター地図、日本国外の場合は世界の国境データを使う地図に
+            # 自動で切り替わる（cogs/other.pyの_render_hypocenter_gis_map
+            # と同じ判定方法。2026-09-26に地理院タイル重ね合わせを廃止し
+            # 独自ベクター地図化、同期関数になったためawait不要）。
             gis_file = None
             gis_image_bytes = None
             if lon is not None and lat is not None:
                 if is_outside_japan_bbox(lon, lat):
-                    gis_image_bytes = await render_overseas_map(self.session, (lon, lat))
+                    gis_image_bytes = render_overseas_map((lon, lat))
                 else:
                     gis_image_bytes = render_shindo_map(hypocenter_lonlat=(lon, lat))
             if gis_image_bytes:

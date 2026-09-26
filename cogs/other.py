@@ -58,8 +58,9 @@ from core.helpers import format_jma_time, truncate_embed_description, parse_jma_
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
-from core.gis_render import render_shindo_map, render_long_period_map, is_outside_japan_bbox
-from core.gis_tile_render import render_overseas_map
+from core.gis_render import (
+    render_shindo_map, render_long_period_map, is_outside_japan_bbox, render_overseas_map,
+)
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 
@@ -128,9 +129,10 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         """
         震源の緯度経度だけからGIS地図画像（PNG bytes）を生成する共通処理
         （2026-09-17追加。notify_long_period・notify_hypocenter_update
-        で使用）。震源が日本国外の場合は国土地理院タイルとの重ね合わせ
-        （core.gis_tile_render.render_overseas_map）に切り替える
-        （cogs/quake.py の _render_quake_gis_map と同じ判定方法）。
+        で使用）。震源が日本国外の場合は render_overseas_map に切り替える
+        （cogs/quake.py の _render_quake_gis_map と同じ判定方法。
+        2026-09-26に地理院タイル重ね合わせを廃止し独自ベクター地図化、
+        同期関数になったためawait不要）。
 
         lat, lon が None（震源座標を取得できなかった場合）は None を返す。
         GIS_MAP_ENABLE=false・外部データ未取得の場合も各render関数が
@@ -139,7 +141,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         if lat is None or lon is None:
             return None
         if is_outside_japan_bbox(lon, lat):
-            return await render_overseas_map(self.session, (lon, lat))
+            return render_overseas_map((lon, lat))
         return render_shindo_map(hypocenter_lonlat=(lon, lat))
 
     @commands.Cog.listener()

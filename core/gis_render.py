@@ -12,17 +12,11 @@ core/gis_render.py
 背景を海色（_SEA_COLOR）にした。加えて、実際のサイズの2倍
 （_SUPERSAMPLE）でキャンバスに描画してから最後にLANCZOSで縮小する
 ことで、県境・海岸線のギザつきを滑らかにしている（_supersampled()）。
-この2つ（塗りの実装・アンチエイリアスの実装そのもの）は本モジュール
-内の独自ベクター地図（render_eew_warn_map / render_shindo_map /
-render_tsunami_map）専用で、国土地理院タイルとの重ね合わせ
-（core/gis_tile_render.py）には使っていない（投影方式がWeb Mercator
-で異なる上、ラスター画像＝タイルの縮小はベクター線の縮小とは事情が
-異なるため）。ただし _LAND_COLOR/_SEA_COLOR の色定数自体は
-core/gis_tile_render.py 側でも「国土地理院タイルが取得できなかった
-海外の箇所を、世界の国境データ（countries.geojson）で補う下地」として
-再利用している（詳細はそちらのモジュールdocstring参照。当初は
-海外の陸地データを持たずこの色分けを適用できなかったが、
-countries.geojsonの追加により解消した）。
+render_eew_warn_map / render_shindo_map / render_tsunami_map /
+render_overseas_map の全ての描画関数がこの2つ（塗り・アンチエイリアス）
+を共通で使っている（2026-09-26追記：render_overseas_mapは地理院タイル
+廃止に伴い独自ベクター地図化されたため、以前のような「投影方式が
+Web Mercatorで異なるため適用できない」という制約は無くなった）。
 
 【設計方針】
 - 依存を増やさない：本プロジェクトは「軽量・低依存」方針（requirements.txt
@@ -57,6 +51,26 @@ countries.geojsonの追加により解消した）。
 3. render_tsunami_map()   : 津波情報向け。津波予報区の沿岸線
                              （ポリゴンではなく線データ）を警報種別の
                              色で塗り分け（2026-09-14追加）
+4. render_overseas_map()  : 震源が日本国外の場合向け。世界の国境データ
+                             （簡略化版、countries.geojson由来）を陸地色
+                             で塗りつぶし、日本の細分区域境界線・震源の
+                             バツ印を重ね描き（2026-09-26追加。後述の
+                             「遠地地震向けの描画」参照）
+
+【遠地地震（震源が日本国外）向けの描画（2026-09-26、地理院タイル廃止）】
+2026-09-25までは、震源が日本国外の場合（is_outside_japan_bbox()で判定）
+は別モジュール core/gis_tile_render.py が国土地理院の淡色地図タイルとの
+重ね合わせで描画していたが、地理院タイルサーバー側の負荷・大規模地震時
+のアクセス集中への配慮から、地理院タイルの使用を廃止した。render_shindo_map
+等と同じ「GeoJSONのみ・ネットワークI/Oなし」の独自ベクター地図に統一し、
+world countries.geojson（datasets/geo-countries、258カ国）を陸地色で
+塗りつぶした背景の上に、日本部分は従来通り自前のGeoJSON
+（AreaForecastLocalE_GIS）を重ね描きする。countries.geojson自体は
+約14MB・頂点数約55万と非常に大きいため、そのまま毎回描画に使うと処理
+負荷が高くなる。そこで core/gis_data.py が Ramer-Douglas-Peucker
+アルゴリズムで間引いた軽量版（load_countries_simplified()、約4万頂点・
+約0.6〜0.7MB）を使う（Webダッシュボードの/status/gis_countries
+エンドポイントとも共用）。旧core/gis_tile_render.pyは削除済み。
 
 いずれも GIS_MAP_ENABLE=false、または必要な外部データが未取得の場合は
 None を返す（呼び出し側＝各Cogは、Noneの場合は地図添付をスキップする
@@ -111,11 +125,6 @@ _MAX_DIM = 1400     # 長辺がこのpxを超えないよう、短辺を基準�
 # コンテキスト内でのみ _SUPERSAMPLE になり、それ以外は1（無効）。
 # 本モジュールの描画は常に単一スレッド・同期的に1回の呼び出しで完結する
 # ため、グローバル変数での管理でも競合の心配はない。
-# 【重要】国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）には
-# このアンチエイリアス（_supersampled）は適用していない。あちらは実際の
-# 地図タイル（ラスター画像）を合成するため、こちら側の縮小処理をそのまま
-# 使うとタイル画像自体がぼやけてしまう可能性があり、ベクター線の
-# 縮小とは事情が異なるため、意図的に別実装のままにしている。
 _SUPERSAMPLE = 2
 _scale = 1
 
@@ -139,27 +148,11 @@ def _supersampled():
 # 陸地／海の色分け（2026-09-17追加）
 # ===============================
 # 「塗られていない区域＝背景と同じ薄灰色」だと日本列島の輪郭そのものが
-# 把握しにくいとの指摘を受け、区域データ（_eew_areas / _local_areas）を
-# 陸地色で塗りつぶし、背景（_finalizeの合成先）を海色にすることで
-# 列島の形を分かりやすくした。
-#
-# 【国土地理院タイルとの重ね合わせ（core/gis_tile_render.py）における
-# 扱いに注意】2026-09-17: 当初は「本モジュールは日本の区域ポリゴンしか
-# 持たないため、タイル重ね合わせ側にこの陸地／海の色分けをそのまま
-# 適用すると、日本だけ陸地色に塗られ、台湾やカムチャツカ半島等の
-# 海外の陸地がポリゴンデータの無さから海のように見えてしまう」ため
-# 適用を避けていたが、その後 core/gis_tile_render.py 側で世界の国境
-# データ（countries.geojson、日本を除く）を読み込むようにしたことで
-# この問題は解消した。そちらでは _LAND_COLOR/_SEA_COLOR を
-# 「国土地理院タイルが取得できなかった箇所の下地」として再利用して
-# いる（日本自体は自前のGeoJSONの方が精密なため国境データから除外し、
-# 実際の地図タイルをそのまま前面に見せる。詳細は
-# core/gis_tile_render.py のモジュールdocstring参照）。
-# _draw_land_fill() 自体（区域全体を一括で塗る関数）は本モジュール内の
-# 独自ベクター地図（render_eew_warn_map / render_shindo_map /
-# render_tsunami_map）専用。core/gis_tile_render.py 側は国境データの
-# 座標系（Web Mercator）が異なるため、_LAND_COLOR/_SEA_COLOR の色定数
-# だけを再利用し、塗り自体は独自に実装している（_get_countries等）。
+# 把握しにくいとの指摘を受け、区域データ（_eew_areas / _local_areas、
+# 2026-09-26からは海外向けの国境データ_get_countries()も同様）を陸地色で
+# 塗りつぶし、背景（_finalizeの合成先）を海色にすることで陸地の形を
+# 分かりやすくした。_draw_land_fill()（区域データ用）と
+# _draw_country_fill()（国境データ用）はどちらもこの2色を使う。
 _LAND_COLOR = (238, 232, 220, 255)   # 陸地（薄いクリーム色）
 # 海（水色）。_finalize() の合成背景に使う。
 # 【2026-09-22変更】旧色(200,222,238)は陸地色との明度差が小さく（陸地
@@ -254,9 +247,8 @@ def _japan_bbox() -> _BBox:
 def is_outside_japan_bbox(lon: float, lat: float) -> bool:
     """
     緯度経度が本モジュールの「日本全体」表示範囲の外にあるかを返す。
-    core.gis_tile_render（国土地理院タイルとの重ね合わせ、2026-09-15
-    追加）が、震源が海外かどうかの判定＝表示モード切り替えのトリガーに
-    使う。
+    震源が海外かどうかの判定＝render_shindo_map/render_overseas_mapの
+    表示モード切り替えのトリガーとして、各Cogが使う（2026-09-15追加）。
     """
     return not (
         _JAPAN_LON_MIN <= lon <= _JAPAN_LON_MAX and
@@ -267,9 +259,9 @@ def is_outside_japan_bbox(lon: float, lat: float) -> bool:
 def get_local_area_shapes() -> dict:
     """
     細分区域（AreaForecastLocalE_GIS、194件）の生の緯度経度リングデータを
-    返す公開アクセサ。core.gis_tile_render が、国土地理院タイルの上に
-    日本の区域境界線を重ね描きする際に、GeoJSONの再パースを避けて
-    このモジュールのキャッシュ済みデータを再利用するために使う。
+    返す公開アクセサ。render_overseas_map自身は_local_areasを直接参照
+    できるため使っていないが、他モジュールが同じキャッシュ済みデータを
+    再利用したい場合向けに公開のまま残している。
     """
     return _local_areas.get()
 
@@ -1142,4 +1134,199 @@ def render_long_period_map(
             return _finalize(canvas, (width, height))
     except Exception:
         logger.error("GIS地図(長周期地震動)描画エラー", exc_info=True)
+        return None
+
+
+# ===============================
+# 遠地地震（震源が日本国外）向け描画（2026-09-26追加、地理院タイル廃止）
+# ===============================
+# モジュールdocstring「遠地地震（震源が日本国外）向けの描画」参照。
+_OVERSEAS_VIEWPORT_PADDING_RATIO = 0.15  # 日本全体+震源のbboxに対する余白比率（旧gis_tile_renderと同じ値）
+
+_countries_cache: Optional[list] = None
+_countries_lock = threading.Lock()
+
+
+def _get_countries() -> list:
+    """
+    (bbox, rings) のリストを返す（間引き済み・日本を除く）。プロセス内で
+    一度だけパースし、以降はキャッシュを再利用する（_AreaSetと同じ
+    考え方）。countriesは国名等のプロパティを描画に使わないため、
+    _AreaShapeではなく軽量な (bbox, rings) タプルのリストにしている
+    （旧core/gis_tile_render.py._get_countries() から移植。データ元を
+    gis_data.load_countries()〈間引き前・約14MB〉から
+    gis_data.load_countries_simplified()〈間引き済み・約0.6〜0.7MB〉に
+    変更した点のみ異なる）。
+    """
+    global _countries_cache
+    if _countries_cache is not None:
+        return _countries_cache
+    with _countries_lock:
+        if _countries_cache is not None:
+            return _countries_cache
+        countries = []
+        skipped = 0
+        for feature in gis_data.load_countries_simplified():
+            rings = _extract_rings(feature.get("geometry"), kind="polygon")
+            bbox = _rings_bbox(rings) if rings else None
+            if not rings or bbox is None:
+                skipped += 1
+                continue
+            countries.append((bbox, rings))
+        if skipped:
+            logger.debug(f"GIS地図(海外): geometryが空のため{skipped}件の国をスキップしました")
+        logger.debug(f"GIS地図(海外): 国境データを{len(countries)}件読み込みました（日本を除く・間引き済み）")
+        _countries_cache = countries
+        return _countries_cache
+
+
+def _pick_lon_shift(bbox: _BBox, viewport: _BBox) -> float:
+    """
+    国境ポリゴンのbboxを表示範囲（viewport）の経度座標系に揃えるための
+    シフト量（0／+360／-360度）を選ぶ（2026-09-26追加）。
+
+    render_overseas_map の表示範囲は、日付変更線をまたぐ場合（南北
+    アメリカ等）、震源の経度を±360シフトした連続値（例: 97〜310度）に
+    なることがある（_compute_overseas_viewport参照）。一方、
+    countries.geojson由来の国境データは通常の-180〜180度の範囲の
+    ままなので、そのままではシフトされた表示範囲と重ならず、対象の
+    国が描画されない（震源のバツ印だけが海上に浮いて見える）不具合が
+    あったため、3候補（シフト無し／+360／-360）のうち表示範囲との
+    重なりが最大になるものを選び、描画前に国境データ側へ適用する。
+    """
+    best_shift, best_overlap = 0.0, -1.0
+    for shift in (0.0, 360.0, -360.0):
+        lo, hi = bbox.lon_min + shift, bbox.lon_max + shift
+        overlap = min(hi, viewport.lon_max) - max(lo, viewport.lon_min)
+        if overlap > best_overlap:
+            best_overlap, best_shift = overlap, shift
+    return best_shift
+
+
+def _draw_country_fill(draw: ImageDraw.ImageDraw, projector: _Projector, viewport: _BBox) -> None:
+    """世界の国境データ（間引き済み・日本を除く）を陸地色で塗りつぶす。"""
+    for bbox, rings in _get_countries():
+        shift = _pick_lon_shift(bbox, viewport)
+        shifted_bbox = _BBox(bbox.lon_min + shift, bbox.lon_max + shift, bbox.lat_min, bbox.lat_max)
+        if not shifted_bbox.intersects(viewport):
+            continue
+        for ring in rings:
+            if len(ring) < 3:
+                continue
+            draw_ring = [(lon + shift, lat) for lon, lat in ring] if shift else ring
+            draw.polygon(projector.project_ring(draw_ring), fill=_LAND_COLOR)
+
+
+def _compute_overseas_viewport(hypo_lonlat: tuple) -> _BBox:
+    """
+    震源が日本国外の場合向け：日本全体＋震源を収める表示範囲を返す
+    （render_overseas_map専用）。_compute_viewport() は結果を日本全体の
+    範囲へ強制的にクランプするため、震源が日本国外にあるケースには
+    使えない（旧core/gis_tile_render.py._compute_overseas_viewport()の
+    移植。Web Mercator用のズームレベル計算部分のみ削除している）。
+
+    経度方向は日付変更線をまたぐ可能性がある（南米・北米西岸等、太平洋を
+    挟んで日本の反対側にある震源の場合）。単純にmin/maxを取ると、太平洋
+    を挟んだ「近い側」ではなく地球を逆回りした「遠い側」（ヨーロッパ・
+    アフリカ・大西洋経由）の範囲を選んでしまうことがあるため、震源の
+    経度を±360度シフトした場合も含めて候補を作り、経度方向の幅が最小に
+    なる＝太平洋側の短い経路を選ぶ（lonの値自体は±180度の範囲に収めず、
+    連続した値のまま返す）。
+    """
+    hypo_lon, hypo_lat = hypo_lonlat
+
+    candidates = []
+    for shifted_lon in (hypo_lon, hypo_lon + 360, hypo_lon - 360):
+        lon_min = min(_JAPAN_LON_MIN, shifted_lon)
+        lon_max = max(_JAPAN_LON_MAX, shifted_lon)
+        candidates.append((lon_max - lon_min, lon_min, lon_max))
+    _, lon_min, lon_max = min(candidates, key=lambda c: c[0])
+
+    lat_min = min(_JAPAN_LAT_MIN, hypo_lat)
+    lat_max = max(_JAPAN_LAT_MAX, hypo_lat)
+
+    pad_lon = (lon_max - lon_min) * _OVERSEAS_VIEWPORT_PADDING_RATIO
+    pad_lat = (lat_max - lat_min) * _OVERSEAS_VIEWPORT_PADDING_RATIO
+    lon_min -= pad_lon
+    lon_max += pad_lon
+    lat_min = max(lat_min - pad_lat, -85.0)
+    lat_max = min(lat_max + pad_lat, 85.0)
+    return _BBox(lon_min, lon_max, lat_min, lat_max)
+
+
+def render_overseas_map(hypocenter_lonlat: tuple[float, float]) -> Optional[bytes]:
+    """
+    震源が日本国外の場合向け：世界の国境データ（間引き済み・日本を除く。
+    countries.geojson由来）を陸地色で塗りつぶした背景に、日本の細分区域
+    境界線・震源のバツ印を重ね描きしたPNG画像を返す（2026-09-26追加）。
+
+    【地理院タイルの使用を廃止】2026-09-25までは国土地理院の淡色地図
+    タイルとの重ね合わせ（旧core/gis_tile_render.py）で描画していたが、
+    地理院タイルサーバー側の負荷・大規模地震時のアクセス集中への配慮
+    から使用を取りやめ、本モジュールの他の地図（render_shindo_map等）
+    と同じ「GeoJSONのみ・ネットワークI/Oなし」の独自ベクター地図に
+    統一した。そのため以前必要だった国土地理院コンテンツ利用規約に
+    基づく出典表示（「出典：国土地理院…」）も不要になった。実際の
+    地形の精密さ・詳細さではタイル画像に劣るが、震源のおおよその位置
+    （どの国・地域か、日本との位置関係）を伝える目的には十分と判断した。
+
+    【同期関数への変更】旧render_overseas_map()はタイル取得のHTTPフェッチ
+    が必要なためasync関数（aiohttp.ClientSessionを引数に取る）だったが、
+    ネットワークI/Oが不要になったため、render_shindo_map等と同じ同期
+    関数に変更した（呼び出し側はaiohttp.ClientSessionを渡す必要が無く
+    なり、awaitも不要になった）。
+
+    hypocenter_lonlat : (経度, 緯度)。震源不明の場合は呼び出し側で判定し、
+        このプロパティ自体を呼ばないこと（本関数は必須パラメータとして扱う）。
+
+    GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
+    未取得の場合は None を返す。
+    """
+    if not _ready():
+        return None
+
+    lon, lat = hypocenter_lonlat
+    if lon is None or lat is None or lon <= -180 or lat <= -90:
+        return None
+
+    if not _local_areas.get():
+        return None
+
+    try:
+        viewport = _compute_overseas_viewport((lon, lat))
+        width, height = _dimensions_for_bbox(viewport)
+
+        # 日付変更線をまたぐ表示範囲では、震源の経度をviewportと同じ
+        # ±360シフトで正規化してから投影する（正規化を怠ると震源が表示
+        # 範囲外の座標に投影され、バツ印が描画されない／端にわずかに
+        # 掛かるだけになる。旧gis_tile_render.pyの2026-09-25修正と同じ
+        # 理由）。
+        draw_lon = lon
+        for candidate in (lon, lon + 360, lon - 360):
+            if viewport.lon_min <= candidate <= viewport.lon_max:
+                draw_lon = candidate
+                break
+
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
+
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+
+            # 1. 世界の国境データ（日本を除く）
+            _draw_country_fill(draw, projector, viewport)
+
+            # 2. 日本の細分区域（陸地色の塗り＋境界線。日本自体は自前の
+            #    GeoJSONの方が精密なため、国境データの上から重ね描きする）
+            _draw_land_fill(draw, _local_areas, projector, viewport)
+            _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+
+            # 3. 震源のバツ印
+            warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
+            _draw_x_mark(draw, projector.project(draw_lon, lat), warn_rgb)
+
+            return _finalize(canvas, (width, height))
+    except Exception:
+        logger.error("GIS地図(海外)描画エラー", exc_info=True)
         return None

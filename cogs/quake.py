@@ -33,11 +33,12 @@ code=551 のメッセージを受け取る方式に移行した（handle_p2p_qua
 - core.helpers     : format_jma_time
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
-- core.gis_render.render_shindo_map / is_outside_japan_bbox : GIS地図描画
-  （試験導入、2026-09-13〜。GIS_MAP_ENABLE=false・外部データ未取得時は
-   Noneを返すのでその場合は画像添付を省略するだけでよい）
-- core.gis_tile_render.render_overseas_map : 震源が日本国外の場合、
-  国土地理院タイルとの重ね合わせ表示に切り替える（2026-09-15追加）
+- core.gis_render.render_shindo_map / is_outside_japan_bbox / render_overseas_map :
+  GIS地図描画（試験導入、2026-09-13〜。GIS_MAP_ENABLE=false・外部データ
+  未取得時はNoneを返すのでその場合は画像添付を省略するだけでよい）。
+  震源が日本国外の場合はrender_overseas_mapに切り替える（2026-09-15〜。
+  2026-09-26に地理院タイル重ね合わせ〈旧core.gis_tile_render〉を廃止し、
+  同期関数・同モジュール内に統合）
 
 【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付（core.p2p_image.
 P2PImageMixin）は、気象庁シェープファイル/GeoJSONベースの地図描画機能
@@ -71,8 +72,9 @@ from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.quake_history_log import build_quake_record, format_quake_record_log_line
-from core.gis_render import render_shindo_map, is_outside_japan_bbox, _STATION_ZOOM_MIN_SHINDO
-from core.gis_tile_render import render_overseas_map
+from core.gis_render import (
+    render_shindo_map, is_outside_japan_bbox, render_overseas_map, _STATION_ZOOM_MIN_SHINDO,
+)
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 
@@ -600,10 +602,10 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         - points が無くても、震源の緯度経度が有効であればバツ印のみの
           地図を返す（震度分布が不明な情報種別＝Destination等向け）。
         - 震源が日本国外（遠地地震に関する情報＝Foreign 等）の場合は、
-          core.gis_render の日本限定ベクター地図では震源位置を表現
-          できないため、国土地理院タイルとの重ね合わせ表示
-          （core.gis_tile_render.render_overseas_map）に切り替える
-          （2026-09-15追加。この場合は1枚のみ）。
+          日本限定の区域データでは震源位置を表現できないため、世界の
+          国境データを使う render_overseas_map に切り替える
+          （2026-09-15追加、2026-09-26に地理院タイル重ね合わせを廃止し
+          独自ベクター地図化。この場合は1枚のみ）。
 
         GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何もない
         場合は空リストを返す（core.gis_render.render_shindo_map 参照）。
@@ -613,7 +615,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             hypo_lonlat = (longitude, latitude)
 
         if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
-            overseas = await render_overseas_map(self.session, hypo_lonlat)
+            overseas = render_overseas_map(hypo_lonlat)
             return [overseas] if overseas else []
 
         region_shindo = None
