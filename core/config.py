@@ -604,6 +604,14 @@ SHINDO_COLOR_7        = _env_hex_color("SHINDO_COLOR_7",        0x54068E)  # 震
 TSUNAMI_COLOR_MAJOR_WARNING = _env_hex_color("TSUNAMI_COLOR_MAJOR_WARNING", 0xD344FC)  # 大津波警報
 TSUNAMI_COLOR_WARNING       = _env_hex_color("TSUNAMI_COLOR_WARNING",       0xF93022)  # 津波警報
 TSUNAMI_COLOR_WATCH         = _env_hex_color("TSUNAMI_COLOR_WATCH",         0xEEDB2D)  # 津波注意報
+# 津波予報（若干の海面変動。気象庁の警報コード71/72/73）専用の色
+# （2026-09-26追加）。従来 cogs/tsunami.py の notify_tsunami_forecast内に
+# ハードコードされていたEmbed色（0x80FFFF、水色）をこちらへ集約し、他の
+# 3段階と同様に.envで上書き可能にした。GIS地図描画（render_tsunami_map）
+# 側でも同じ値を使う（従来はこの段階だけGIS地図の対象外になっており、
+# 津波予報のみが発表された場合に地図が描画されない不具合があったため、
+# 対象に追加した際にあわせて色も導入した）。
+TSUNAMI_COLOR_FORECAST      = _env_hex_color("TSUNAMI_COLOR_FORECAST",      0x80FFFF)  # 津波予報
 TSUNAMI_COLOR_UNKNOWN       = _env_hex_color("TSUNAMI_COLOR_UNKNOWN",       0x56BCFC)  # 不明・その他
 
 # ===============================

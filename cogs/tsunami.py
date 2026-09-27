@@ -73,7 +73,7 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
-    TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_UNKNOWN,
+    TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.helpers import truncate_embed_description, format_jma_time
@@ -880,11 +880,18 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 # notify_tsunami_forecastと同じ理由で追加。この関数は
                 # Category.Kind.Name（テキスト）で判定する設計のため、
                 # 文字列の部分一致で判定する（"大津波警報"は"津波警報"の
-                # 文字列を含むため、必ず大津波警報を先に判定すること）。
+                # 文字列を含むため、必ず大津波警報を先に判定すること。
+                # "津波予報"は"警報"・"注意報"のいずれの文字列も含まない
+                # ため、他の3パターンとの前方一致の曖昧さは無い）。
+                # 【2026-09-26追加】notify_tsunami_forecastで発見した
+                # 「津波予報のみの場合に地図が描画されない」不具合と
+                # 同じ原因（"津波予報"が判定対象に含まれていなかった）が
+                # ここにもあったため、あわせて追加した。
                 grade_text_map = [
                     ("大津波警報", "MajorWarning"),
                     ("津波警報", "Warning"),
                     ("津波注意報", "Watch"),
+                    ("津波予報", "Forecast"),
                 ]
                 for fcast in forecast_items:
                     cat = fcast.get("Category", {})
@@ -896,6 +903,8 @@ class TsunamiCog(commands.Cog, AudioMixin):
                         max_grade = "Warning"
                     elif "津波注意報" in kind and max_grade == "Unknown":
                         max_grade = "Watch"
+                    elif "津波予報" in kind and max_grade == "Unknown":
+                        max_grade = "Forecast"
 
                     area_name = fcast.get("Area", {}).get("Name")
                     if not area_name:
@@ -912,6 +921,8 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     description += "\n現在、津波警報が発表されています"
                 elif max_grade == "Watch":
                     description += "\n現在、津波注意報が発表されています"
+                elif max_grade == "Forecast":
+                    description += "\n現在、津波予報が発表されています"
             
             # Embed 作成
             color = 0x00BFFF
@@ -983,7 +994,13 @@ class TsunamiCog(commands.Cog, AudioMixin):
             5: 0xC800FF,  # 大津波警報: 紫
             4: 0xFF2800,  # 津波警報: 赤
             2: 0xFAF500,  # 津波注意報: 黄
-            1: 0x80FFFF,  # 津波予報: 水色
+            # 津波予報のみ、下記GIS地図描画（render_tsunami_map）と同じ色を
+            # 使うため、.envで上書き可能な共通定数に置き換えた
+            # （2026-09-26。従来はここに0x80FFFFがハードコードされていた
+            # だけで、値自体は変えていない）。他の3段階（5/4/2）は本来の
+            # 修正対象ではないため、このBotではあえて手を加えていない
+            # （揃えるなら別途相談ください）。
+            1: TSUNAMI_COLOR_FORECAST,  # 津波予報: 水色
             0: 0xC8C8CB,  # なし・解除: グレー
         }
         WARN_LABEL = {
@@ -1175,12 +1192,21 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # level_height_areas（{震度コード: {予想高さ: [区域名]}}）を
             # 平坦化し、{区域名: grade文字列} に変換して再利用する
             # （区域名の抽出処理自体は上のループで既に完了しているため、
-            # ここで二重にループし直さない）。level=1（津波予報。若干の
-            # 海面変動）は警報・注意報ほど緊急性が高くないため地図には
-            # 含めない（Embed本文には引き続き表示される）。
+            # ここで二重にループし直さない）。
+            #
+            # 【2026-09-26 不具合修正】level=1（津波予報。若干の海面変動）
+            # がlevel_to_gradeに含まれておらず、area_gradesから除外されて
+            # いたため、津波予報のみが発表された場合（他に警報・注意報の
+            # 区域が1つも無い場合）はarea_gradesが空になり、
+            # render_tsunami_map()がNoneを返して地図が一切添付されない
+            # 不具合があった（Embed本文には引き続き表示されるため一見
+            # 気づきにくい）。津波予報も他の3段階と同様に地図の対象に含める
+            # よう修正した（色は上のWARN_COLORS/TSUNAMI_COLOR_FORECASTと
+            # 同じものをrender_tsunami_map側の_TSUNAMI_GRADE_COLORSにも
+            # 追加済み）。
             gis_file = None
             if not is_cancelled:
-                level_to_grade = {5: "MajorWarning", 4: "Warning", 2: "Watch"}
+                level_to_grade = {5: "MajorWarning", 4: "Warning", 2: "Watch", 1: "Forecast"}
                 area_grades = {
                     area_name: grade
                     for lv, grade in level_to_grade.items()

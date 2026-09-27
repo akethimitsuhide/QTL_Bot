@@ -90,7 +90,7 @@ from PIL import Image, ImageDraw, ImageFont
 from core.config import (
     GIS_MAP_ENABLE, GIS_MAP_WARNING_COLOR,
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
-    TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_UNKNOWN,
+    TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
 )
 from core.constants import SHINDO_COLORS, LG_COLORS
 from core.helpers import shindo_short_label
@@ -988,6 +988,13 @@ _TSUNAMI_GRADE_COLORS = {
     "MajorWarning": TSUNAMI_COLOR_MAJOR_WARNING,
     "Warning":      TSUNAMI_COLOR_WARNING,
     "Watch":        TSUNAMI_COLOR_WATCH,
+    # 津波予報（若干の海面変動）。2026-09-26追加。従来この段階は
+    # render_tsunami_map の呼び出し側（cogs/tsunami.py）で area_grades
+    # 自体に含めておらず、津波予報のみが発表された場合（他の区域が
+    # 無い場合）にarea_gradesが空になり、地図が一切描画されない不具合が
+    # あった。呼び出し側の対応（Forecastキーを含めるよう修正）と合わせて
+    # 色定義もこちらに追加した。
+    "Forecast":     TSUNAMI_COLOR_FORECAST,
 }
 
 
@@ -999,8 +1006,9 @@ def render_tsunami_map(area_grades: dict) -> Optional[bytes]:
 
     area_grades : {区域名(津波情報APIのareas[].name): 警報種別}
         警報種別は "MajorWarning"（大津波警報）/ "Warning"（津波警報）/
-        "Watch"（津波注意報）を想定。それ以外の値（"Unknown"等）は
-        TSUNAMI_COLOR_UNKNOWN で描画する。
+        "Watch"（津波注意報）/ "Forecast"（津波予報。2026-09-26追加）を
+        想定。それ以外の値（"Unknown"等）は TSUNAMI_COLOR_UNKNOWN で
+        描画する。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
