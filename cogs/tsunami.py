@@ -78,7 +78,9 @@ from core.config import (
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
-from core.gis_render import render_tsunami_map
+from core.gis_render import (
+    render_tsunami_map, render_tsunami_observation_map, render_tsunami_offshore_map,
+)
 from core.gis_data import ensure_gis_data_ready
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
@@ -221,12 +223,19 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 if not data:
                     return
 
-                # 観測情報（observation）：既存処理
-                OBS_TITLES = [
-                    "津波観測に関する情報",
-                    "沖合の津波観測に関する情報",
-                    "各地の満潮時刻・津波到達予想時刻に関する情報",
-                ]
+                # 観測情報（observation）
+                # 【2026-09-28修正】従来は下記3種別すべてを同じ汎用ハンドラ
+                # （notify_tsunami_observation）に流し込んでいたが、
+                # VTSE51（沿岸）・VTSE52（沖合）はデータ構造・望ましい
+                # 表示形式（グルーピング方法、地図の描画内容）が大きく
+                # 異なるため専用ハンドラに分割した
+                # （notify_tsunami_observation_coastal /
+                # notify_tsunami_observation_offshore）。
+                # 「各地の満潮時刻・津波到達予想時刻に関する情報」は今回
+                # 対応対象外のため、従来通り汎用ハンドラに残す。
+                OBS_COASTAL_TITLE  = "津波観測に関する情報"
+                OBS_OFFSHORE_TITLE = "沖合の津波観測に関する情報"
+                OBS_TIDE_TITLE     = "各地の満潮時刻・津波到達予想時刻に関する情報"
                 # 予報・警報情報（forecast）
                 FORECAST_TITLES = [
                     "津波予報",
@@ -246,7 +255,14 @@ class TsunamiCog(commands.Cog, AudioMixin):
 
                 for item in data:
                     ttl = item.get("ttl", "")
-                    is_obs          = any(x in ttl for x in OBS_TITLES)
+                    # 【注意】"沖合の津波観測に関する情報" は文字列として
+                    # "津波観測に関する情報" を部分文字列に含むため、必ず
+                    # 沖合側を先に判定してから沿岸側を判定する
+                    # （沖合側に該当した場合は沿岸側の判定対象から除く）。
+                    is_obs_offshore = OBS_OFFSHORE_TITLE in ttl
+                    is_obs_coastal  = (not is_obs_offshore) and (OBS_COASTAL_TITLE in ttl)
+                    is_obs_tide     = OBS_TIDE_TITLE in ttl
+                    is_obs          = is_obs_offshore or is_obs_coastal or is_obs_tide
                     is_forecast     = any(x in ttl for x in FORECAST_TITLES)
                     is_hypo_update  = any(x in ttl for x in HYPO_UPDATE_TITLES)
                     is_nankai       = any(x in ttl for x in NANKAI_TITLES)
@@ -308,7 +324,16 @@ class TsunamiCog(commands.Cog, AudioMixin):
                             await other_cog.notify_nankai_trough(detail, list_item=item)
                         else:
                             logger.error("OtherInfoCog が見つからないため南海トラフ地震関連情報を通知できません")
+                    elif is_obs_offshore:
+                        logger.info(f"津波観測情報（沖合）取得: ID={event_id}, 時刻={report_time}")
+                        await self.notify_tsunami_observation_offshore(detail, list_item=item)
+                    elif is_obs_coastal:
+                        logger.info(f"津波観測情報（沿岸）取得: ID={event_id}, 時刻={report_time}")
+                        await self.notify_tsunami_observation_coastal(detail, list_item=item)
                     else:
+                        # 「各地の満潮時刻・津波到達予想時刻に関する情報」等、
+                        # 専用ハンドラ未対応の観測系情報は従来の汎用ハンドラに
+                        # フォールバックする（将来対応予定）。
                         logger.info(f"津波観測情報取得: ID={event_id}, 時刻={report_time}")
                         await self.notify_tsunami_observation(detail, list_item=item)
                     self.last_tsunami_observation_id = current_key
@@ -735,7 +760,336 @@ class TsunamiCog(commands.Cog, AudioMixin):
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
     # ===============================
-    # 津波到達時刻情報通知（VTSE41/51/52）
+    # 津波観測点の観測値ヘルパー（2026-09-28追加）
+    # ===============================
+    # notify_tsunami_observation（満潮時刻情報向けフォールバック）・
+    # notify_tsunami_observation_coastal（VTSE51）で共通して使う、
+    # Station.MaxHeight から表示用の値を取り出す処理を1箇所にまとめる
+    # （以前はnotify_tsunami_observation内にインライン実装されていた）。
+    @staticmethod
+    def _extract_station_raw_height(station: dict) -> str:
+        """
+        観測点(Station)辞書からMaxHeightの生の値文字列を取り出す。
+        Condition（定性的表現）優先、次にTsunamiHeight（数値文字列）、
+        次にvalue、いずれも無ければ「欠測」を返す。
+        """
+        max_h = station.get("MaxHeight", {}) or {}
+        condition = max_h.get("Condition", "")
+        if condition:
+            return condition
+        tsunami_height = max_h.get("TsunamiHeight", "")
+        if tsunami_height:
+            return str(tsunami_height)
+        value = max_h.get("value")
+        if value is not None:
+            return str(value)
+        return "欠測"
+
+    @staticmethod
+    def _format_observation_height_display(raw_height: str) -> str:
+        """
+        _extract_station_raw_height() の生値を通知文表示用に整形する。
+        "微弱"/"弱"/"低い"/"欠測"/"観測中" はそのまま、"<0.2"→"0.2m未満"、
+        数値のみ→"Xm"、それ以外はそのまま返す。
+        """
+        if raw_height in ("微弱", "弱", "低い", "欠測", "観測中"):
+            return raw_height
+        if raw_height.startswith("<0.2"):
+            return "0.2m未満"
+        if raw_height and raw_height[0].isdigit():
+            return f"{raw_height}m"
+        return raw_height
+
+    def _build_observation_cause_text(self, body: dict) -> str:
+        """
+        Body.Earthquake（原因地震情報）から通知文の1行を組み立てる。
+        notify_tsunami_observation / notify_tsunami_observation_coastal /
+        notify_tsunami_observation_offshore の3箇所で共通のため切り出した
+        （2026-09-28追加）。原因地震情報が無ければ空文字列を返す。
+        """
+        eq_list = body.get("Earthquake", [])
+        if not eq_list:
+            return ""
+        eq = eq_list[0] if isinstance(eq_list, list) else eq_list
+        origin_time = format_jma_time(eq.get("OriginTime", "不明"))
+        hypo = eq.get("Hypocenter", {})
+        hypo_name = hypo.get("Area", {}).get("Name", "不明")
+        magnitude = eq.get("Magnitude", "不明")
+        depth = hypo.get("Depth", "")
+        depth_str = f"　深さ{depth}" if depth else ""
+        eq_source = eq.get("Source", "")
+        source_note = f" ※原因地震情報は {eq_source} からの情報です" if eq_source else ""
+        return f"原因地震： {hypo_name}　M{magnitude}{depth_str}（{origin_time}発生）{source_note}"
+
+    # ===============================
+    # 津波観測に関する情報（VTSE51、沿岸の潮位観測点）
+    # ===============================
+    async def notify_tsunami_observation_coastal(self, detail: dict, list_item: dict | None = None,
+                                                    is_test: bool = False) -> None:
+        """
+        「津波観測に関する情報」（VTSE51）専用の通知（2026-09-28追加）。
+        従来はnotify_tsunami_observationが「沖合の津波観測に関する情報」
+        （VTSE52）等とまとめて処理していたが、以下の理由で分離した:
+          - タイトルを一律「津波情報」等に一本化せず、{Head.Title}
+            （＝この情報種別の場合は常に「津波観測に関する情報」）を
+            そのまま使ってほしいという要望
+          - 観測点を「警報区分（■津波警報／■津波注意報 等）→地域→
+            観測点」の3段階でグルーピングして表示してほしいという要望
+            （警報区分はBody.Tsunami.Forecast.Item[].Area.Codeで観測点の
+            Areaと突き合わせて判定する。該当するForecast項目が無い
+            場合は「観測情報」という見出しにまとめる）
+          - GIS地図（render_tsunami_observation_map）に観測値の色分け
+            付き観測点を描画してほしいという要望
+        """
+        channel = self.tsunami_channel or self.channel
+        if not channel:
+            return
+        try:
+            head = detail.get("Head", {}) or {}
+            title = head.get("Title") or (list_item.get("ttl") if list_item else None) or "津波観測に関する情報"
+            if is_test:
+                title = "【テスト】 " + title
+
+            source = detail.get("Control", {}).get("PublishingOffice", "気象庁")
+            report_time = format_jma_time(head.get("ReportDateTime", "不明"))
+
+            body = detail.get("Body", {}) or {}
+            cause_text = self._build_observation_cause_text(body)
+
+            description = (
+                f"**発表機関:** {source}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if cause_text:
+                description += f"\n**{cause_text}**\n"
+
+            tsunami = body.get("Tsunami", {}) or {}
+            obs_items = tsunami.get("Observation", {}).get("Item", []) or []
+            forecast_items = tsunami.get("Forecast", {}).get("Item", []) or []
+
+            # Area.Code → 警報区分ラベル（Forecastから、観測点のグルーピングに使う）
+            area_grade_label: dict[str, str] = {}
+            for fcast in forecast_items:
+                area = fcast.get("Area", {}) or {}
+                code = area.get("Code")
+                kind_name = fcast.get("Category", {}).get("Kind", {}).get("Name", "")
+                if code and kind_name:
+                    area_grade_label[code] = kind_name
+
+            GRADE_LABEL_ORDER = ["大津波警報", "津波警報", "津波注意報", "津波予報"]
+
+            def _grade_sort_key(label: str) -> int:
+                return GRADE_LABEL_ORDER.index(label) if label in GRADE_LABEL_ORDER else len(GRADE_LABEL_ORDER)
+
+            # grade_label → [(area_name, [表示行, ...]), ...]（登場順を保持）
+            grouped: "defaultdict[str, list[tuple[str, list[str]]]]" = defaultdict(list)
+            map_points: list[dict] = []
+
+            for item in obs_items:
+                area = item.get("Area", {}) or {}
+                area_name = area.get("Name") or "不明"
+                grade_label = area_grade_label.get(area.get("Code"), "観測情報")
+
+                lines: list[str] = []
+                for st in item.get("Station", []) or []:
+                    st_name = st.get("Name", "不明")
+                    raw_height = self._extract_station_raw_height(st)
+                    height_display = self._format_observation_height_display(raw_height)
+
+                    max_h = st.get("MaxHeight", {}) or {}
+                    first_h = st.get("FirstHeight", {}) or {}
+                    # 「観測中」＝まだピークが確定していない（今後さらに
+                    # 高くなる可能性がある）ことを示す上向き矢印を付ける
+                    if max_h.get("Condition") == "観測中":
+                        height_display += "↑"
+
+                    is_new = (first_h.get("Revise") == "追加") or (max_h.get("Revise") == "追加")
+                    name_display = f"{st_name}（追加）" if is_new else st_name
+
+                    lines.append(f"　　{name_display}　　高さ：{height_display}")
+
+                    latlon = st.get("latlon") or {}
+                    lat, lon = latlon.get("lat"), latlon.get("lon")
+                    if lat is not None and lon is not None:
+                        map_points.append({"lat": lat, "lon": lon, "height": raw_height})
+
+                grouped[grade_label].append((area_name, lines))
+
+            if grouped:
+                for grade_label in sorted(grouped.keys(), key=_grade_sort_key):
+                    description += f"\n**■ {grade_label}**\n"
+                    for area_name, lines in grouped[grade_label]:
+                        description += f"　{area_name}\n"
+                        description += "\n".join(lines) + "\n"
+            else:
+                description += "\n観測情報はありません。\n"
+
+            # コメント情報（Body.Comments。以前はBody.Tsunami.Comment
+            # という誤ったキーを参照しており常に空になっていたバグを
+            # 2026-09-28に修正。cogs/other.py・notify_tsunami_forecastと
+            # 同じ Body.Comments が正しいキー）
+            comments = body.get("Comments", {}) or {}
+            free_form = comments.get("FreeFormComment", "")
+            if free_form:
+                description += f"\n{free_form}\n"
+            warning_comment = comments.get("WarningComment", {}).get("Text", "")
+            if warning_comment:
+                description += f"\n**注意:** {warning_comment}\n"
+
+            description = truncate_embed_description(
+                description, max_chars=4096, suffix="\n\n（地域が多いため一部省略）"
+            )
+
+            embed = discord.Embed(title=title, description=description, color=0x00BFFF, timestamp=datetime.now())
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            gis_file = None
+            gis_image_bytes = render_tsunami_observation_map(map_points)
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
+
+            if not is_test:
+                record_delivery(True, "津波観測情報（沿岸）")
+                record_notification("津波観測情報（沿岸）", title)
+            logger.info(f"津波観測情報（沿岸）を通知しました: {title}")
+
+        except Exception as e:
+            record_delivery(False, "津波観測情報（沿岸）", str(e))
+            logger.error(f"notify_tsunami_observation_coastal エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+    # ===============================
+    # 沖合の津波観測に関する情報（VTSE52、沖合の水圧計・GPS波浪計）
+    # ===============================
+    async def notify_tsunami_observation_offshore(self, detail: dict, list_item: dict | None = None,
+                                                     is_test: bool = False) -> None:
+        """
+        「沖合の津波観測に関する情報」（VTSE52）専用の通知（2026-09-28追加）。
+        この情報種別は気象庁データ上Observation.Item[].Area.Name/Codeが
+        常にnullのため（実データで確認済み）、VTSE51のような地域別の
+        グルーピングは行わず観測点をそのまま一覧表示する。初動
+        （押し/引き）は通知文にも文字で示しつつ、GIS地図
+        （render_tsunami_offshore_map）ではドーナツ（押し）／塗り円
+        （引き）として視覚的にも表現する。
+        """
+        channel = self.tsunami_channel or self.channel
+        if not channel:
+            return
+        try:
+            head = detail.get("Head", {}) or {}
+            title = head.get("Title") or (list_item.get("ttl") if list_item else None) or "沖合の津波観測に関する情報"
+            if is_test:
+                title = "【テスト】 " + title
+
+            source = detail.get("Control", {}).get("PublishingOffice", "気象庁")
+            report_time = format_jma_time(head.get("ReportDateTime", "不明"))
+
+            body = detail.get("Body", {}) or {}
+            cause_text = self._build_observation_cause_text(body)
+
+            description = (
+                f"**発表機関:** {source}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if cause_text:
+                description += f"\n**{cause_text}**\n"
+
+            tsunami = body.get("Tsunami", {}) or {}
+            obs_items = tsunami.get("Observation", {}).get("Item", []) or []
+
+            station_lines: list[str] = []
+            map_points: list[dict] = []
+            for item in obs_items:
+                for st in item.get("Station", []) or []:
+                    st_name = st.get("Name", "不明")
+                    first_h = st.get("FirstHeight", {}) or {}
+                    max_h = st.get("MaxHeight", {}) or {}
+
+                    initial = first_h.get("Initial", "")
+                    if initial == "押し":
+                        kind_label, is_push = "押し", True
+                    elif initial == "引き":
+                        kind_label, is_push = "引き", False
+                    else:
+                        kind_label, is_push = "不明", None
+
+                    raw_height = self._extract_station_raw_height(st)
+                    status_display = self._format_observation_height_display(raw_height)
+
+                    is_new = (first_h.get("Revise") == "追加") or (max_h.get("Revise") == "追加")
+                    name_display = f"{st_name}（追加）" if is_new else st_name
+
+                    station_lines.append(
+                        f"■{name_display}\n"
+                        f"　種類：{kind_label}\n"
+                        f"　状態：{status_display}"
+                    )
+
+                    latlon = st.get("latlon") or {}
+                    lat, lon = latlon.get("lat"), latlon.get("lon")
+                    if lat is not None and lon is not None:
+                        map_points.append({"lat": lat, "lon": lon, "is_push": is_push, "is_new": is_new})
+
+            if station_lines:
+                description += "\n" + "\n".join(station_lines) + "\n"
+            else:
+                description += "\n観測情報はありません。\n"
+
+            # コメント情報（Body.Comments。VTSE51側と同じ2026-09-28修正）
+            comments = body.get("Comments", {}) or {}
+            free_form = comments.get("FreeFormComment", "")
+            if free_form:
+                description += f"\n{free_form}\n"
+            # 【タローさんの理想例に合わせ、この情報種別ではWarningComment
+            # を「**注意:**」の太字ラベル無しでそのまま表示する
+            # （VTSE51側は従来通り太字ラベル付き）】
+            warning_comment = comments.get("WarningComment", {}).get("Text", "")
+            if warning_comment:
+                description += f"\n{warning_comment}\n"
+
+            description = truncate_embed_description(
+                description, max_chars=4096, suffix="\n\n（観測点が多いため一部省略）"
+            )
+
+            embed = discord.Embed(title=title, description=description, color=0x00BFFF, timestamp=datetime.now())
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            gis_file = None
+            gis_image_bytes = render_tsunami_offshore_map(map_points)
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
+
+            if not is_test:
+                record_delivery(True, "津波観測情報（沖合）")
+                record_notification("津波観測情報（沖合）", title)
+            logger.info(f"津波観測情報（沖合）を通知しました: {title}")
+
+        except Exception as e:
+            record_delivery(False, "津波観測情報（沖合）", str(e))
+            logger.error(f"notify_tsunami_observation_offshore エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+    # ===============================
+    # 津波到達時刻情報通知（VTSE41/51/52。上記2種別専用ハンドラの
+    # フォールバック。現状「各地の満潮時刻・津波到達予想時刻に関する
+    # 情報」のみがここを通る。2026-09-28: VTSE51/52は専用ハンドラに
+    # 分離したため、docstring・コメントの「VTSE51/52」表記は歴史的な
+    # ものとして残しているが、実際にこの関数へ到達するのは満潮時刻
+    # 情報のみ）
     # ===============================
     async def notify_tsunami_observation(self, detail, list_item=None, is_test=False):
         channel = self.tsunami_channel or self.channel
@@ -859,7 +1213,13 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 description += "\n"
             
             # コメント情報
-            comment = tsunami.get("Comment", {})
+            # 【2026-09-28修正】従来 tsunami.get("Comment", {})
+            # （Body.Tsunami.Comment、単数形）を参照していたが、実際の
+            # 気象庁JSONではComments（複数形）はBody直下
+            # （Body.Comments）にあり、Body.Tsunami配下には存在しない
+            # ため常に空辞書になっていた（notify_tsunami_forecast・
+            # cogs/other.pyの実装との突き合わせで判明）。
+            comment = body.get("Comments", {})
             free_form = comment.get("FreeFormComment", "")
             if free_form:
                 description += f"{free_form}\n"

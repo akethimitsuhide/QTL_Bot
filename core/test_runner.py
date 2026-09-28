@@ -288,6 +288,28 @@ TEST_TARGETS = {
         # コピペミスと見られ、正しい入力JSONを渡してもこの検証のせいで
         # 「フィールド不足」という誤った警告が出ていた
         # （sniff_test_target のフィンガープリントも参照）。
+        # 【2026-09-28追記】VTSE51/52は下記の tsunami_observation_coastal /
+        # tsunami_observation_offshore に分離した。本対象は「各地の
+        # 満潮時刻・津波到達予想時刻に関する情報」等、専用ハンドラ
+        # 未対応の観測系情報向けの汎用フォールバックとして残る。
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "tsunami_observation_coastal": {
+        # 【2026-09-28追加】「津波観測に関する情報」（VTSE51）専用。
+        # 沿岸の潮位観測点を警報区分・地域ごとにグルーピングして表示し、
+        # GIS地図（render_tsunami_observation_map）を添付する。
+        "cog_name": "TsunamiCog",
+        "method": "notify_tsunami_observation_coastal",
+        "data_kwarg": "detail",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "tsunami_observation_offshore": {
+        # 【2026-09-28追加】「沖合の津波観測に関する情報」（VTSE52）専用。
+        # 観測点を一覧表示し、GIS地図（render_tsunami_offshore_map）に
+        # 押し（ドーナツ）／引き（塗り円）・新規追加（黄色フチ）を描画する。
+        "cog_name": "TsunamiCog",
+        "method": "notify_tsunami_observation_offshore",
+        "data_kwarg": "detail",
         "expected_fields": ["Control", "Head", "Body"],
     },
     "tsunami_forecast": {
@@ -531,10 +553,26 @@ def sniff_test_target(data) -> list[str]:
         tsunami_body = tsunami_body if isinstance(tsunami_body, dict) else {}
 
         if isinstance(tsunami_body.get("Observation"), dict):
-            # tsunami_observation: cogs/tsunami.py notify_tsunami_observation
-            # （Forecastを併せ持つ場合もあるが、Observationがあれば
-            #   優先的にこちらと判定する。実際のVTSE51/52がこの形）
-            matches.append("tsunami_observation")
+            # 【2026-09-28追記】VTSE51「津波観測に関する情報」・VTSE52
+            # 「沖合の津波観測に関する情報」はどちらもBody.Tsunami.
+            # Observationを持ち構造だけでは区別できないため、
+            # Head.Title（実データで確認済み。"沖合の"の有無で判別）で
+            # さらに絞り込む。どちらにも一致しない場合（「各地の満潮
+            # 時刻・津波到達予想時刻に関する情報」等、専用ハンドラ未対応の
+            # 情報種別）は従来通り汎用の tsunami_observation にフォール
+            # バックする。"沖合の津波観測に関する情報" は文字列として
+            # "津波観測に関する情報" を含むため、必ず沖合側を先に判定する
+            # （cogs/tsunami.py fetch_tsunami_observation の判定と同じ順序）。
+            head_title = (data.get("Head") or {}).get("Title", "") or ""
+            if "沖合の津波観測に関する情報" in head_title:
+                matches.append("tsunami_observation_offshore")
+            elif "津波観測に関する情報" in head_title:
+                matches.append("tsunami_observation_coastal")
+            else:
+                # tsunami_observation: cogs/tsunami.py notify_tsunami_observation
+                # （Forecastを併せ持つ場合もあるが、Observationがあれば
+                #   優先的にこちらと判定する）
+                matches.append("tsunami_observation")
         elif isinstance(tsunami_body.get("Forecast"), (dict, list)):
             # tsunami_forecast: cogs/tsunami.py notify_tsunami_forecast
             # （Observationを持たずForecastのみ＝VTSE41系）
