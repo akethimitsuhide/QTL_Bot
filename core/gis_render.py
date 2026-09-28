@@ -104,6 +104,7 @@ from core.config import (
 from core.constants import SHINDO_COLORS, LG_COLORS
 from core.helpers import shindo_short_label
 from core import gis_data
+from core.tsunami_speech import obs_grade_from_height
 
 logger = logging.getLogger("QTLBot")
 
@@ -768,41 +769,11 @@ _TSUNAMI_OBS_GRADE_COLORS = {
 _TSUNAMI_OBS_GRADE_PRIORITY = {"unknown": 0, "forecast": 1, "watch": 2, "warning": 3, "major_warning": 4}
 
 
-def tsunami_obs_grade_from_height(raw_height: str) -> str:
-    """
-    津波観測点（VTSE51）の観測値文字列から、地図描画用の警報色区分を
-    判定する。cogs/tsunami.py の notify_tsunami_observation_coastal が、
-    通知文の表示（TsunamiCog._format_observation_height）とは別に、
-    地図の色分け判定にも同じ生値を使うため公開関数にしている。
-
-    区分（タローさんの指定）:
-      5m以上           → "major_warning"（紫、大津波警報級）
-      1m以上5m未満     → "warning"（赤、警報級）
-      0.1m以上1m未満   → "watch"（黄、注意報級）
-      微弱・弱・低い・観測中・"<0.2"等 → "forecast"（水色、予報級）
-      欠測・不明・空   → "unknown"（灰）
-    """
-    if not raw_height:
-        return "unknown"
-    s = str(raw_height).strip()
-    if s in ("微弱", "弱", "低い", "観測中"):
-        return "forecast"
-    if s in ("欠測", "不明"):
-        return "unknown"
-    if s.startswith("<"):
-        # "<0.2" 等、測定下限未満の表記は「予報級」として扱う
-        return "forecast"
-    try:
-        value = float(s)
-    except (TypeError, ValueError):
-        return "unknown"
-    if value >= 5:
-        return "major_warning"
-    if value >= 1:
-        return "warning"
-    if value >= 0.1:
-        return "watch"
-    return "forecast"
+# 階級判定は読み上げ（cogs/tsunami.py・core/tsunami_speech.py）と共通の基準を
+# 使うため、純関数として core/tsunami_speech.py に一本化した（2026-09-28）。
+# 区分（5m以上=紫／1m以上5m未満=赤／0.1m以上1m未満=黄／微弱・弱・低い・観測中・
+# "<0.2"等=水色／欠測・不明・空=灰）の詳細は obs_grade_from_height のdocstring参照。
+tsunami_obs_grade_from_height = obs_grade_from_height
 
 
 def _draw_tsunami_obs_marker(draw: ImageDraw.ImageDraw, xy: tuple[float, float], grade: str) -> None:

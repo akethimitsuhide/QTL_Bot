@@ -1028,6 +1028,17 @@ python3 bot.py --test_tsunami tests/fixtures/tsunami_sample.json
 python3 bot.py --test_jishin_kanchi tests/fixtures/jishin_kanchi_sample.json
 ```
 
+### 単体テスト（pytest）
+
+`core/tsunami_speech.py`（津波情報の読み上げ文生成・状態変化の分類・二重読み上げ防止ゲート）は、Discord接続や環境変数なしで検証できるよう純関数として実装しており、`tests/test_tsunami_speech.py` に単体テストを置いている（2026-09-28追加）。
+
+```bash
+pip install pytest
+python3 -m pytest tests/ -q
+```
+
+※ `*.json` は `.gitignore` の対象のため、テストデータはJSONファイルではなくテストコード内の辞書として持っている。
+
 ### テストであることの明記
 
 `notify_eew` / `notify_quake` / `notify_tsunami` 等、`is_test` 引数に対応している関数は、
@@ -1243,6 +1254,7 @@ QTL_Bot/
     │                                 （build_simplified_countries_geojson、2026-09-26追加。
     │                                 Ramer-Douglas-Peuckerアルゴリズムによる頂点間引き）も担当
     ├── gis_render.py               - GIS地図描画（試験導入）のPillowベース描画エンジン
+    ├── tsunami_speech.py           - 津波情報の読み上げ文生成・状態変化の分類・二重読み上げ防止ゲート（Discord/環境変数非依存の純関数。2026-09-28追加。観測点の階級判定`obs_grade_from_height`は地図の色分けと共用）
     │                                 （EEW警報地域・震度分布・観測点マーカー・津波予報区
     │                                 沿岸線・遠地地震〈震源が日本国外〉向けの地図PNG生成。
     │                                 表示範囲の自動ズーム・陸地／海の色分け・アンチエイリアス
