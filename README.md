@@ -127,7 +127,8 @@
   - `notify_tsunami_forecast`：津波警報・注意報・予報（VTSE41）。警報種別・予想高さ別のエリア一覧、原因地震情報、解除時は解除レベル別の文言を出し分け
   - `notify_tsunami_observation_coastal`：**津波観測に関する情報（VTSE51）**（2026-09-28追加）。Embedタイトルは`Head.Title`をそのまま使用。観測点を「警報区分（■津波警報/■津波注意報 等。`Body.Tsunami.Forecast`のエリアコードで突き合わせ、該当なしは■観測情報）→地域→観測点（高さ）」の3段階で表示。今回追加された観測点には「（追加）」、`観測中`には「↑」（ピーク未確定）を付記。観測値の色分けGIS地図を添付
   - `notify_tsunami_observation_offshore`：**沖合の津波観測に関する情報（VTSE52）**（2026-09-28追加）。Embedタイトルは`Head.Title`。この情報種別は`Area.Name/Code`が常にnullのため地域別グルーピングはせず、観測点ごとに「■観測点名（追加）／種類：押し・引き／状態：観測中・微弱 等」を表示。`WarningComment`は太字ラベル無しでそのまま末尾に表示。押し/引き・新規追加を描き分けたGIS地図を添付
-  - `notify_tsunami_observation`：上記2種別以外の観測系情報（現状は「各地の満潮時刻・津波到達予想時刻に関する情報」のみ）の汎用フォールバック。**専用ハンドラ化は将来対応予定**
+  - `notify_tsunami_observation_tide`：**各地の満潮時刻・津波到達予想時刻に関する情報**（2026-09-28追加）。Embedタイトルは`Head.Title`。`Body.Tsunami.Forecast.Item[]`を`core/tsunami_speech.py`の`state_from_jma_forecast`で共通の警報状態に変換し、「警報区分（■津波警報 等）→地域（予想高さ・到達予想 or `ただちに津波来襲と予測`）→観測点（到達予想・満潮時刻）」の3段階で表示。津波予報（若干の海面変動）の区域はStationを持たないため区域名一覧のみ表示。地図は新規描画せず既存の`render_tsunami_map`（津波予報区の色分け）を再利用。読み上げは最も早い到達予想の予報区・時刻が変化した場合のみ（`EventGate(mode="change")`、既定120秒）
+  - `notify_tsunami_observation`：上記3種別以外の観測系情報向けの汎用フォールバック。専用ハンドラが出揃った現状、実際に到達するケースは無い（未知のタイトルへの保険として残置）
   - 顕著な地震の震源要素更新のお知らせ／南海トラフ地震臨時情報は `cogs/other.py`（`OtherInfoCog`）へ委譲（下記「気象庁その他特別情報」参照）
 - **【2026-09-13 廃止】** 以前は地震情報通知と同じ地図画像添付方式を使用していたが、機能自体を廃止した（詳細は上記「P2P 地図画像の添付（廃止）」参照）
 
@@ -863,7 +864,7 @@ python3 bot.py --test_auto path/to/downloaded.json
 ```bash
 python3 bot.py --test_tsunami_observation_coastal  VTSE51.json  # 津波観測に関する情報
 python3 bot.py --test_tsunami_observation_offshore VTSE52.json  # 沖合の津波観測に関する情報
-python3 bot.py --test_tsunami_observation          other.json   # 満潮時刻情報等（フォールバック）
+python3 bot.py --test_tsunami_observation_tide      VTSE51_tide.json  # 各地の満潮時刻・津波到達予想時刻に関する情報
 ```
 
 `core/test_runner.py` の `sniff_test_target()` がJSONの構造（`Body`配下の
@@ -1110,7 +1111,7 @@ python3 -m pytest tests/ -q
   - `津波観測に関する情報`（VTSE51）: `notify_tsunami_observation_coastal`
   - `沖合の津波観測に関する情報`（VTSE52）: `notify_tsunami_observation_offshore`
     （※後者のタイトルは前者を部分文字列として含むため、判定は必ず沖合側を先に行う。`core/test_runner.py`の`--test_auto`判定も`Head.Title`で同じ順序）
-  - `各地の満潮時刻・津波到達予想時刻に関する情報`: `notify_tsunami_observation`（汎用フォールバック）
+  - `各地の満潮時刻・津波到達予想時刻に関する情報`: `notify_tsunami_observation_tide`
   - 予報・警報（`津波予報` / `津波警報` / `大津波警報` 等）: `notify_tsunami_forecast`
 
 ### 予想高さの表示フォーマット

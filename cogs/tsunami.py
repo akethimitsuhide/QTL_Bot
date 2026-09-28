@@ -62,6 +62,7 @@ from discord.ext import commands, tasks
 import aiohttp
 import asyncio
 import io
+import re
 import traceback
 from datetime import datetime
 from collections import defaultdict
@@ -76,6 +77,10 @@ from core.config import (
     TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
+from core.tsunami_speech import (
+    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, EventGate, build_tide_time_speech,
+    state_from_jma_forecast,
+)
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
 from core.gis_render import (
@@ -134,6 +139,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
         # キー: イベント識別子（津波情報のid、またはtsunami_forecast
         # のEventID）、値: 直近に再生した際の警報区分（grade文字列）。
         self._ews_last_grade_by_event: dict[str, str] = {}
+
+        # 【2026-09-28追加】満潮時刻・津波到達予想時刻情報の読み上げ重複防止。
+        # 「最も早い到達予想の予報区・時刻」が変化し、かつ前回読み上げから
+        # 一定時間（EventGate既定120秒）経過した場合のみ読み上げる
+        # （core/tsunami_speech.py の EventGate/build_tide_time_speech 参照）。
+        self._tide_speech_gate = EventGate(mode="change")
 
         # -- 受信統計（!status 用。将来的にSystemCogと統合予定） --
         self._last_recv = {"tsunami": None}
@@ -331,11 +342,16 @@ class TsunamiCog(commands.Cog, AudioMixin):
                         logger.info(f"津波観測情報（沿岸）取得: ID={event_id}, 時刻={report_time}")
                         await self.notify_tsunami_observation_coastal(detail, list_item=item)
                     else:
-                        # 「各地の満潮時刻・津波到達予想時刻に関する情報」等、
-                        # 専用ハンドラ未対応の観測系情報は従来の汎用ハンドラに
-                        # フォールバックする（将来対応予定）。
-                        logger.info(f"津波観測情報取得: ID={event_id}, 時刻={report_time}")
-                        await self.notify_tsunami_observation(detail, list_item=item)
+                        # 「各地の満潮時刻・津波到達予想時刻に関する情報」専用ハンドラ
+                        # （2026-09-28: notify_tsunami_observationからの分離。
+                        # OBS_TIDE_TITLE以外がここに来ることは現状無いが、
+                        # 万一の未知タイトルに備えフォールバックも残す）
+                        if is_obs_tide:
+                            logger.info(f"満潮時刻・津波到達予想時刻情報取得: ID={event_id}, 時刻={report_time}")
+                            await self.notify_tsunami_observation_tide(detail, list_item=item)
+                        else:
+                            logger.info(f"津波観測情報取得: ID={event_id}, 時刻={report_time}")
+                            await self.notify_tsunami_observation(detail, list_item=item)
                     self.last_tsunami_observation_id = current_key
                     break
 
@@ -1084,12 +1100,190 @@ class TsunamiCog(commands.Cog, AudioMixin):
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
     # ===============================
-    # 津波到達時刻情報通知（VTSE41/51/52。上記2種別専用ハンドラの
-    # フォールバック。現状「各地の満潮時刻・津波到達予想時刻に関する
-    # 情報」のみがここを通る。2026-09-28: VTSE51/52は専用ハンドラに
-    # 分離したため、docstring・コメントの「VTSE51/52」表記は歴史的な
-    # ものとして残しているが、実際にこの関数へ到達するのは満潮時刻
-    # 情報のみ）
+    # 各地の満潮時刻・津波到達予想時刻に関する情報（VTSE51の一種）
+    # ===============================
+    async def notify_tsunami_observation_tide(self, detail: dict, list_item: dict | None = None,
+                                                is_test: bool = False) -> None:
+        """
+        「各地の満潮時刻・津波到達予想時刻に関する情報」専用の通知（2026-09-28追加）。
+        従来はnotify_tsunami_observation（汎用フォールバック）が処理しており、
+        到達予想時刻・満潮時刻が一切表示されない（Forecast.Item配下の
+        Station.HighTideDateTime / FirstHeight.ArrivalTimeを読んでいなかった）
+        うえ、大津波警報の区域を見つけた時点でbreakしGIS地図用のarea_gradesが
+        不完全になる不具合があったため分離した。
+
+        Body.Tsunami.Forecast.Item[] を core.tsunami_speech.state_from_jma_forecast
+        でAlertStateに変換し、警報区分（■津波警報 等）→地域→観測点の3段階で
+        表示する。警報・注意報の区域にはStation（観測点名・到達予想・満潮時刻）が
+        付くが、津波予報（若干の海面変動）の区域には付かないため、区域名の一覧
+        のみを表示する。地図は既存のrender_tsunami_map（津波予報区の色分け）を
+        state.areasそのままで再利用する（新規の描画関数は不要）。
+        """
+        channel = self.tsunami_channel or self.channel
+        if not channel:
+            return
+        try:
+            head = detail.get("Head", {}) or {}
+            title = head.get("Title") or (list_item.get("ttl") if list_item else None) \
+                or "各地の満潮時刻・津波到達予想時刻に関する情報"
+            if is_test:
+                title = "【テスト】 " + title
+
+            source = detail.get("Control", {}).get("PublishingOffice", "気象庁")
+            report_dt_raw = head.get("ReportDateTime", "")
+            report_date = report_dt_raw[:10]
+            report_time = format_jma_time(report_dt_raw)
+
+            body = detail.get("Body", {}) or {}
+            cause_text = self._build_observation_cause_text(body)
+
+            description = (
+                f"**発表機関:** {source}\n"
+                f"**発表時刻:** {report_time}\n"
+            )
+            if cause_text:
+                description += f"\n**{cause_text}**\n"
+
+            state = state_from_jma_forecast(detail)
+            items = ((body.get("Tsunami", {}) or {}).get("Forecast", {}) or {}).get("Item", []) or []
+            item_by_area = {(it.get("Area", {}) or {}).get("Name"): it for it in items}
+
+            # grade → 見出しラベル（Category.Kind.Name。GRADE_LABELは表記ゆれ吸収用の
+            # フォールバックとしてのみ使う。実データは同一grade内で表記が揃っている前提）
+            grouped: "defaultdict[str, list[str]]" = defaultdict(list)
+            label_for_grade: dict[str, str] = {}
+            for name, grade in state.areas.items():
+                grouped[grade].append(name)
+                kind_name = (item_by_area.get(name, {}).get("Category", {})
+                             .get("Kind", {}).get("Name"))
+                label_for_grade.setdefault(grade, kind_name or GRADE_LABEL.get(grade, grade))
+
+            def _grade_sort_key(g: str) -> int:
+                return TIDE_GRADE_ORDER.index(g) if g in TIDE_GRADE_ORDER else len(TIDE_GRADE_ORDER)
+
+            def _area_sort_key(name: str) -> tuple:
+                return (state.arrival.get(name) or "~", name)
+
+            if grouped:
+                for grade in sorted(grouped.keys(), key=_grade_sort_key):
+                    description += f"\n**■ {label_for_grade[grade]}**\n"
+                    area_names = sorted(grouped[grade], key=_area_sort_key)
+
+                    if grade == "Forecast":
+                        # 津波予報（若干の海面変動）の区域はStationを持たないため
+                        # 区域名の一覧のみを表示する
+                        description += f"　{'、'.join(area_names)}\n"
+                        continue
+
+                    for area_name in area_names:
+                        item = item_by_area.get(area_name, {})
+                        height = format_tsunami_height_value(
+                            (item.get("MaxHeight", {}) or {}).get("TsunamiHeight", "")
+                        )
+                        first_h = item.get("FirstHeight", {}) or {}
+                        line = f"　{area_name}"
+                        if height:
+                            line += f"　予想高さ：{height}"
+                        if "ただちに" in (first_h.get("Condition") or ""):
+                            line += "　ただちに津波来襲と予測"
+                        elif first_h.get("ArrivalTime"):
+                            line += f"　到達予想：{self._short_time(first_h['ArrivalTime'], report_date)}"
+                        description += line + "\n"
+
+                        stations = sorted(
+                            item.get("Station", []) or [],
+                            key=lambda st: (st.get("FirstHeight", {}).get("ArrivalTime") or "~",
+                                             st.get("Name", ""))
+                        )
+                        for st in stations:
+                            st_name = st.get("Name", "不明")
+                            arr = self._short_time(
+                                (st.get("FirstHeight", {}) or {}).get("ArrivalTime", ""), report_date
+                            )
+                            tide = self._short_time(st.get("HighTideDateTime", ""), report_date)
+                            parts = []
+                            if arr:
+                                parts.append(f"到達 {arr}")
+                            if tide:
+                                parts.append(f"満潮 {tide}")
+                            if parts:
+                                description += f"　　{st_name}　　{'　'.join(parts)}\n"
+                            else:
+                                description += f"　　{st_name}\n"
+            else:
+                description += "\n対象区域はありません。\n"
+
+            comments = body.get("Comments", {}) or {}
+            free_form = comments.get("FreeFormComment", "")
+            if free_form:
+                description += f"\n{free_form}\n"
+            warning_comment = comments.get("WarningComment", {}).get("Text", "")
+            if warning_comment:
+                description += f"\n**注意:** {warning_comment}\n"
+
+            description = truncate_embed_description(
+                description, max_chars=4096, suffix="\n\n（区域が多いため一部省略）"
+            )
+
+            embed = discord.Embed(title=title, description=description, color=0x00BFFF, timestamp=datetime.now())
+            if is_test:
+                embed.set_footer(text="※これはテスト通知です。")
+
+            # ── GIS地図描画（津波予報区の色分け。既存のrender_tsunami_mapを再利用）──
+            gis_file = None
+            if state.areas:
+                gis_image_bytes = render_tsunami_map(state.areas)
+                if gis_image_bytes:
+                    gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                    embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
+
+            if not is_test:
+                record_delivery(True, "満潮時刻・津波到達予想時刻情報")
+                record_notification("満潮時刻・津波到達予想時刻情報", title)
+            logger.info(f"満潮時刻・津波到達予想時刻情報を通知しました: {title}")
+
+            # ── 読み上げ ──
+            # 【2026-09-28追加】最も早い到達予想の予報区・時刻が変化し、かつ
+            # 前回読み上げから一定時間（既定120秒）経過した場合のみ読み上げる
+            # （core.tsunami_speech.EventGate mode="change"）。is_test時は
+            # 本番の重複防止状態を汚染しないよう、判定を経ずに毎回読み上げる。
+            speech = build_tide_time_speech(detail)
+            if speech:
+                text, priority, gate_value = speech
+                now = datetime.now().timestamp()
+                if is_test or self._tide_speech_gate.decide("tide", gate_value, now):
+                    await self.speak_local(text, priority)
+
+        except Exception as e:
+            record_delivery(False, "満潮時刻・津波到達予想時刻情報", str(e))
+            logger.error(f"notify_tsunami_observation_tide エラー: {e}")
+            logger.error(f"詳細:\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _short_time(iso: str, report_date: str) -> str:
+        """
+        ISO8601時刻文字列（例: "2026-04-20T17:30:00+09:00"）を "17:30" 形式に
+        整形する。report_date（"YYYY-MM-DD"、発表日）と日付が異なる場合は
+        "M/D 17:30" のように日付を前置する。解釈できない場合は空文字列。
+        """
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})", iso or "")
+        if not m:
+            return ""
+        y, mo, d, hh, mm = m.groups()
+        prefix = f"{int(mo)}/{int(d)} " if f"{y}-{mo}-{d}" != report_date else ""
+        return f"{prefix}{hh}:{mm}"
+
+    # ===============================
+    # 津波到達時刻情報通知（汎用フォールバック。専用ハンドラ未対応の
+    # 観測系情報向け。2026-09-28: VTSE51/52は専用ハンドラへ、「各地の
+    # 満潮時刻・津波到達予想時刻に関する情報」もnotify_tsunami_observation_tide
+    # へそれぞれ分離済みのため、実際にこの関数へ到達するケースは現状無い。
+    # 未知のタイトルに備えたフォールバックとして残す）
     # ===============================
     async def notify_tsunami_observation(self, detail, list_item=None, is_test=False):
         channel = self.tsunami_channel or self.channel

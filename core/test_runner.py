@@ -312,6 +312,15 @@ TEST_TARGETS = {
         "data_kwarg": "detail",
         "expected_fields": ["Control", "Head", "Body"],
     },
+    "tsunami_observation_tide": {
+        # 【2026-09-28追加】「各地の満潮時刻・津波到達予想時刻に関する情報」
+        # 専用。警報区分→地域→観測点（到達予想・満潮時刻）でグルーピングし、
+        # 津波予報区の色分け地図（render_tsunami_map）を添付する。
+        "cog_name": "TsunamiCog",
+        "method": "notify_tsunami_observation_tide",
+        "data_kwarg": "detail",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
     "tsunami_forecast": {
         "cog_name": "TsunamiCog",
         "method": "notify_tsunami_forecast",
@@ -574,9 +583,19 @@ def sniff_test_target(data) -> list[str]:
                 #   優先的にこちらと判定する）
                 matches.append("tsunami_observation")
         elif isinstance(tsunami_body.get("Forecast"), (dict, list)):
-            # tsunami_forecast: cogs/tsunami.py notify_tsunami_forecast
-            # （Observationを持たずForecastのみ＝VTSE41系）
-            matches.append("tsunami_forecast")
+            # 【2026-09-28追記】「各地の満潮時刻・津波到達予想時刻に関する
+            # 情報」もBody.Tsunami.Forecastを持つため、以前はここで
+            # 無条件に tsunami_forecast（VTSE41、notify_tsunami_forecast）
+            # と誤判定されていた（--test_autoのみに影響。実際の通知経路
+            # fetch_tsunami_observationはHead.Titleの文字列一致で正しく
+            # 振り分けていたため実害は無かった）。Head.Titleで判別する。
+            head_title = (data.get("Head") or {}).get("Title", "") or ""
+            if "満潮時刻" in head_title:
+                matches.append("tsunami_observation_tide")
+            else:
+                # tsunami_forecast: cogs/tsunami.py notify_tsunami_forecast
+                # （Observationを持たずForecastのみ＝VTSE41系）
+                matches.append("tsunami_forecast")
 
         # 【2026-08-31 修正】"Body.EarthquakeInfo" 及び "Body.Earthquake"
         # は、複数の情報種別が同じキーを共有しており、キーの有無だけでは
