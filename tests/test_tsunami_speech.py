@@ -5,10 +5,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.tsunami_speech import (  # noqa: E402
-    AlertGate, AlertState, EventGate, build_alert_speech, build_coastal_observation_speech,
-    build_offshore_observation_speech, build_tide_time_speech, classify_change,
-    format_height_for_speech, format_time_for_speech, grade_from_kind_name, obs_grade_from_height,
-    state_from_jma_forecast, state_from_p2p_tsunami,
+    AlertGate, AlertState, EventGate, StationHeightTracker, build_alert_speech,
+    build_coastal_observation_speech, build_offshore_observation_speech, build_tide_time_speech,
+    classify_change, format_height_for_speech, format_time_for_speech, grade_from_kind_name,
+    obs_grade_from_height, obs_height_level, state_from_jma_forecast, state_from_p2p_tsunami,
 )
 
 
@@ -160,6 +160,48 @@ def test_height_and_time_formatting():
     assert format_height_for_speech("観測中") == ""
     assert format_time_for_speech("2026-04-20T17:00:00+09:00") == "17時00分頃"
     assert format_time_for_speech("17:30") == "17時30分頃"
+
+
+def test_station_height_tracker_no_previous_data():
+    t = StationHeightTracker()
+    assert not t.check_and_update("E1:21020", "観測中", 0)   # 初出（前報無し）は上昇と判定しない
+    assert not t.check_and_update("E1:21020", "観測中", 10)  # 変化なし
+
+
+def test_station_height_tracker_rising_and_falling():
+    t = StationHeightTracker()
+    t.check_and_update("E1:21020", "0.3", 0)
+    assert t.check_and_update("E1:21020", "0.5", 10)          # 数値の上昇
+    assert not t.check_and_update("E1:21020", "0.5", 20)      # 変化なし
+    assert not t.check_and_update("E1:21020", "0.3", 30)      # 下降
+
+
+def test_station_height_tracker_tier_increase_counts_as_rise():
+    t = StationHeightTracker()
+    t.check_and_update("E1:21020", "観測中", 0)               # forecast階級
+    assert t.check_and_update("E1:21020", "0.3", 10)          # watch階級へ上昇
+    t2 = StationHeightTracker()
+    t2.check_and_update("E1:21020", "微弱", 0)
+    assert not t2.check_and_update("E1:21020", "観測中", 10)  # 同一階級内（実測値無し同士）は上昇とみなさない
+
+
+def test_station_height_tracker_keys_are_independent():
+    t = StationHeightTracker()
+    t.check_and_update("E1:21020", "0.3", 0)
+    assert not t.check_and_update("E1:99999", "0.5", 10)      # 別の観測点は前報データ無しとして扱う
+
+
+def test_station_height_tracker_ttl_expiry_resets():
+    t = StationHeightTracker(ttl_sec=100)
+    t.check_and_update("E1:21020", "0.5", 0)
+    assert not t.check_and_update("E1:21020", "0.3", 200)     # TTL経過後は前報無し扱い（下降でもFalse=想定通り）
+    assert t.check_and_update("E1:21020", "0.6", 210)         # さらにその次は上昇として検出
+
+
+def test_obs_height_level_ordering():
+    assert obs_height_level("観測中") < obs_height_level("0.3")   # forecast階級 < watch階級
+    assert obs_height_level("0.3") < obs_height_level("0.5")      # 同一階級内は実測値で比較
+    assert obs_height_level("5") > obs_height_level("4.9")        # major_warning > warning
 
 
 def test_obs_grade_boundaries():

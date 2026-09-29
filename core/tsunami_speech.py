@@ -425,6 +425,67 @@ def obs_grade_from_height(raw_height: str) -> str:
     return "forecast"
 
 
+def obs_height_level(raw_height: str) -> tuple:
+    """
+    観測値の生値を「階級＋実測値」の比較可能なタプルに変換する
+    （2026-09-29追加）。タプルの大小比較がそのまま「値の大小」に対応する
+    （辞書式比較: まず階級 OBS_TIER、次に実測値）。StationHeightTracker
+    が前報との比較（上昇判定）に使うほか、同じ階級判定基準を再利用する
+    場所（cogs/tsunami.py の _obs_sort_key 等）からも参照できるよう
+    公開関数にしている。実測値が無い（微弱・観測中・欠測等）場合は
+    同一階級内で最も低い値（-1.0）として扱う。
+    """
+    tier = OBS_TIER.get(obs_grade_from_height(raw_height), 0)
+    try:
+        value = float(raw_height)
+    except (TypeError, ValueError):
+        value = -1.0
+    return (tier, value)
+
+
+class StationHeightTracker:
+    """
+    観測点ごとの直近（前報）の観測値を保持し、今回の値が前回発表時より
+    上昇しているかどうかを判定する（2026-09-29追加）。
+
+    【背景】沿岸観測点の通知文に付ける「↑」（上昇中を示す）マークを、
+    以前は MaxHeight.Condition == "観測中" であれば無条件に付けていたが、
+    「観測中」は「まだピークが確定していない」ことを示すだけで、実際に
+    上昇中かどうかまでは分からない。前報の同じ観測点の値と比較すること
+    で、より正確に「上昇中」を判定する。
+
+    【判定方法】obs_height_level() で階級＋実測値のタプルに変換し、
+    前回保持していた値より大きければ「上昇」とみなす。前報のデータが
+    無い（このトラッカーで初めて見る観測点＝新規追加観測点や、初回の
+    発表）場合は、比較のしようが無いため False（上昇と判定しない）。
+    値が同じ・下降した場合も False。
+
+    【キーの単位】呼び出し側が任意のキー文字列を渡す。津波イベントを
+    またいで別の津波の観測点と混同しないよう、cogs/tsunami.py 側では
+    「EventID:観測点コード」を渡す想定（EventIDが無い場合は観測点名に
+    フォールバック）。
+    """
+
+    def __init__(self, ttl_sec: float = EVENT_GATE_TTL_SEC):
+        self._ttl = ttl_sec
+        self._last: dict[str, tuple[tuple, float]] = {}  # key -> (level, timestamp)
+
+    def check_and_update(self, key: str, raw_height: str, now: float) -> bool:
+        """
+        key の前回レベルと raw_height のレベルを比較し、上昇していれば
+        True を返す。呼び出しのたびに、比較結果によらず今回の値で
+        状態を更新する（＝常に「直前の1報」と比較する。EventGate の
+        mode="rise" のように「最後に上昇した時点」とは比較しない）。
+        """
+        self._last = {k: v for k, v in self._last.items() if now - v[1] <= self._ttl}
+        level = obs_height_level(raw_height)
+        prev = self._last.get(key)
+        self._last[key] = (level, now)
+        if prev is None:
+            return False
+        return level > prev[0]
+
+
 def station_raw_height(station: dict) -> str:
     """Station.MaxHeight から生の観測値文字列を取り出す（無ければ「欠測」）。"""
     max_h = station.get("MaxHeight", {}) or {}

@@ -78,8 +78,8 @@ from core.config import (
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.tsunami_speech import (
-    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, EventGate, build_tide_time_speech,
-    obs_grade_from_height, state_from_jma_forecast,
+    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, EventGate, StationHeightTracker,
+    build_tide_time_speech, obs_grade_from_height, state_from_jma_forecast,
 )
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
@@ -145,6 +145,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
         # 一定時間（EventGate既定120秒）経過した場合のみ読み上げる
         # （core/tsunami_speech.py の EventGate/build_tide_time_speech 参照）。
         self._tide_speech_gate = EventGate(mode="change")
+
+        # 【2026-09-29追加】沿岸観測点（VTSE51）の「↑」表示用。前報の同じ
+        # 観測点の値と比較して上昇していた場合のみ付ける
+        # （core/tsunami_speech.py の StationHeightTracker 参照。以前は
+        # MaxHeight.Condition=="観測中"であれば無条件に付けていた）。
+        self._obs_height_tracker = StationHeightTracker()
 
         # -- 受信統計（!status 用。将来的にSystemCogと統合予定） --
         self._last_recv = {"tsunami": None}
@@ -931,6 +937,11 @@ class TsunamiCog(commands.Cog, AudioMixin):
             grouped: "defaultdict[str, list[tuple[str, list[str], tuple]]]" = defaultdict(list)
             map_points: list[dict] = []
 
+            # 「↑」判定（前報との比較）用。同一通知内の全観測点で同じ
+            # 時刻・イベントIDを使う（2026-09-29追加）
+            event_id = head.get("EventID", "")
+            obs_now = datetime.now().timestamp()
+
             for item in obs_items:
                 area = item.get("Area", {}) or {}
                 area_name = area.get("Name") or "不明"
@@ -951,9 +962,15 @@ class TsunamiCog(commands.Cog, AudioMixin):
 
                     max_h = st.get("MaxHeight", {}) or {}
                     first_h = st.get("FirstHeight", {}) or {}
-                    # 「観測中」＝現在ピークに向けて上昇中で、まだ確定
-                    # していないことを示す上向き矢印を付ける
-                    if max_h.get("Condition") == "観測中":
+                    # 【2026-09-29修正】以前はMaxHeight.Condition=="観測中"
+                    # であれば無条件に上向き矢印を付けていたが、「観測中」は
+                    # 「ピーク未確定」を示すのみで実際に上昇中かは分からない
+                    # ため、前報の同じ観測点の値と比較し、実際に上昇して
+                    # いた場合のみ付けるよう修正（StationHeightTracker）。
+                    # 前報データが無い（今回はじめて見る観測点）場合は
+                    # 上昇と判定しない。
+                    tracker_key = f"{event_id}:{st.get('Code') or st_name}"
+                    if self._obs_height_tracker.check_and_update(tracker_key, raw_height, obs_now):
                         height_display += "↑"
 
                     is_new = (first_h.get("Revise") == "追加") or (max_h.get("Revise") == "追加")
