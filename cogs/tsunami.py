@@ -78,8 +78,8 @@ from core.config import (
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.tsunami_speech import (
-    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, EventGate, build_tide_time_speech,
-    state_from_jma_forecast,
+    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, EventGate, build_tide_time_speech,
+    obs_grade_from_height, state_from_jma_forecast,
 )
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
@@ -802,6 +802,24 @@ class TsunamiCog(commands.Cog, AudioMixin):
         return "欠測"
 
     @staticmethod
+    def _obs_sort_key(raw_height: str) -> tuple:
+        """
+        観測点を「高さが高い順」に並べるためのソートキー（2026-09-28追加）。
+        タローさんの理想例（久慈港0.8m→宮古0.4m→大船渡/釜石「観測中」の順）
+        に合わせ、まず警報色の階級（OBS_TIER。実測値の無い「観測中」等は
+        「forecast」階級として最下位グループ寄りに扱う）で降順、階級内では
+        実測値（数値化できる場合）の降順、数値化できないものは階級内の
+        末尾に回す（安定ソートのため、元の並び順は保たれる）。
+        戻り値は昇順ソート用（小さいほど「高さが高い」＝先頭に来る）。
+        """
+        tier = OBS_TIER.get(obs_grade_from_height(raw_height), 0)
+        try:
+            value = float(raw_height)
+        except (TypeError, ValueError):
+            value = -1.0
+        return (-tier, -value)
+
+    @staticmethod
     def _format_observation_height_display(raw_height: str) -> str:
         """
         _extract_station_raw_height() の生値を通知文表示用に整形する。
@@ -856,6 +874,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
             場合は「観測情報」という見出しにまとめる）
           - GIS地図（render_tsunami_observation_map）に観測値の色分け
             付き観測点を描画してほしいという要望
+          - 【2026-09-28追記】地域・観測点は高さが高い順（同階級内は
+            実測値の降順）に並べてほしいという要望（_obs_sort_key参照）。
+            地図には観測点マップの表示範囲のまま、大津波警報・津波警報・
+            津波注意報・津波予報の分布も重ね描きしてほしいという要望
+            （render_tsunami_map と同じ配色。表示範囲は観測点の位置の
+            みで決め、警報区域の形状には合わせない）
         """
         channel = self.tsunami_channel or self.channel
         if not channel:
@@ -892,13 +916,19 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 if code and kind_name:
                     area_grade_label[code] = kind_name
 
+            # 地図の警報分布オーバーレイ用（Area.Name → grade key）。
+            # 見出しラベル（area_grade_label、上のCategory.Kind.Nameそのもの）
+            # とは別に、core.tsunami_speech側の正規化済みgrade keyが必要な
+            # ため state_from_jma_forecast を再利用する（tideハンドラと同じ）。
+            area_grades = state_from_jma_forecast(detail).areas
+
             GRADE_LABEL_ORDER = ["大津波警報", "津波警報", "津波注意報", "津波予報"]
 
             def _grade_sort_key(label: str) -> int:
                 return GRADE_LABEL_ORDER.index(label) if label in GRADE_LABEL_ORDER else len(GRADE_LABEL_ORDER)
 
-            # grade_label → [(area_name, [表示行, ...]), ...]（登場順を保持）
-            grouped: "defaultdict[str, list[tuple[str, list[str]]]]" = defaultdict(list)
+            # grade_label → [(area_name, [表示行, ...], area_key), ...]
+            grouped: "defaultdict[str, list[tuple[str, list[str], tuple]]]" = defaultdict(list)
             map_points: list[dict] = []
 
             for item in obs_items:
@@ -906,16 +936,23 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 area_name = area.get("Name") or "不明"
                 grade_label = area_grade_label.get(area.get("Code"), "観測情報")
 
+                # 観測点は高さが高い順に並べる（2026-09-28修正。安定ソート
+                # のため、同じ高さ（実測値なし同士等）は元の並び順を維持）
+                stations = sorted(
+                    item.get("Station", []) or [],
+                    key=lambda st: self._obs_sort_key(self._extract_station_raw_height(st)),
+                )
+
                 lines: list[str] = []
-                for st in item.get("Station", []) or []:
+                for st in stations:
                     st_name = st.get("Name", "不明")
                     raw_height = self._extract_station_raw_height(st)
                     height_display = self._format_observation_height_display(raw_height)
 
                     max_h = st.get("MaxHeight", {}) or {}
                     first_h = st.get("FirstHeight", {}) or {}
-                    # 「観測中」＝まだピークが確定していない（今後さらに
-                    # 高くなる可能性がある）ことを示す上向き矢印を付ける
+                    # 「観測中」＝現在ピークに向けて上昇中で、まだ確定
+                    # していないことを示す上向き矢印を付ける
                     if max_h.get("Condition") == "観測中":
                         height_display += "↑"
 
@@ -929,12 +966,15 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     if lat is not None and lon is not None:
                         map_points.append({"lat": lat, "lon": lon, "height": raw_height})
 
-                grouped[grade_label].append((area_name, lines))
+                # 地域も、その地域内で最も高い観測点を基準に高い順へ並べる
+                area_key = self._obs_sort_key(self._extract_station_raw_height(stations[0])) if stations \
+                    else self._obs_sort_key("")
+                grouped[grade_label].append((area_name, lines, area_key))
 
             if grouped:
                 for grade_label in sorted(grouped.keys(), key=_grade_sort_key):
                     description += f"\n**■ {grade_label}**\n"
-                    for area_name, lines in grouped[grade_label]:
+                    for area_name, lines, _area_key in sorted(grouped[grade_label], key=lambda t: t[2]):
                         description += f"　{area_name}\n"
                         description += "\n".join(lines) + "\n"
             else:
@@ -961,7 +1001,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             gis_file = None
-            gis_image_bytes = render_tsunami_observation_map(map_points)
+            gis_image_bytes = render_tsunami_observation_map(map_points, area_grades=area_grades)
             if gis_image_bytes:
                 gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                 embed.set_image(url="attachment://gis_map.png")
@@ -994,6 +1034,14 @@ class TsunamiCog(commands.Cog, AudioMixin):
         （押し/引き）は通知文にも文字で示しつつ、GIS地図
         （render_tsunami_offshore_map）ではドーナツ（押し）／塗り円
         （引き）として視覚的にも表現する。
+
+        【2026-09-28追記】地図に大津波警報・津波警報・津波注意報・津波予報
+        の分布を重ね描きする機能（render_tsunami_offshore_mapのarea_grades
+        引数）をVTSE51側と共通で追加したが、VTSE52自体のBody.Tsunami.
+        Estimationには警報区分に相当するCategory情報が含まれない（実データ
+        で確認済み）ため、本ハンドラでは現状area_gradesを渡していない
+        （呼び出し側にその時点の警報状態が無い）。将来、Bot側で警報状態を
+        保持するようになれば（ステップ③のAlertGate等）そこから渡せる。
         """
         channel = self.tsunami_channel or self.channel
         if not channel:
@@ -1169,12 +1217,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     description += f"\n**■ {label_for_grade[grade]}**\n"
                     area_names = sorted(grouped[grade], key=_area_sort_key)
 
-                    if grade == "Forecast":
-                        # 津波予報（若干の海面変動）の区域はStationを持たないため
-                        # 区域名の一覧のみを表示する
-                        description += f"　{'、'.join(area_names)}\n"
-                        continue
-
+                    # 【2026-09-28修正】以前は津波予報（若干の海面変動）の
+                    # 区域だけ「、」区切りの1行にまとめていたが、他の区分
+                    # と同様に区域ごとに改行してほしいという要望のため統一
+                    # した。津波予報の区域はStationを持たないため、下記の
+                    # ループは自然と地域名の行だけになる（観測点の内側
+                    # ループが0回で済む）。
                     for area_name in area_names:
                         item = item_by_area.get(area_name, {})
                         height = format_tsunami_height_value(

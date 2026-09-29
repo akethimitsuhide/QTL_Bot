@@ -227,12 +227,12 @@ _TSUNAMI_LINE_WIDTH = 6                   # 津波予報区の色付き沿岸線
 # render_tsunami_observation_map（VTSE51「津波観測に関する情報」＝沿岸の
 # 潮位観測点）／render_tsunami_offshore_map（VTSE52「沖合の津波観測に
 # 関する情報」＝沖合の水圧計・GPS波浪計）で使う。
-_TSUNAMI_OBS_MARKER_R = 9                 # 沿岸観測点マーカー（円）の半径（px）
-_TSUNAMI_OBS_HALO_PAD = 2                 # 観測点マーカーの視認性確保用の縁取り幅（px）
-_OFFSHORE_MARKER_R = 9                    # 沖合観測点マーカー（円）の半径（px）
-_OFFSHORE_RING_WIDTH = 3                  # 「押し」ドーナツ（リング）の線の太さ（px）
-_OFFSHORE_NEW_RING_PAD = 3                # 新規追加観測点の黄色フチとマーカー本体との間隔（px）
-_OFFSHORE_NEW_RING_WIDTH = 3              # 新規追加観測点の黄色フチの太さ（px）
+_TSUNAMI_OBS_MARKER_R = 22                # 沿岸観測点マーカー（円）の半径（px）（2026-09-28: 9→22、約2.5倍に拡大）
+_TSUNAMI_OBS_HALO_PAD = 5                 # 観測点マーカーの視認性確保用の縁取り幅（px）（2026-09-28: 2→5）
+_OFFSHORE_MARKER_R = 22                   # 沖合観測点マーカー（円）の半径（px）（2026-09-28: 9→22、約2.5倍に拡大）
+_OFFSHORE_RING_WIDTH = 8                  # 「押し」ドーナツ（リング）の線の太さ（px）（2026-09-28: 3→8）
+_OFFSHORE_NEW_RING_PAD = 8                # 新規追加観測点の黄色フチとマーカー本体との間隔（px）（2026-09-28: 3→8）
+_OFFSHORE_NEW_RING_WIDTH = 8              # 新規追加観測点の黄色フチの太さ（px）（2026-09-28: 3→8）
 
 
 def _rgb_to_rgba(color: int, alpha: int = 255) -> tuple[int, int, int, int]:
@@ -812,6 +812,38 @@ def _draw_offshore_marker(draw: ImageDraw.ImageDraw, xy: tuple[float, float],
                      outline=(255, 215, 0, 255), width=_px(_OFFSHORE_NEW_RING_WIDTH))
 
 
+def _draw_tsunami_grade_overlay(draw: ImageDraw.ImageDraw, projector: "_Projector", viewport,
+                                 area_grades: Optional[dict]) -> None:
+    """
+    津波予報区の沿岸線を警報種別の色で塗り分けて重ね描きする
+    （2026-09-28追加）。render_tsunami_map() と同じ描画呼び出しを
+    共通化したもの。render_tsunami_observation_map() から、観測点の
+    位置に応じたビューポート「はそのまま」で警報・注意報・予報の分布を
+    背景として見せたい、という要望に応える（表示範囲を予報区の形に
+    合わせて再計算することはしない＝呼び出し側のviewportを変えない）。
+    _tsunami_areas（GeoJSON）が未取得、area_gradesが空、該当する
+    区域が1つもGeoJSON上に見つからない場合は何も描かない（呼び出し
+    元の地図描画自体は失敗させない）。
+    """
+    if not area_grades:
+        return
+    shapes = _tsunami_areas.get()
+    if not shapes:
+        return
+    matched = []
+    for name, grade in area_grades.items():
+        shape = shapes.get(name)
+        if shape is None:
+            continue
+        color = _TSUNAMI_GRADE_COLORS.get(grade, TSUNAMI_COLOR_UNKNOWN)
+        matched.append((shape, color))
+    if not matched:
+        return
+    _draw_line_boundaries(draw, _tsunami_areas, projector, viewport)
+    for shape, color in matched:
+        _draw_line_highlight(draw, shape, projector, _rgb_to_rgba(color)[:3])
+
+
 def _draw_region_icons(draw: ImageDraw.ImageDraw, matched_regions: list, projector: _Projector) -> None:
     """
     震度速報（ScalePrompt）向け：塗りつぶしだけでは震度が分かりにくいとの
@@ -1143,11 +1175,12 @@ def render_tsunami_map(area_grades: dict) -> Optional[bytes]:
         return None
 
 
-def render_tsunami_observation_map(stations: list[dict]) -> Optional[bytes]:
+def render_tsunami_observation_map(stations: list[dict], area_grades: Optional[dict] = None) -> Optional[bytes]:
     """
     「津波観測に関する情報」（VTSE51）向け：沿岸の潮位観測点を、観測値に
     応じた色の点で描画したPNG画像を返す（2026-09-28追加）。表示範囲は
-    観測点の位置に応じて自動的にズームする。
+    観測点の位置に応じて自動的にズームする（area_gradesを渡した場合も、
+    表示範囲は観測点の位置のみで決まり、警報区域の形状には影響されない）。
 
     stations : [{"lat": float, "lon": float, "height": str}, ...]
         height は気象庁APIのMaxHeight.Condition/TsunamiHeight由来の生値
@@ -1155,6 +1188,12 @@ def render_tsunami_observation_map(stations: list[dict]) -> Optional[bytes]:
         色分けは tsunami_obs_grade_from_height() が判定する
         （5m以上=紫／1m以上5m未満=赤／0.1m以上1m未満=黄／
         微弱・弱・低い・観測中=水色／欠測・不明=灰）。
+    area_grades : {区域名: 警報種別（"MajorWarning"/"Warning"/"Watch"/
+        "Forecast"）, ...}（2026-09-28追加、任意）。指定した場合、
+        render_tsunami_map() と同じ配色で津波予報区の沿岸線を観測点の
+        背景に重ね描きする（大津波警報・津波警報・津波注意報・津波予報
+        の分布を、観測点マップの表示範囲のまま確認できるようにする）。
+        該当データが無い場合は静かに省略する。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -1181,6 +1220,7 @@ def render_tsunami_observation_map(stations: list[dict]) -> Optional[bytes]:
             draw = ImageDraw.Draw(canvas)
             _draw_land_fill(draw, _local_areas, projector, viewport)
             _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+            _draw_tsunami_grade_overlay(draw, projector, viewport, area_grades)
 
             for lon, lat, grade in sorted(points, key=lambda p: _TSUNAMI_OBS_GRADE_PRIORITY.get(p[2], 0)):
                 xy = projector.project(lon, lat)
@@ -1192,11 +1232,12 @@ def render_tsunami_observation_map(stations: list[dict]) -> Optional[bytes]:
         return None
 
 
-def render_tsunami_offshore_map(stations: list[dict]) -> Optional[bytes]:
+def render_tsunami_offshore_map(stations: list[dict], area_grades: Optional[dict] = None) -> Optional[bytes]:
     """
     「沖合の津波観測に関する情報」（VTSE52）向け：沖合の水圧計・GPS波浪計
     観測点を白色の点で描画したPNG画像を返す（2026-09-28追加）。表示範囲は
-    観測点の位置に応じて自動的にズームする。
+    観測点の位置に応じて自動的にズームする（area_gradesを渡した場合も、
+    表示範囲は観測点の位置のみで決まり、警報区域の形状には影響されない）。
 
     stations : [{"lat": float, "lon": float, "is_push": Optional[bool],
                  "is_new": bool}, ...]
@@ -1204,6 +1245,10 @@ def render_tsunami_offshore_map(stations: list[dict]) -> Optional[bytes]:
             （中の詰まった円）／None=不明（引きと同様に塗り円で描く）
         is_new  : True の場合、今回の発表で新たに追加された観測点として
             円の縁を黄色くする
+    area_grades : render_tsunami_observation_map() と同じ
+        （2026-09-28追加、任意）。VTSE52自体には警報区分に相当する
+        情報が含まれない（Body.Tsunami.EstimationにはCategoryが無い）
+        ため、呼び出し側が別途保持している警報状態を渡す想定。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -1230,6 +1275,7 @@ def render_tsunami_offshore_map(stations: list[dict]) -> Optional[bytes]:
             draw = ImageDraw.Draw(canvas)
             _draw_land_fill(draw, _local_areas, projector, viewport)
             _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+            _draw_tsunami_grade_overlay(draw, projector, viewport, area_grades)
 
             # 新規追加の観測点が他のマーカーの下に隠れないよう、最後（最前面）に描く
             for lon, lat, is_push, is_new in sorted(points, key=lambda p: p[3]):
