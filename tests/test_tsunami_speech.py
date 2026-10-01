@@ -8,7 +8,7 @@ from core.tsunami_speech import (  # noqa: E402
     AlertGate, AlertState, EventGate, StationHeightTracker, build_alert_speech,
     build_coastal_observation_speech, build_offshore_observation_speech, build_tide_time_speech,
     classify_change, format_height_for_speech, format_time_for_speech, grade_from_kind_name,
-    obs_grade_from_height, obs_height_level, state_from_jma_forecast, state_from_p2p_tsunami,
+    obs_grade_from_height, obs_height_level, offshore_station_keys, state_from_jma_forecast, state_from_p2p_tsunami,
 )
 
 
@@ -231,6 +231,22 @@ def test_coastal_observation_speech_picks_max_station():
 def test_offshore_speech_only_when_stations_exist():
     assert build_offshore_observation_speech(_obs(("", "浦河沖", {})))[1] == 2
     assert build_offshore_observation_speech({"Body": {"Tsunami": {"Observation": {"Item": []}}}}) is None
+
+
+def test_offshore_station_keys_and_gate():
+    def d(*codes):
+        return {"Body": {"Tsunami": {"Observation": {"Item": [
+            {"Area": {"Name": None}, "Station": [{"Name": f"観測点{c}", "Code": c} for c in codes]}]}}}}
+    assert offshore_station_keys(d("1", "2")) == frozenset({"1", "2"})
+    assert offshore_station_keys({"Body": {"Tsunami": {"Observation": {"Item": [
+        {"Station": [{"Name": "浦河沖"}]}]}}}}) == frozenset({"浦河沖"})   # Code無しは名前で代用
+    assert offshore_station_keys({}) == frozenset()
+    g = EventGate(mode="change", cooldown_sec=120)
+    assert g.decide("E1", offshore_station_keys(d("1")), 0)               # 初報
+    assert not g.decide("E1", offshore_station_keys(d("1")), 500)         # 観測点が同じ（値の修正のみ）
+    assert not g.decide("E1", offshore_station_keys(d("1", "2")), 60)     # 追加だがcooldown中
+    assert g.decide("E1", offshore_station_keys(d("1", "2")), 130)        # 追加・cooldown経過
+    assert g.decide("E2", offshore_station_keys(d("1")), 130)             # 別の津波
 
 
 def test_event_gate_rise_mode():

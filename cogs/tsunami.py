@@ -79,7 +79,8 @@ from core.config import (
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.tsunami_speech import (
     GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, EventGate, StationHeightTracker,
-    build_tide_time_speech, obs_grade_from_height, state_from_jma_forecast,
+    build_offshore_observation_speech, build_tide_time_speech, obs_grade_from_height,
+    offshore_station_keys, state_from_jma_forecast,
 )
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
@@ -145,6 +146,13 @@ class TsunamiCog(commands.Cog, AudioMixin):
         # 一定時間（EventGate既定120秒）経過した場合のみ読み上げる
         # （core/tsunami_speech.py の EventGate/build_tide_time_speech 参照）。
         self._tide_speech_gate = EventGate(mode="change")
+
+        # 【2026-10-01追加】沖合の津波観測情報（VTSE52）の読み上げ重複防止。
+        # 同じ津波（EventID）について、初回、または観測点が追加されて前回
+        # 読み上げから一定時間（EventGate既定120秒）経過した場合のみ読み上げる
+        # （core/tsunami_speech.py の build_offshore_observation_speech /
+        # offshore_station_keys 参照）。既存観測点の値の修正だけの続報は読まない。
+        self._offshore_speech_gate = EventGate(mode="change")
 
         # 【2026-09-29追加】沿岸観測点（VTSE51）の「↑」表示用。前報の同じ
         # 観測点の値と比較して上昇していた場合のみ付ける
@@ -1158,6 +1166,19 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 record_delivery(True, "津波観測情報（沖合）")
                 record_notification("津波観測情報（沖合）", title)
             logger.info(f"津波観測情報（沖合）を通知しました: {title}")
+
+            # ── 読み上げ ──
+            # 【2026-10-01追加】is_test時は本番の重複防止状態を汚染しないよう、
+            # 判定を経ずに毎回読み上げる。
+            speech = build_offshore_observation_speech(detail)
+            if speech:
+                text, priority = speech
+                gate_key = str(head.get("EventID") or title)
+                now = datetime.now().timestamp()
+                if is_test or self._offshore_speech_gate.decide(
+                    gate_key, offshore_station_keys(detail), now
+                ):
+                    await self.speak_local(text, priority)
 
         except Exception as e:
             record_delivery(False, "津波観測情報（沖合）", str(e))

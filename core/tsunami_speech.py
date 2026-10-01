@@ -535,6 +535,25 @@ def build_offshore_observation_speech(detail: dict) -> Optional[tuple[str, int]]
     return "沖合で津波を観測しました。沿岸では津波はさらに高くなります。", 2
 
 
+def offshore_station_keys(detail: dict) -> frozenset:
+    """
+    「沖合の津波観測に関する情報」（VTSE52）に含まれる観測点の集合を返す
+    （EventGate mode="change" の変化検知用の値。2026-10-01追加）。
+    観測点コード（Station.Code）を使い、無ければ観測点名で代用する。同じ
+    津波の続報で観測点が追加された場合だけ集合が変わり、既存観測点の値の
+    修正・更新（高さの訂正等）では変わらない。
+    """
+    body = (detail or {}).get("Body", {}) or {}
+    items = ((body.get("Tsunami", {}) or {}).get("Observation", {}) or {}).get("Item", []) or []
+    keys = set()
+    for it in items:
+        for st in it.get("Station", []) or []:
+            key = st.get("Code") or st.get("Name")
+            if key:
+                keys.add(str(key))
+    return frozenset(keys)
+
+
 def build_tide_time_speech(detail: dict) -> Optional[tuple[str, int, tuple[str, str]]]:
     """
     「各地の満潮時刻・津波到達予想時刻に関する情報」の読み上げ。
