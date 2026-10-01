@@ -246,6 +246,15 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     return
                 data = await resp.json()
                 if not data:
+                    # 【2026-10-01修正】津波情報が1件も発表されていない平常時、
+                    # JMAのlist.jsonは空リスト([])を返す。従来はここで初期化
+                    # フラグを立てずにreturnしていたため、平常時にBotを起動した
+                    # 場合、フラグが未初期化のまま残り、その後に最初に発表された
+                    # 本物の新規津波情報（例: 2026-09-30の津波予報）が下の
+                    # 「起動時の既存情報」として記録のみされ、通知されなかった。
+                    # 空リスト＝「起動時点で既存情報は無い」ことが確定した状態
+                    # なので、初期化済みとして扱う。
+                    self._tsunami_observation_initialized = True
                     return
 
                 # 観測情報（observation）
