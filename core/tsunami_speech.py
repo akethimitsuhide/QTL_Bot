@@ -21,6 +21,7 @@ core/tsunami_speech.py - 津波情報の読み上げ文生成・状態判定・�
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -526,13 +527,54 @@ def build_coastal_observation_speech(detail: dict) -> Optional[tuple[str, int, i
     return text, _OBS_TIER_PRIORITY[grade], OBS_TIER[grade]
 
 
-def build_offshore_observation_speech(detail: dict) -> Optional[tuple[str, int]]:
-    """「沖合の津波観測に関する情報」（VTSE52）の読み上げ。観測点が無ければ None。"""
-    body = (detail or {}).get("Body", {}) or {}
+def _offshore_station_name_for_speech(name: str) -> str:
+    """
+    沖合観測点名を読み上げ用に整える（2026-10-01追加）。
+    全角英数字を半角にし（例: 「岩手沖６０ｋｍＡ」→「岩手沖60kmA」）、
+    同じ距離の観測点を区別する末尾の識別記号（A/B）を除き、「km」は
+    TTSが確実に読める「キロメートル」にする（例: 「岩手沖60キロメートル」）。
+    """
+    n = unicodedata.normalize("NFKC", name or "").strip()
+    n = re.sub(r"(?<=km)[A-Za-z]$", "", n)
+    return n.replace("km", "キロメートル")
+
+
+def build_offshore_observation_speech(detail: dict,
+                                      max_areas: int = DEFAULT_MAX_AREAS) -> Optional[tuple[str, int]]:
+    """
+    「沖合の津波観測に関する情報」（VTSE52）の読み上げ。観測点が無ければ None。
+
+    形式: 「沖合の津波観測に関する情報。{H時MM分頃}、次の沖合で津波を観測しました。
+    {観測点名}。」。時刻は発表時刻（Head.ReportDateTime、無ければTargetDateTime）。
+    観測点が max_areas を超える場合は、今回新たに追加された観測点（FirstHeight/
+    MaxHeight の Revise が「追加」）を優先して max_areas 件までとし、超過分は「等」。
+    """
+    detail = detail or {}
+    body = detail.get("Body", {}) or {}
     items = ((body.get("Tsunami", {}) or {}).get("Observation", {}) or {}).get("Item", []) or []
-    if not any(it.get("Station") for it in items):
+    stations = [st for it in items for st in (it.get("Station", []) or [])]
+    if not stations:
         return None
-    return "沖合で津波を観測しました。沿岸では津波はさらに高くなります。", 2
+
+    def _is_new(st: dict) -> bool:
+        return any((st.get(k, {}) or {}).get("Revise") == "追加" for k in ("FirstHeight", "MaxHeight"))
+
+    ordered = [st for st in stations if _is_new(st)] + [st for st in stations if not _is_new(st)]
+    names: list[str] = []
+    for st in ordered:
+        n = _offshore_station_name_for_speech(st.get("Name", ""))
+        if n and n not in names:
+            names.append(n)
+
+    head = detail.get("Head", {}) or {}
+    t = format_time_for_speech(head.get("ReportDateTime") or head.get("TargetDateTime") or "")
+    text = "沖合の津波観測に関する情報。"
+    if t:
+        text += f"{t}、"
+    text += "次の沖合で津波を観測しました。"
+    if names:
+        text += f"{format_areas_for_speech(names, max_areas)}。"
+    return text, 2
 
 
 def offshore_station_keys(detail: dict) -> frozenset:

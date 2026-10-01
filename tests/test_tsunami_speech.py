@@ -229,8 +229,30 @@ def test_coastal_observation_speech_picks_max_station():
 
 
 def test_offshore_speech_only_when_stations_exist():
-    assert build_offshore_observation_speech(_obs(("", "浦河沖", {})))[1] == 2
+    text, pri = build_offshore_observation_speech(_obs(("", "浦河沖", {})))
+    assert pri == 2 and text == "沖合の津波観測に関する情報。次の沖合で津波を観測しました。浦河沖。"   # 時刻なしは省略
     assert build_offshore_observation_speech({"Body": {"Tsunami": {"Observation": {"Item": []}}}}) is None
+
+
+def test_offshore_speech_format_names_time_and_new_first():
+    def st(name, revise=None):
+        d = {"Name": name, "FirstHeight": {"Initial": "押し"}, "MaxHeight": {"Condition": "観測中"}}
+        if revise:
+            d["MaxHeight"]["Revise"] = revise
+        return d
+    d = {"Head": {"ReportDateTime": "2026-04-20T17:44:00+09:00", "TargetDateTime": "2026-04-20T17:43:00+09:00"},
+         "Body": {"Tsunami": {"Observation": {"Item": [{"Area": {"Name": None}, "Station": [
+             st("浦河沖５０ｋｍＡ"), st("岩手沖６０ｋｍＡ"), st("岩手宮古沖"),
+             st("宮城金華山沖", "追加"), st("福島沖５０ｋｍＡ", "追加")]}]}}}}
+    text, pri = build_offshore_observation_speech(d)
+    assert pri == 2
+    # 全角→半角・A/B除去・kmはキロメートル、追加分を優先、4件目以降は「等」、時刻は発表時刻
+    assert text == ("沖合の津波観測に関する情報。17時44分頃、次の沖合で津波を観測しました。"
+                    "宮城金華山沖、福島沖50キロメートル、浦河沖50キロメートル等。")
+    text, _ = build_offshore_observation_speech(d, max_areas=5)
+    assert text.endswith("宮城金華山沖、福島沖50キロメートル、浦河沖50キロメートル、岩手沖60キロメートル、岩手宮古沖。")
+    d["Head"].pop("ReportDateTime")                                   # 発表時刻が無ければ対象時刻
+    assert "17時43分頃、" in build_offshore_observation_speech(d)[0]
 
 
 def test_offshore_station_keys_and_gate():
