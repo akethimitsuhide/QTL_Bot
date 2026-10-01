@@ -892,6 +892,11 @@ class SystemCog(commands.Cog):
         self._web_app = None
         self._web_runner = None
 
+        # 【2026-10-01追加】on_ready の再発火（Discordゲートウェイ再接続時）で
+        # 繰り返すべきでない処理（Web Dashboard起動・スラッシュコマンド同期・
+        # 起動通知）を初回のみ実行するためのフラグ。
+        self._startup_tasks_done = False
+
     # ===============================
     # Cog起動・終了
     # ===============================
@@ -956,40 +961,45 @@ class SystemCog(commands.Cog):
                 f"(有効={DIGEST_ENABLED}, 間隔={DIGEST_INTERVAL})"
             )
 
-        if _test_runner_module.CLI_TEST_MODE:
-            # CLIテストモード（python3 bot.py --test_xxx ...）では、
-            # systemd の本番プロセス（discord-bot.service）が既に同じ
-            # WEB_DASHBOARD_PORT を使用中の可能性が高いため、Web Dashboard
-            # の起動自体をスキップする（ポート衝突エラーの発生源を断つ）。
-            logger.info(
-                "CLIテストモードのため Web ダッシュボードの起動をスキップします"
-                "（本番プロセスとのポート衝突を回避）"
-            )
-        elif WEB_DASHBOARD_ENABLED:
-            # 【2026-09-24 修正】以前はここで
-            # os.getenv("WEB_DASHBOARD_ENABLED", "true") と直接・重複して
-            # 読み込んでおり、既定値が"true"だった。上部（本ファイル
-            # 76〜83行目）の2026-08-27修正で「既定値をfalseに統一した」
-            # はずが、この箇所だけ修正が反映されておらず、.env に
-            # WEB_DASHBOARD_ENABLEDを書かなければ、ドキュメント上は
-            # 無効なはずのWeb Dashboardが実際には起動してしまう状態が
-            # 残っていた（コードとREADME/.env.exampleの記載を突き合わせる
-            # 監査で発見）。モジュールレベル定数WEB_DASHBOARD_ENABLED
-            # （既定false）を参照するよう修正し、重複読み込みを解消した。
-            self.bot.loop.create_task(self.start_web_dashboard())
+        # 【2026-10-01追加】以下はプロセス起動後の初回 on_ready のみ実行する
+        # （再接続による on_ready 再発火で、Dashboardのポート衝突エラー・
+        # コマンド同期の重複（レート制限）・起動通知の重複を起こさないため）。
+        if not self._startup_tasks_done:
+            self._startup_tasks_done = True
+            if _test_runner_module.CLI_TEST_MODE:
+                # CLIテストモード（python3 bot.py --test_xxx ...）では、
+                # systemd の本番プロセス（discord-bot.service）が既に同じ
+                # WEB_DASHBOARD_PORT を使用中の可能性が高いため、Web Dashboard
+                # の起動自体をスキップする（ポート衝突エラーの発生源を断つ）。
+                logger.info(
+                    "CLIテストモードのため Web ダッシュボードの起動をスキップします"
+                    "（本番プロセスとのポート衝突を回避）"
+                )
+            elif WEB_DASHBOARD_ENABLED:
+                # 【2026-09-24 修正】以前はここで
+                # os.getenv("WEB_DASHBOARD_ENABLED", "true") と直接・重複して
+                # 読み込んでおり、既定値が"true"だった。上部（本ファイル
+                # 76〜83行目）の2026-08-27修正で「既定値をfalseに統一した」
+                # はずが、この箇所だけ修正が反映されておらず、.env に
+                # WEB_DASHBOARD_ENABLEDを書かなければ、ドキュメント上は
+                # 無効なはずのWeb Dashboardが実際には起動してしまう状態が
+                # 残っていた（コードとREADME/.env.exampleの記載を突き合わせる
+                # 監査で発見）。モジュールレベル定数WEB_DASHBOARD_ENABLED
+                # （既定false）を参照するよう修正し、重複読み込みを解消した。
+                self.bot.loop.create_task(self.start_web_dashboard())
 
-        # スラッシュコマンドを同期
-        # 複数Cogに分割された今も、この処理は1箇所（SystemCog）でのみ実行すれば良い
-        # （bot.tree はグローバルなコマンドツリーであり、Cog横断で共有される）
-        try:
-            synced = await self.bot.tree.sync()
-            logger.info(f"スラッシュコマンドを同期しました（{len(synced)}件）")
-        except Exception as e:
-            logger.warning(f"スラッシュコマンド同期失敗: {e}")
+            # スラッシュコマンドを同期
+            # 複数Cogに分割された今も、この処理は1箇所（SystemCog）でのみ実行すれば良い
+            # （bot.tree はグローバルなコマンドツリーであり、Cog横断で共有される）
+            try:
+                synced = await self.bot.tree.sync()
+                logger.info(f"スラッシュコマンドを同期しました（{len(synced)}件）")
+            except Exception as e:
+                logger.warning(f"スラッシュコマンド同期失敗: {e}")
 
-        # Bot起動通知（管理者チャンネル宛）
-        # 他Cogのon_readyが出揃うのを少し待ってから送る
-        self.bot.loop.create_task(self._notify_startup())
+            # Bot起動通知（管理者チャンネル宛）
+            # 他Cogのon_readyが出揃うのを少し待ってから送る
+            self.bot.loop.create_task(self._notify_startup())
 
         logger.info("SystemCog: on_ready 完了")
 

@@ -1342,7 +1342,11 @@ class TsunamiCog(commands.Cog, AudioMixin):
             if speech:
                 text, priority, gate_value = speech
                 now = datetime.now().timestamp()
-                if is_test or self._tide_speech_gate.decide("tide", gate_value, now):
+                # 【2026-10-01修正】ゲートのキーを固定文字列"tide"からEventIDに変更。
+                # 固定キーだと別の津波イベントでも直前のクールダウン・前回値を共有
+                # してしまい、EventGateの「イベントID単位」の仕様と食い違っていた。
+                gate_key = str((detail.get("Head", {}) or {}).get("EventID") or "tide")
+                if is_test or self._tide_speech_gate.decide(gate_key, gate_value, now):
                     await self.speak_local(text, priority)
 
         except Exception as e:

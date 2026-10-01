@@ -133,6 +133,12 @@ class EewCog(commands.Cog, AudioClientMixin):
         self._eew_state_max_size = 50
         self.monitored_event_id = None
         self.vibration_monitor_task: asyncio.Task | None = None
+        # 【2026-10-01追加】Wolfx WebSocket 接続ループのタスク。on_ready は
+        # Discordゲートウェイの再接続（セッション無効化後の再IDENTIFY等）の
+        # たびに再発火することがあり、ガード無しだとその都度接続ループが
+        # 増殖して Wolfx への多重接続・EEWの多重処理になるため、タスクを保持して
+        # 二重起動を防ぐ（他Cogの on_ready と同じ方式）。
+        self._wolfx_ws_task: asyncio.Task | None = None
 
         # ── 受信統計（!status 用） ──
         self._last_recv: dict[str, datetime | None] = {
@@ -168,7 +174,7 @@ class EewCog(commands.Cog, AudioClientMixin):
         await ensure_gis_data_ready(self.session, "EewCog")
 
     async def cog_unload(self):
-        for bg_task in (self.vibration_monitor_task,):
+        for bg_task in (self.vibration_monitor_task, self._wolfx_ws_task):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
 
@@ -184,7 +190,8 @@ class EewCog(commands.Cog, AudioClientMixin):
         self.p2p_eew_channel = self.bot.get_channel(P2P_EEW_CHANNEL_ID) or self.eew_channel
         self.kyoshin_channel = self.bot.get_channel(KYOSHIN_CHANNEL_ID) or self.other_channel
 
-        self.bot.loop.create_task(self.connect_eew_ws())
+        if self._wolfx_ws_task is None or self._wolfx_ws_task.done():
+            self._wolfx_ws_task = self.bot.loop.create_task(self.connect_eew_ws())
 
         # P2P地震情報（code=556, EEW）の受信は core.p2p_ws_hub.P2PWebSocketHub
         # が一元管理する接続から配信される（bot.py 側で hub.register("eew", ...)
