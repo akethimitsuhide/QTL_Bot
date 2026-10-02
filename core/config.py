@@ -561,6 +561,13 @@ FETCH_BACKOFF_SECONDS   = _env_int("FETCH_BACKOFF_SECONDS", 60)
 P2P_FAILOVER_ENABLE           = _env_bool("P2P_FAILOVER_ENABLE", True)
 P2P_FAILOVER_THRESHOLD        = max(1, _env_int("P2P_FAILOVER_THRESHOLD", 5))
 P2P_FAILOVER_RECOVERY_SECONDS = max(5, _env_int("P2P_FAILOVER_RECOVERY_SECONDS", 60))
+# 接続回数に関わらず、WebSocket に接続できていない状態（再接続の待ち時間・接続
+# 試行中を含む）がこの秒数続いたらフォールバックに入る（2026-10-02追加。0=切断
+# した瞬間に開始）。接続失敗の連続回数（P2P_FAILOVER_THRESHOLD）の条件と併用し、
+# どちらか早い方で開始する。再接続は 5→10→20→40→60秒と待ち時間が延びるため、
+# 回数だけだと2026-10-01の障害では開始まで約2分かかり、その間の地震情報が
+# 通知されなかった。
+P2P_FAILOVER_DISCONNECT_SECONDS = max(0, _env_int("P2P_FAILOVER_DISCONNECT_SECONDS", 10))
 QUAKE_FAILOVER_POLL_SECONDS   = max(5, _env_int("QUAKE_FAILOVER_POLL_SECONDS", 10))
 # フォールバックが通知対象にする情報の新しさ（分）。発表がこれより古い情報は、
 # 障害前に P2P で通知済みとみなして通知しない（初回取得時に過去の地震が
@@ -789,4 +796,3 @@ JISHIN_KANCHI_EVENT_STATE_TTL_SEC = _env_int("JISHIN_KANCHI_EVENT_STATE_TTL_SEC"
 JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC = float(
     os.getenv("JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC", "10")
 )
-
