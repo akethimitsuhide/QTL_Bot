@@ -562,11 +562,17 @@ P2P_FAILOVER_ENABLE           = _env_bool("P2P_FAILOVER_ENABLE", True)
 P2P_FAILOVER_THRESHOLD        = max(1, _env_int("P2P_FAILOVER_THRESHOLD", 5))
 P2P_FAILOVER_RECOVERY_SECONDS = max(5, _env_int("P2P_FAILOVER_RECOVERY_SECONDS", 60))
 QUAKE_FAILOVER_POLL_SECONDS   = max(5, _env_int("QUAKE_FAILOVER_POLL_SECONDS", 10))
+# フォールバックが通知対象にする情報の新しさ（分）。発表がこれより古い情報は、
+# 障害前に P2P で通知済みとみなして通知しない（初回取得時に過去の地震が
+# まとめて再通知されるのを防ぐ）。障害が長引く場合は増やす（最小1。
+# 重複照合の保持時間6時間より短くすること）。
+P2P_FAILOVER_CATCHUP_MINUTES  = max(1, _env_int("P2P_FAILOVER_CATCHUP_MINUTES", 30))
 # 取得元の優先順（カンマ区切り）。先頭から順に試し、最初に応答した
-# 取得元の結果を使う。指定できる値: jma_json（気象庁HP JSON）, jma_xml（気象庁XML）
+# 取得元の結果を使う。指定できる値: jma_json（気象庁HP JSON）, jma_xml（気象庁XML）,
+# quake_one（Quake.One Static API。2026-10-02〜。http のみの第三者配信のため既定では最後）
 QUAKE_FAILOVER_SOURCES = [
     s.strip().lower()
-    for s in _getenv_nonempty("QUAKE_FAILOVER_SOURCES", "jma_json,jma_xml").split(",")
+    for s in _getenv_nonempty("QUAKE_FAILOVER_SOURCES", "jma_json,jma_xml,quake_one").split(",")
     if s.strip()
 ]
 
@@ -783,3 +789,4 @@ JISHIN_KANCHI_EVENT_STATE_TTL_SEC = _env_int("JISHIN_KANCHI_EVENT_STATE_TTL_SEC"
 JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC = float(
     os.getenv("JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC", "10")
 )
+

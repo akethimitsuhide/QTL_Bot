@@ -25,6 +25,12 @@ P2P地震情報 WebSocket が使えない間、地震情報（震度速報・震
     jma_json : 気象庁HP のJSON（bosai/quake/data/list.json と各詳細JSON。
                cogs/other.py の後発地震注意情報等の取得にも使っているもの）
     jma_xml  : 気象庁防災情報XML（随時フィード eqvol.xml と各電文XML）
+    quake_one: Quake.One の Static API（http://files.quake.one/ の list.json・
+               :EventID/info.json・:EventID/smallScalePoints.json。2026-10-02〜。
+               暗号化されない http のみの第三者配信データで、1つの地震につき
+               発表の最終形（震源・震度に関する情報相当）が1件ずつ得られる。
+               震度速報・震源に関する情報の段階は含まず、発表から数分遅れる
+               ため、既定では優先順の最後に置く）
   新しい取得元は QuakeFallbackSource を継承して SOURCE_FACTORIES へ
   登録すれば追加できる。
 
@@ -53,6 +59,7 @@ XML電文を jma_quake_to_p2p に通して、震源・震度の変換結果が�
 確認すること。
 """
 import asyncio
+import json
 import logging
 import re
 import traceback
@@ -62,6 +69,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+
+from core.constants import PREFECTURE_MAP
 
 logger = logging.getLogger("QTLBot")
 
@@ -92,6 +101,7 @@ JMA_INT_TO_P2P_SCALE = {
 
 XML_MAX_BYTES = 2 * 1024 * 1024      # 電文XMLの最大サイズ（想定外の巨大レスポンス対策）
 MAX_NOTIFY_PER_CYCLE = 10            # 1回のポーリングで通知する最大件数（大量発生時の過剰通知防止）
+MAX_DETAIL_ATTEMPTS = 5              # 詳細の取得を試す最大回数（恒久的な失敗の無限再試行防止）
 REQUEST_TIMEOUT_SEC = 10             # 1リクエストあたりのタイムアウト
 
 
@@ -215,7 +225,11 @@ def _domestic_tsunami(comments: dict) -> str:
     該当する記述が無い／判別できない場合は誤って「津波の心配なし」と断定しない
     よう "Unknown"（津波の有無は不明）にする。
     """
-    text = _text(_get(comments, "ForecastComment", "Text"))
+    return _tsunami_from_text(_text(_get(comments, "ForecastComment", "Text")))
+
+
+def _tsunami_from_text(text: str) -> str:
+    """津波に関する文面から P2P の domesticTsunami 値を推定する（判別不能は "Unknown"）。"""
     if not text:
         return "Unknown"
     if "津波の心配はありません" in text or "津波の心配なし" in text:
@@ -360,6 +374,131 @@ def _xml_to_dict(elem: ET.Element):
         else:
             out[tag] = val
     return out
+
+
+# ===============================
+# Quake.One（Static API）→ P2P地震情報 JMAQuake 互換dict
+# ===============================
+QUAKE_ONE_BASE = "http://files.quake.one"
+QUAKE_ONE_MAX_BYTES = 1024 * 1024          # JSON1件あたりの最大サイズ
+_QUAKE_ONE_EVENT_ID_RE = re.compile(r"^[0-9]{10,20}$")   # URLに埋め込むため数字のみ許可
+
+# Quake.One の震度表記（class / MaxInt）→ P2P の scale 値。
+# 実データで確認できた表記は "1"〜"2" のみのため、気象庁形式（"5-" "5+"）と
+# 日本語表記（"5弱" "5強"）の両方を許容する。未知の表記は点を読み飛ばす。
+_QUAKE_ONE_INT = {
+    "1": 10, "2": 20, "3": 30, "4": 40, "7": 70,
+    "5-": 45, "5+": 50, "6-": 55, "6+": 60,
+    "5弱": 45, "5強": 50, "6弱": 55, "6強": 60,
+}
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_text(v, max_len: int) -> str:
+    """外部入力の文字列を通知に使えるよう整える（制御文字除去・長さ制限）。"""
+    s = _CONTROL_CHARS_RE.sub("", _text(v))
+    return s[:max_len]
+
+
+def _quake_one_scale(v) -> int | None:
+    s = _text(v).replace("−", "-").replace("－", "-").replace("＋", "+")
+    return _QUAKE_ONE_INT.get(s)
+
+
+def quake_one_to_p2p(info: dict, small_points: dict | None, item_key: str = "") -> dict | None:
+    """
+    Quake.One の info.json と smallScalePoints.json（細分区域別の震度と重心）を
+    P2P地震情報 JMAQuake（code=551）互換の dict へ変換する。
+
+    Quake.One は1つの地震につき最終形の情報のみを返し、情報種別の区別が無いため、
+    震源と区域別震度が得られれば "ScaleAndDestination"（震度・震源に関する
+    情報）、震源のみなら "Destination" として扱う。points は細分区域単位
+    （isArea=True）で、都道府県名は prefecture_map.json（PREFECTURE_MAP）から
+    補う（無い区域は空文字＝重複判定では最大震度のみで照合する）。
+    市町村別の largeScalePoints は P2P の観測点名と一致せず地図描画に使えない
+    ため、現状は使わない。
+
+    外部（暗号化なしの http）から取得した値のため、型・範囲を検証し、
+    不正な値は「不明」の値に置き換える（EventIDは数字のみ許可）。
+    """
+    if not isinstance(info, dict):
+        return None
+    event_id = _text(info.get("EventID"))
+    if not _QUAKE_ONE_EVENT_ID_RE.match(event_id):
+        return None
+
+    hypo = info.get("Hypocenter")
+    hypo = hypo if isinstance(hypo, dict) else {}
+    name = _clean_text(hypo.get("Name"), 40)
+
+    lat = lon = -200.0
+    coord = hypo.get("Coordinate")
+    if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+        try:
+            lo, la = float(coord[0]), float(coord[1])
+            if -180 <= lo <= 180 and -90 <= la <= 90:
+                lon, lat = lo, la
+        except (TypeError, ValueError):
+            pass
+
+    depth = -1
+    try:
+        d = int(round(abs(float(hypo.get("Depth"))) / 1000))
+        if 0 <= d <= 1000:
+            depth = d
+    except (TypeError, ValueError):
+        pass
+
+    mag = _parse_magnitude(info.get("Magnitude"))
+    if not (0 <= mag <= 10):
+        mag = -1.0
+
+    points: list[dict] = []
+    # 注意: _get() は list の場合に先頭要素へ潰すため、features は直接取り出す
+    features = small_points.get("features") if isinstance(small_points, dict) else None
+    for f in _as_list(features):
+        props = f.get("properties") if isinstance(f, dict) else None
+        if not isinstance(props, dict) or props.get("class") == "epicenter":
+            continue
+        scale = _quake_one_scale(props.get("class"))
+        pname = _clean_text(props.get("name"), 40)
+        if scale is None or not pname:
+            continue
+        points.append({"pref": PREFECTURE_MAP.get(pname) or "", "addr": pname,
+                       "isArea": True, "scale": scale})
+
+    max_scale = _quake_one_scale(info.get("MaxInt"))
+    if max_scale is None:
+        max_scale = max((p["scale"] for p in points), default=-1)
+
+    if not name and not points:
+        return None
+    if name and points:
+        issue_type = "ScaleAndDestination"
+    elif name:
+        issue_type = "Destination"
+    else:
+        issue_type = "ScalePrompt"
+
+    origin = _parse_dt(info.get("OriginDateTime"))
+    report = _parse_dt(info.get("ReportDateTime"))
+    return {
+        "id": f"quakeone:{item_key or event_id}",
+        "code": 551,
+        "issue": {"source": "Quake.One", "time": _fmt_p2p_time(report),
+                  "type": issue_type, "correct": "None"},
+        "earthquake": {
+            "time": _fmt_p2p_time(origin),
+            "hypocenter": {"name": name, "latitude": lat, "longitude": lon,
+                           "depth": depth, "magnitude": mag},
+            "maxScale": max_scale,
+            "domesticTsunami": _tsunami_from_text(_clean_text(info.get("Comments"), 500)),
+            "foreignTsunami": "Unknown",
+        },
+        "points": points,
+        "comments": {"freeFormComment": ""},
+    }
 
 
 # ===============================
@@ -581,9 +720,63 @@ class JmaXmlSource(QuakeFallbackSource):
         return jma_quake_to_p2p(_xml_to_dict(root), list_title=item.title, item_key=item.key)
 
 
+async def _get_json_limited(session, url: str, max_bytes: int = QUAKE_ONE_MAX_BYTES):
+    """HTTP GET してJSONを返す（サイズ上限つき。想定外に大きい応答は破棄する）。"""
+    async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SEC)) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"HTTP {resp.status}")
+        raw = await resp.content.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise RuntimeError("応答が想定より大きいため破棄しました")
+    return json.loads(raw)
+
+
+class QuakeOneSource(QuakeFallbackSource):
+    """
+    Quake.One Static API（http://files.quake.one/）。
+      list.json                     : 最新の地震（{"objects": [{EventID, ReportDateTime, ...}]}）
+      :EventID/info.json            : 震源要素・最大震度・コメント
+      :EventID/smallScalePoints.json: 細分区域別の震度と区域の重心（GeoJSON）
+    同じ EventID でも続報で ReportDateTime が変わるため、既知判定のキーは
+    「EventID@ReportDateTime」にする。
+    """
+    name = "quake_one"
+    label = "Quake.One"
+
+    async def list_items(self, session) -> list[SourceItem]:
+        data = await _get_json_limited(session, f"{QUAKE_ONE_BASE}/list.json")
+        objs = data.get("objects") if isinstance(data, dict) else data
+        if not isinstance(objs, list):
+            raise RuntimeError("list.json の形式が想定外です")
+        items = []
+        for o in objs:
+            if not isinstance(o, dict):
+                continue
+            eid = _text(o.get("EventID"))
+            rdt = _clean_text(o.get("ReportDateTime"), 40)
+            if not _QUAKE_ONE_EVENT_ID_RE.match(eid):
+                continue
+            items.append(SourceItem(
+                key=f"{eid}@{rdt}", title="震源・震度に関する情報",
+                reported_at=_parse_dt(rdt), url=f"{QUAKE_ONE_BASE}/{eid}",
+            ))
+        return items
+
+    async def fetch_detail(self, session, item: SourceItem) -> dict | None:
+        info, small = await asyncio.gather(
+            _get_json_limited(session, f"{item.url}/info.json"),
+            _get_json_limited(session, f"{item.url}/smallScalePoints.json"),
+        )
+        # list.json の EventID と info.json の EventID が食い違う応答は採用しない
+        if _text(info.get("EventID") if isinstance(info, dict) else "") != item.key.split("@", 1)[0]:
+            raise RuntimeError("info.json の EventID が list.json と一致しません")
+        return quake_one_to_p2p(info, small, item_key=item.key)
+
+
 SOURCE_FACTORIES = {
     JmaJsonSource.name: JmaJsonSource,
     JmaXmlSource.name: JmaXmlSource,
+    QuakeOneSource.name: QuakeOneSource,
 }
 
 
@@ -613,13 +806,22 @@ class QuakeFailoverController:
     """
 
     def __init__(self, get_session, handler, sources: list[QuakeFallbackSource],
-                 poll_seconds: float, is_closed_fn, known_max: int = 500):
+                 poll_seconds: float, is_closed_fn, known_max: int = 500,
+                 catchup_minutes: float = 30, now_fn=None):
         """
         get_session  : aiohttp.ClientSession を返す関数（Cogのセッションを使う）
         handler      : async def handler(data: dict, source_label: str) -> None
         sources      : 優先順の取得元
         poll_seconds : フォールバック中のポーリング間隔
         is_closed_fn : Bot終了判定
+        catchup_minutes : 発表から何分以内の情報だけを通知対象にするか（既定30分）。
+            フォールバックは障害時にしか取得しないため、初回の取得時には取得元の
+            一覧に「起動後〜障害発生前に P2P で通知済みの過去の地震」が大量に
+            含まれる。これらを新着として再通知しないよう、発表がこの時間より
+            古い（または発表時刻が不明な）情報は通知せず既知にする。
+            障害が長引いてこれより前の情報が取り残される場合は、この値を増やす
+            （P2P_FAILOVER_CATCHUP_MINUTES）。重複照合の保持（6時間）より短くすること。
+        now_fn : 現在時刻（JSTのaware datetime）を返す関数。テスト用（既定は実時刻）
         """
         self._get_session = get_session
         self._handler = handler
@@ -628,9 +830,12 @@ class QuakeFailoverController:
         self._is_closed = is_closed_fn
         self._active = asyncio.Event()
         self._known: OrderedDict = OrderedDict()      # 既知（通知済み・起動時既存・処理済み）の key
+        self._detail_failures: dict[str, int] = {}    # 詳細取得に失敗した回数（key単位）
         self._known_max = known_max
         self._baseline_done = False
-        self._start_time = datetime.now(JST)
+        self._catchup = timedelta(minutes=catchup_minutes)
+        self._now_fn = now_fn or (lambda: datetime.now(JST))
+        self._start_time = self._now_fn()
 
     # -- 状態 --
     @property
@@ -696,15 +901,27 @@ class QuakeFailoverController:
 
     async def _process(self, src: QuakeFallbackSource, items: list[SourceItem], session) -> int:
         fresh = []
+        now = self._now_fn()
+        skipped_old = 0
         for it in items:
             if f"{src.name}:{it.key}" in self._known:
                 continue
+            # 発表が古い（または発表時刻が不明な）情報は通知せず既知にする。
+            # 通常は障害前に P2P で通知済みの過去の地震であり、再通知を避ける。
+            if it.reported_at is None or it.reported_at < now - self._catchup:
+                self._remember(f"{src.name}:{it.key}")
+                skipped_old += 1
+                continue
             # 起動時の既知情報を記録できていない場合は、起動より古い情報を対象外にする
-            if not self._baseline_done and it.reported_at is not None \
-                    and it.reported_at < self._start_time - timedelta(minutes=2):
+            if not self._baseline_done and it.reported_at < self._start_time - timedelta(minutes=2):
                 self._remember(f"{src.name}:{it.key}")
                 continue
             fresh.append(it)
+        if skipped_old:
+            logger.info(
+                f"QuakeFailover: {src.name} の発表が{self._catchup.total_seconds() / 60:g}分より古い "
+                f"{skipped_old} 件は、通知済みとみなして通知しません"
+            )
         # 古い順（震度速報 → 震源 → 各地の震度 の発表順）に処理する
         fresh.sort(key=lambda i: i.reported_at or datetime.min.replace(tzinfo=JST))
         notified = 0
@@ -712,9 +929,24 @@ class QuakeFailoverController:
             try:
                 data = await src.fetch_detail(session, it)
             except Exception as e:
-                # 詳細の取得失敗は既知にせず、次回のポーリングで再試行する
-                logger.warning(f"QuakeFailover: {src.name} の詳細取得に失敗 ({it.key}): {e}")
+                # 詳細の取得失敗は既知にせず、次回のポーリングで再試行する。
+                # ただし恒久的な失敗（404等）を毎回リクエストし続けないよう、
+                # MAX_DETAIL_ATTEMPTS 回で断念して既知にする。
+                fkey = f"{src.name}:{it.key}"
+                n = self._detail_failures.get(fkey, 0) + 1
+                self._detail_failures[fkey] = n
+                if n >= MAX_DETAIL_ATTEMPTS:
+                    self._remember(fkey)
+                    self._detail_failures.pop(fkey, None)
+                    logger.warning(
+                        f"QuakeFailover: {src.name} の詳細取得に {n} 回失敗したため断念します ({it.key}): {e}"
+                    )
+                else:
+                    logger.warning(
+                        f"QuakeFailover: {src.name} の詳細取得に失敗 ({it.key}, {n}/{MAX_DETAIL_ATTEMPTS}回目): {e}"
+                    )
                 continue
+            self._detail_failures.pop(f"{src.name}:{it.key}", None)
             self._remember(f"{src.name}:{it.key}")
             if data is None:
                 logger.info(f"QuakeFailover: {src.name} {it.key} は通知対象の内容がないためスキップしました")

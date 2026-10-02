@@ -67,6 +67,7 @@ from core.config import (
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
     P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES,
+    P2P_FAILOVER_CATCHUP_MINUTES,
 )
 from core.constants import (
     INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP, TSUNAMI_GRADE_ORDER,
@@ -175,6 +176,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
                     sources=sources,
                     poll_seconds=QUAKE_FAILOVER_POLL_SECONDS,
                     is_closed_fn=self.bot.is_closed,
+                    catchup_minutes=P2P_FAILOVER_CATCHUP_MINUTES,
                 )
                 hub.add_failover_listener(self._failover.set_active)
                 if hub.failover_active:
@@ -710,7 +712,12 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
                 for p in points
                 if p.get("addr") and p.get("scale") is not None
             }
-            if issue_type == "ScalePrompt":
+            # 【2026-10-02追加】震度速報に限らず、points がすべて区域単位
+            # （isArea=True。Quake.One経由の「細分区域別の震度」等）の場合も
+            # 区域の塗りつぶしにする（観測点名として扱うと一致せず描画されない）。
+            # P2P地震情報では isArea=True は震度速報の points にのみ使われる。
+            points_are_areas = all(p.get("isArea") for p in points)
+            if issue_type == "ScalePrompt" or points_are_areas:
                 region_shindo = shindo_map
             else:
                 station_shindo = shindo_map
@@ -719,7 +726,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             region_shindo=region_shindo,
             station_shindo=station_shindo,
             hypocenter_lonlat=hypo_lonlat,
-            show_region_icons=(issue_type == "ScalePrompt"),
+            show_region_icons=bool(region_shindo),
         )
         images = [primary] if primary else []
 
