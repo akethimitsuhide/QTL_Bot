@@ -548,6 +548,29 @@ FETCH_FAILURE_THRESHOLD = _env_int("FETCH_FAILURE_THRESHOLD", 3)
 FETCH_BACKOFF_SECONDS   = _env_int("FETCH_BACKOFF_SECONDS", 60)
 
 # ===============================
+# P2P地震情報 WebSocket 障害時のフォールバック（2026-10-01 追加）
+# ===============================
+# P2P地震情報 WebSocket への再接続が P2P_FAILOVER_THRESHOLD 回連続で失敗
+# （切断・接続タイムアウト）した場合、地震情報（震度速報・震源に関する
+# 情報・各地の震度に関する情報）を気象庁の公開データの定期取得に切り替える。
+# 切り替え後も WebSocket の再接続は並行して続け、接続が
+# P2P_FAILOVER_RECOVERY_SECONDS 秒以上安定したらフォールバックを停止する。
+# 同じ内容（震源要素・震度分布）の地震情報が取得元をまたいで重複通知
+# されないよう、通知前に内容（core/quake_failover.py QuakeContentDedupe）で
+# 照合する。詳細は README.md「P2P地震情報の障害時フォールバック」参照。
+P2P_FAILOVER_ENABLE           = _env_bool("P2P_FAILOVER_ENABLE", True)
+P2P_FAILOVER_THRESHOLD        = max(1, _env_int("P2P_FAILOVER_THRESHOLD", 5))
+P2P_FAILOVER_RECOVERY_SECONDS = max(5, _env_int("P2P_FAILOVER_RECOVERY_SECONDS", 60))
+QUAKE_FAILOVER_POLL_SECONDS   = max(5, _env_int("QUAKE_FAILOVER_POLL_SECONDS", 10))
+# 取得元の優先順（カンマ区切り）。先頭から順に試し、最初に応答した
+# 取得元の結果を使う。指定できる値: jma_json（気象庁HP JSON）, jma_xml（気象庁XML）
+QUAKE_FAILOVER_SOURCES = [
+    s.strip().lower()
+    for s in _getenv_nonempty("QUAKE_FAILOVER_SOURCES", "jma_json,jma_xml").split(",")
+    if s.strip()
+]
+
+# ===============================
 # キュー設定
 # ===============================
 SPEECH_QUEUE_MAXSIZE = _env_int("SPEECH_QUEUE_MAXSIZE", 200)
