@@ -65,7 +65,7 @@ from core.eew_convert import (
     build_forecast_groups, format_forecast_section, merge_forecast_groups,
     build_region_shindo_map, eew_warn_advisory_note,
 )
-from core.gis_render import render_eew_warn_map, render_shindo_map
+from core.gis_render import render_eew_warn_map, render_shindo_map, warmup_overseas_cache
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 from core.ws_helpers import ws_connect_loop
@@ -172,6 +172,10 @@ class EewCog(commands.Cog, AudioClientMixin):
         )
         logger.info("EewCog: aiohttp セッションを作成しました")
         await ensure_gis_data_ready(self.session, "EewCog")
+        # 【2026-10-03追加】海外・遠方の震源のEEWで、最初の海外向け地図の描画が
+        # 国境データの読み込み（数秒）でイベントループを塞がないよう、起動時に
+        # 別スレッドで事前に読み込む（失敗しても起動は続行する）。
+        await asyncio.to_thread(warmup_overseas_cache)
 
     async def cog_unload(self):
         for bg_task in (self.vibration_monitor_task, self._wolfx_ws_task):

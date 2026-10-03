@@ -279,6 +279,45 @@ def is_outside_japan_bbox(lon: float, lat: float) -> bool:
     )
 
 
+def _needs_overseas_map(hypo_points: list, viewport: _BBox, area_sets: tuple) -> bool:
+    """
+    通常の地図（日本全体の範囲でクランプされた表示範囲）では震源が描画できない、
+    または描画しても陸地が写らない（海だけの画像になる）かを判定する
+    （2026-10-03追加。台湾付近の地震のEEWで、地図が海だけの画像になった不具合の対策）。
+
+    次のどちらかなら True（render_overseas_map へ切り替えるべき）:
+      ① 震源が表示範囲の外にある。_compute_viewport は結果を日本全体の範囲
+         （経度122〜155・緯度23〜46）でクランプするため、台湾付近・
+         オホーツク海北部など、枠の外や縁にある震源は表示範囲に入らない。
+      ② 表示範囲に、区域ポリゴン（area_sets のいずれか）が1つも掛からない。
+         日本海中部・オホーツク海南部・小笠原諸島西方沖・硫黄島近海などの
+         遠方の深発地震で、震源のまわりが海だけになるケース。「掛かる」とは、
+         区域ポリゴンの頂点が実際に表示範囲内にあることを指す（区域のbboxの
+         重なりだけでは、島しょ部で陸地が写らないのに「陸地あり」と
+         誤判定するため）。
+    震源が無い場合（hypo_points が空）は False（切り替えの対象外）。
+    """
+    if not hypo_points:
+        return False
+    lon, lat = hypo_points[0]
+    if not (viewport.lon_min <= lon <= viewport.lon_max
+            and viewport.lat_min <= lat <= viewport.lat_max):
+        return True
+    for area_set in area_sets:
+        for shape in area_set.get().values():
+            if not shape.bbox.intersects(viewport):
+                continue
+            # 区域のbboxは島しょ部（小笠原諸島・南西諸島等）では非常に広く、
+            # bboxが重なるだけでは実際に陸地が写るとは限らない。実際に表示範囲内に
+            # 頂点を持つか（1つ見つかり次第終了）で判定する。
+            for ring in shape.rings:
+                for rlon, rlat in ring:
+                    if (viewport.lon_min <= rlon <= viewport.lon_max
+                            and viewport.lat_min <= rlat <= viewport.lat_max):
+                        return False
+    return True
+
+
 def get_local_area_shapes() -> dict:
     """
     細分区域（AreaForecastLocalE_GIS、194件）の生の緯度経度リングデータを
@@ -940,6 +979,19 @@ def render_eew_warn_map(
             for ring in shape.rings:
                 viewport_points.extend(ring)
         viewport = _compute_viewport(viewport_points)
+
+        # 震源が表示範囲の外、または表示範囲に陸地が無い場合は、海だけの
+        # 画像にならないよう海外向け地図（日本全体＋震源）へ切り替える
+        # （2026-10-03追加。_needs_overseas_map 参照）。警報地域は広域図の上に
+        # 塗りつぶして残す。切り替え先の描画に失敗した場合は、海だけの
+        # 画像を添付するより画像なしの方がよいため None を返す。
+        if _needs_overseas_map(hypo_points, viewport, (_eew_areas, _local_areas)):
+            logger.info("GIS地図(EEW警報): 震源が表示範囲外、または表示範囲に陸地が無いため海外向け地図に切り替えます")
+            return render_overseas_map(
+                hypo_points[0],
+                warn_region_names={n for n in warn_region_names if n in shapes},
+            )
+
         width, height = _dimensions_for_bbox(viewport)
 
         with _supersampled():
@@ -1062,6 +1114,21 @@ def render_shindo_map(
             viewport_points.extend(station_points_all)
 
         viewport = _compute_viewport(viewport_points)
+
+        # 震源が表示範囲の外、または表示範囲に陸地が無い場合は、海だけの
+        # 画像にならないよう海外向け地図へ切り替える（2026-10-03追加。
+        # _needs_overseas_map 参照）。震度の区域塗りつぶしは広域図の上に
+        # 残す（区域アイコン・観測点マーカーは広域図では小さすぎるため省く）。
+        # 切り替え先の描画に失敗した場合は、海だけの画像を添付するより
+        # 画像なしの方がよいため None を返す。
+        if _needs_overseas_map(hypo_points, viewport, (_local_areas,)):
+            logger.info("GIS地図(震度分布): 震源が表示範囲外、または表示範囲に陸地が無いため海外向け地図に切り替えます")
+            return render_overseas_map(
+                hypo_points[0],
+                region_shindo={name: code for name, code in (region_shindo or {}).items()
+                               if name in shapes},
+            )
+
         width, height = _dimensions_for_bbox(viewport)
 
         with _supersampled():
@@ -1417,6 +1484,25 @@ def _get_countries() -> list:
         return _countries_cache
 
 
+def warmup_overseas_cache() -> None:
+    """
+    海外向け地図で使う国境データ（約14MBのGeoJSONのパース・間引き）を事前に
+    読み込んでキャッシュする（2026-10-03追加）。未実行だと、海外・遠方の
+    震源のEEWで最初に描画する際、この読み込み（検証環境で約4〜5秒、
+    Raspberry Piではより長い）がEEW通知の処理中にイベントループを塞いで
+    しまう。起動時にスレッド（asyncio.to_thread）から呼ぶこと。
+    描画には使わない読み込みのみのため、_scale等の描画状態には触れず
+    スレッドから呼んでよい（_get_countries 自体が Lock で保護されている）。
+    GIS_MAP_ENABLE=false・データ未取得の場合は何もしない。
+    """
+    if not _ready():
+        return
+    try:
+        _get_countries()
+    except Exception:
+        logger.warning("GIS地図(海外): 国境データの事前読み込みに失敗しました", exc_info=True)
+
+
 def _pick_lon_shift(bbox: _BBox, viewport: _BBox) -> float:
     """
     国境ポリゴンのbboxを表示範囲（viewport）の経度座標系に揃えるための
@@ -1491,7 +1577,11 @@ def _compute_overseas_viewport(hypo_lonlat: tuple) -> _BBox:
     return _BBox(lon_min, lon_max, lat_min, lat_max)
 
 
-def render_overseas_map(hypocenter_lonlat: tuple[float, float]) -> Optional[bytes]:
+def render_overseas_map(
+    hypocenter_lonlat: tuple[float, float],
+    region_shindo: Optional[dict] = None,
+    warn_region_names: Optional[set] = None,
+) -> Optional[bytes]:
     """
     震源が日本国外の場合向け：世界の国境データ（間引き済み・日本を除く。
     countries.geojson由来）を陸地色で塗りつぶした背景に、日本の細分区域
@@ -1515,6 +1605,12 @@ def render_overseas_map(hypocenter_lonlat: tuple[float, float]) -> Optional[byte
 
     hypocenter_lonlat : (経度, 緯度)。震源不明の場合は呼び出し側で判定し、
         このプロパティ自体を呼ばないこと（本関数は必須パラメータとして扱う）。
+    region_shindo     : （2026-10-03追加）{区域名: 震度コード}。render_shindo_map と
+        同じ形式で、震度の色で区域を塗りつぶす（EEW予報・地震情報で、震源が
+        日本国外・遠方の海上にあり日本の区域にも震度が予想される場合用。
+        render_shindo_map が自動で切り替えて渡す）。
+    warn_region_names : （2026-10-03追加）EEW警報の発表地域（render_eew_warn_map
+        と同じ府県予報区名の集合）。警戒色で塗りつぶす。
 
     GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
     未取得の場合は None を返す。
@@ -1559,7 +1655,26 @@ def render_overseas_map(hypocenter_lonlat: tuple[float, float]) -> Optional[byte
             _draw_land_fill(draw, _local_areas, projector, viewport)
             _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
 
-            # 3. 震源のバツ印
+            # 3. 震度・警報地域の塗りつぶし（指定された場合のみ）
+            if region_shindo:
+                local = _local_areas.get()
+                for region_name, code in region_shindo.items():
+                    shape = local.get(region_name)
+                    if shape is None:
+                        continue
+                    color = SHINDO_COLORS.get(code, SHINDO_COLORS[-1])
+                    fill_rgb = _darken_rgb(_rgb_to_rgba(color)[:3], _SHINDO_FILL_DARKEN_FACTOR)
+                    _fill_area(draw, shape, projector, (*fill_rgb, _FILL_ALPHA), _darken_rgb(fill_rgb))
+            if warn_region_names:
+                eew = _eew_areas.get()
+                warn_fill = _rgb_to_rgba(GIS_MAP_WARNING_COLOR, _FILL_ALPHA)
+                warn_border = _darken_rgb(_rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3])
+                for region_name in warn_region_names:
+                    shape = eew.get(region_name)
+                    if shape is not None:
+                        _fill_area(draw, shape, projector, warn_fill, warn_border)
+
+            # 4. 震源のバツ印
             warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
             _draw_x_mark(draw, projector.project(draw_lon, lat), warn_rgb)
 

@@ -636,7 +636,9 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         if member_count < min_stations:
             logger.debug(
                 f"KyoshinMonitorCog: 観測点数{member_count}件のため通知をスキップします"
-                f"（検出していない扱い、実震度={event.max_shindo:.2f}、閾値={min_stations}）"
+                # 【2026-10-03修正】防災科研の利用規約に配慮し、強震モニタ由来の
+                # 実測震度の数値はログに出力しない（閾値のみ表示する）。
+                f"（検出していない扱い、閾値={min_stations}）"
             )
             return
 
@@ -743,8 +745,10 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
             logger.info(
                 f"KyoshinMonitorCog: イベント {event.event_id[:8]} 初回通知 "
                 f"(イベント生成→通知={now_loop - event.created_at:.1f}秒, "
+                # 【2026-10-03修正】防災科研の利用規約に配慮し、強震モニタ由来の
+                # 実測震度の数値（従来は「実震度=2.7」の形式）はログに出力しない。
                 f"検出観測点={member_count}件, フェーズ={event.phase}, "
-                f"実震度={event.max_shindo:.1f}, 解析画像の古さ={image_age})"
+                f"解析画像の古さ={image_age})"
             )
 
     async def _play_vibration_sound(self, vib_level: int) -> None:
