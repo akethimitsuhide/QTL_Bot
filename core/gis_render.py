@@ -537,9 +537,12 @@ class _AreaSet:
     だが、念のため）。
     """
 
-    def __init__(self, loader, kind: str):
+    def __init__(self, loader, kind: str, name_fixes: Optional[dict] = None):
         self._loader = loader
         self._kind = kind
+        # 配信元のGeoJSONの区域名を、EEW・地震情報の電文／REGION_MAPが使う名称へ
+        # 揃えるための読み込み時の読み替え（2026-10-03追加。_EEW_AREA_NAME_FIXES等）。
+        self._name_fixes = name_fixes or {}
         self._shapes: Optional[dict[str, _AreaShape]] = None
         self._lock = threading.Lock()
 
@@ -556,6 +559,7 @@ class _AreaSet:
                 name = props.get("name")
                 if not name:
                     continue
+                name = self._name_fixes.get(name, name)
                 rings = _extract_rings(feature.get("geometry"), self._kind)
                 bbox = _rings_bbox(rings) if rings else None
                 if not rings or bbox is None:
@@ -568,8 +572,15 @@ class _AreaSet:
             return shapes
 
 
-_eew_areas = _AreaSet(gis_data.load_eew_areas, kind="polygon")
-_local_areas = _AreaSet(gis_data.load_local_areas, kind="polygon")
+# 【2026-10-03追加】GeoJSON側の区域名と、電文・REGION_MAP側の名称の不一致の読み替え。
+# 不一致のままだと、該当地域が警報・震度の対象でも地図で塗られなかった。
+#   府県予報区: GeoJSONは「奄美(群島)」、REGION_MAP.json（府県予報区名）は「奄美群島」
+#   細分区域  : GeoJSONは「釧路地方中南」、気象庁の名称・REGION_MAPは「釧路地方中南部」
+_EEW_AREA_NAME_FIXES = {"奄美(群島)": "奄美群島"}
+_LOCAL_AREA_NAME_FIXES = {"釧路地方中南": "釧路地方中南部"}
+
+_eew_areas = _AreaSet(gis_data.load_eew_areas, kind="polygon", name_fixes=_EEW_AREA_NAME_FIXES)
+_local_areas = _AreaSet(gis_data.load_local_areas, kind="polygon", name_fixes=_LOCAL_AREA_NAME_FIXES)
 _tsunami_areas = _AreaSet(gis_data.load_tsunami_areas, kind="line")
 _stations: Optional[dict[str, tuple[float, float]]] = None
 _stations_lock = threading.Lock()

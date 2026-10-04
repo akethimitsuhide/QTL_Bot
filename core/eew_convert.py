@@ -17,6 +17,7 @@ EewCog._convert_p2p_eew_to_wolfx() / EewCog._extract_alert_regions()
 変わらない）。
 """
 import logging
+import re
 import traceback
 from collections import defaultdict
 
@@ -223,6 +224,47 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
         return None
 
 
+# 都道府県名の先頭一致（北海道・東京都・大阪府・京都府・「〇〇県」）。
+_PREF_PREFIX_RE = re.compile(r"^(北海道|東京都|大阪府|京都府|.{2,3}?県)")
+
+# 未知の地域名の警告ログを、同じ名称につき1回だけ出すための集合。
+_warned_unknown_chiiki: set = set()
+
+
+def resolve_chiiki(chiiki: str, known_names) -> list:
+    """
+    EEWの地域名（Chiiki）を、既知の細分区域名（known_names。通常は
+    REGION_MAP のキー）へ解決して、該当する区域名のリストを返す
+    （2026-10-03追加）。
+
+    背景: 電文・配信元によって、同じ地域が既知の名称と違う表記で届くこと
+    がある（例: 「秋田県南部」。既知の細分区域名は「秋田県沿岸南部」
+    「秋田県内陸南部」の2つ）。従来は REGION_MAP に無い名称を一律に
+    「その他」として通知・読み上げし、GIS地図でも塗られなかった。
+
+    解決の規則（誤って別の地域に割り当てないよう保守的にしている）:
+      1. known_names に完全一致すれば、その名称のみ。
+      2. 無ければ、同じ都道府県（先頭一致）の既知の区域のうち、都道府県名
+         を除いた部分が末尾一致するものを全て返す（例: 「秋田県南部」→
+         「南部」で終わる「秋田県沿岸南部」「秋田県内陸南部」）。
+         都道府県名を判別できない・都道府県名を除いた部分が2文字未満・
+         候補が5件を超える場合は、曖昧なので解決しない（空リスト）。
+    """
+    if not chiiki:
+        return []
+    names = known_names if isinstance(known_names, (set, frozenset, dict)) else set(known_names)
+    if chiiki in names:
+        return [chiiki]
+    m = _PREF_PREFIX_RE.match(chiiki)
+    if not m:
+        return []
+    pref, rest = m.group(1), chiiki[m.end():]
+    if len(rest) < 2:
+        return []
+    cands = sorted(n for n in names if n.startswith(pref) and n[len(pref):].endswith(rest))
+    return cands if 0 < len(cands) <= 5 else []
+
+
 def extract_alert_regions(data: dict, region_map: dict) -> set:
     """
     Wolfx形式のEEWデータから、警報(Type in ("警報","到達済"))対象の
@@ -231,12 +273,27 @@ def extract_alert_regions(data: dict, region_map: dict) -> set:
     region_map は core.constants.REGION_MAP を呼び出し元から渡す
     （このモジュールをBotの状態から独立させるため、モジュール内で
     core.constants を直接インポートしない設計とする）。
+
+    【2026-10-03変更】region_map に無い地域名は、従来は一律「その他」に
+    していたが、resolve_chiiki で既知の区域名へ解決を試み、解決先がすべて
+    同じ府県予報区に属する場合はその府県予報区とする。解決できない場合のみ
+    「その他」とし、見落とさないよう名称ごとに1回だけ警告ログを出す。
     """
     alert_regions = set()
     for area in data.get("WarnArea", []):
         chiiki = area.get("Chiiki")
         if chiiki and area.get("Type", "").lower() in ("警報", "到達済"):
-            alert_regions.add(region_map.get(chiiki, "その他"))
+            region = region_map.get(chiiki)
+            if region is None:
+                regions = {region_map[c] for c in resolve_chiiki(chiiki, region_map)}
+                region = regions.pop() if len(regions) == 1 else None
+                if region is None and chiiki not in _warned_unknown_chiiki:
+                    _warned_unknown_chiiki.add(chiiki)
+                    logger.warning(
+                        f"EEWの地域名 {chiiki!r} を既知の区域名に解決できないため「その他」として扱います"
+                        "（region_map.json への追加を検討してください）"
+                    )
+            alert_regions.add(region or "その他")
     return alert_regions
 
 
@@ -352,7 +409,8 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
     return dict(forecast_groups)
 
 
-def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool = False) -> dict:
+def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool = False,
+                            known_names=None) -> dict:
     """
     WarnArea配列から「地域名（Chiiki、REGION_MAP変換前の生の名称）→
     震度コード（int_mapのキー。10,20,...,70）」のフラットな辞書を作る。
@@ -363,6 +421,13 @@ def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool
     Shindo1（下限）・Shindo2（上限）のうち高い方を採用する
     （PLUM法＝is_assumption時はShindo1のみを使う点も同様）。
     Shindo1・Shindo2とも「不明」の地域は結果に含めない。
+
+    known_names（既知の細分区域名。省略可。通常は REGION_MAP のキー）を渡すと、
+    それに無い地域名（例: 「秋田県南部」）を resolve_chiiki で既知の区域名
+    （「秋田県沿岸南部」「秋田県内陸南部」）へ解決し、その全てに同じ震度を
+    割り当てる（2026-10-03追加。解決できない地域名は従来どおり生の名称のまま
+    残る＝GIS地図では塗られない）。同じ区域に複数の震度が割り当たる場合は
+    高い方を使う。
     """
     result: dict = {}
     for area in warn_areas:
@@ -394,7 +459,11 @@ def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool
                 code = max(shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map))
 
         if code:  # shindo_rank は未知の値に対して0を返すため、0は除外する
-            result[chiiki] = code
+            targets = [chiiki]
+            if known_names is not None and chiiki not in known_names:
+                targets = resolve_chiiki(chiiki, known_names) or [chiiki]
+            for t in targets:
+                result[t] = max(result.get(t, 0), code)
     return result
 
 

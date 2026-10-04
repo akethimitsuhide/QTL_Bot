@@ -614,7 +614,8 @@ class EewCog(commands.Cog, AudioClientMixin):
             # 添付する。震源のバツ印は表示範囲に応じて1.5〜2.0倍に拡大して
             # 描画する（enlarge_hypocenter_mark / core.gis_render._zoom_mark_scale）。
             region_shindo = (
-                build_region_shindo_map(warn_areas, INT_MAP, is_assumption=is_plum)
+                build_region_shindo_map(warn_areas, INT_MAP, is_assumption=is_plum,
+                                        known_names=REGION_MAP)
                 if warn_areas else None
             )
             gis_images = []
