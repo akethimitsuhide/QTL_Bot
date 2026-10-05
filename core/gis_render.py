@@ -86,6 +86,7 @@ None を返す（呼び出し側＝各Cogは、Noneの場合は地図添付を�
 だけでよい。例外は投げない設計とし、地図描画の失敗が通知本体の送信を
 妨げないようにする）。
 """
+import colorsys
 import io
 import logging
 import math
@@ -97,7 +98,9 @@ from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
 
 from core.config import (
-    GIS_MAP_ENABLE, GIS_MAP_WARNING_COLOR,
+    GIS_MAP_ENABLE, GIS_MAP_WARNING_COLOR, GIS_MAP_THEME,
+    GIS_ICON_CORNER_RADIUS_RATIO, GIS_ICON_BORDER_RATIO, GIS_ICON_BORDER_SATURATION,
+    GIS_ICON_TEXT_COLORS,
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
     TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
 )
@@ -163,20 +166,29 @@ def _supersampled():
 # 塗りつぶし、背景（_finalizeの合成先）を海色にすることで陸地の形を
 # 分かりやすくした。_draw_land_fill()（区域データ用）と
 # _draw_country_fill()（国境データ用）はどちらもこの2色を使う。
-_LAND_COLOR = (238, 232, 220, 255)   # 陸地（薄いクリーム色）
+# 【2026-10-05追加】配色テーマ（GIS_MAP_THEME）。(陸地, 海, 区域境界線) の3色。
+# light は従来の配色そのもの（下の旧コメントは light の値の経緯）。
+#   dark      : 暗色の陸・海に明るい境界線
+#   highlight : 淡いグレー系にして、震度・警報の塗り分けを際立たせる
+_THEMES = {
+    "light":     ((238, 232, 220, 255), (178, 205, 227, 255), (80, 80, 80, 255)),
+    "dark":      ((54, 60, 70, 255),    (20, 26, 36, 255),    (150, 158, 170, 255)),
+    "highlight": ((236, 236, 236, 255), (219, 224, 229, 255), (160, 160, 160, 255)),
+}
+_LAND_COLOR, _SEA_COLOR, _BOUNDARY_COLOR = _THEMES.get(GIS_MAP_THEME, _THEMES["light"])
+# 以下は light の経緯:
+# _LAND_COLOR（陸地）= 薄いクリーム色
 # 海（水色）。_finalize() の合成背景に使う。
 # 【2026-09-22変更】旧色(200,222,238)は陸地色との明度差が小さく（陸地
 # 平均輝度≒230に対し海は≒220）、縮小表示（Discordのサムネイル表示等）
 # では遠目に判別しづらいとの指摘のため、明度差を広げつつ彩度を少し
 # 上げて「水色」とわかりやすい色に変更した（平均輝度≒203。陸地との
 # 差は約10→約27に拡大）。
-_SEA_COLOR = (178, 205, 227, 255)
 
 # 背景・境界線・図形の見た目
 # 区域境界線（2026-09-15: 見づらいとの指摘で(170,170,170,255)→濃くした。
 # 【2026-09-22変更】(110,110,110,255)→さらに濃くした。縮小表示時、細い
 # 境界線が背景色に埋もれて判別しづらいとの指摘のため）
-_BOUNDARY_COLOR = (80, 80, 80, 255)
 _BOUNDARY_WIDTH = 1
 _HIGHLIGHT_BORDER_WIDTH = 2               # 塗りつぶし区域の輪郭線の太さ
 # 【2026-09-22追加】震度速報（ScalePrompt）・緊急地震速報の予想震度など、
@@ -755,23 +767,41 @@ def _zoom_mark_scale(viewport: _BBox) -> float:
     return _EEW_MARK_SCALE_MIN + (_EEW_MARK_SCALE_MAX - _EEW_MARK_SCALE_MIN) * t
 
 
-def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: int,
-                         outline: tuple = (40, 40, 40, 255)) -> None:
+def _icon_border_rgb(rgb: tuple) -> tuple:
+    """アイコンの縁の色。アイコン色と同じ色相・明度のまま、彩度だけ GIS_ICON_BORDER_SATURATION 倍にする。"""
+    h, sat, v = colorsys.rgb_to_hsv(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255)
+    r, g, b = colorsys.hsv_to_rgb(h, sat * GIS_ICON_BORDER_SATURATION, v)
+    return (round(r * 255), round(g * 255), round(b * 255), 255)
+
+
+def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: int) -> None:
     """
-    震度を表す色付き正方形＋短いラベル（"1"〜"7"等）を1つ描く共通処理。
+    震度を表す色付きの角丸四角＋短いラベル（"1"〜"7"等）を1つ描く共通処理。
     観測点マーカー（_draw_station_markers）と、震度速報時の区域中央
     アイコン（_draw_region_icons）の両方から使う（2026-09-16、区域
     アイコン追加時に共通化）。
+
+    【2026-10-05変更】角を丸め（GIS_ICON_CORNER_RADIUS_RATIO）、アイコンの外側に
+    アイコン色より彩度の低い色の縁（太さ GIS_ICON_BORDER_RATIO × 一辺）を付ける。
+    文字色は GIS_ICON_TEXT_COLORS で震度ごとに指定でき、未指定は従来どおり黒に近い色。
     """
     x, y = xy
     half = _px(size) / 2
     rgb = _darken_rgb(_rgb_to_rgba(SHINDO_COLORS.get(code, SHINDO_COLORS[-1]))[:3],
                        _SHINDO_FILL_DARKEN_FACTOR)
-    draw.rectangle([x - half, y - half, x + half, y + half], fill=rgb, outline=outline, width=_px(1))
+    radius = _px(size) * GIS_ICON_CORNER_RADIUS_RATIO
+    border = _px(size) * GIS_ICON_BORDER_RATIO
+    if border > 0:
+        draw.rounded_rectangle(
+            [x - half - border, y - half - border, x + half + border, y + half + border],
+            radius=radius + border, fill=_icon_border_rgb(rgb),
+        )
+    draw.rounded_rectangle([x - half, y - half, x + half, y + half], radius=radius, fill=rgb)
     font = _font(max(round(size), 11))
     label = shindo_short_label(code)
-    # テキストは黒固定（マーカー色が薄い場合でも視認性を確保するため）
-    draw.text((x, y), label, fill=(20, 20, 20, 255), font=font, anchor="mm")
+    text_color = GIS_ICON_TEXT_COLORS.get(label)
+    text_rgba = _rgb_to_rgba(text_color) if text_color is not None else (20, 20, 20, 255)
+    draw.text((x, y), label, fill=text_rgba, font=font, anchor="mm")
 
 
 def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, projector: _Projector) -> None:
@@ -908,7 +938,7 @@ def _draw_region_icons(draw: ImageDraw.ImageDraw, matched_regions: list, project
             continue
         lon, lat = centroid
         xy = projector.project(lon, lat)
-        _draw_shindo_square(draw, xy, code, _REGION_ICON_SIZE, outline=(20, 20, 20, 255))
+        _draw_shindo_square(draw, xy, code, _REGION_ICON_SIZE)
 
 
 def _finalize(canvas: Image.Image, target_size: Optional[tuple] = None) -> bytes:
