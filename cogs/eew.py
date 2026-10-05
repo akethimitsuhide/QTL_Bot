@@ -69,12 +69,11 @@ from core.gis_render import render_eew_warn_map, render_shindo_map, warmup_overs
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 from core.ws_helpers import ws_connect_loop
-from core.kyoshin_shared import (
-    DualImageFetcher, fetch_vibration_level, shindo_to_color,
-    estimate_max_shindo_from_image, vibration_tier, VIBRATION_TIER_MP3,
-)
 
 logger = logging.getLogger("QTLBot")
+
+# EEW第一報からの強震モニタ通知の最長時間（秒）。最終報・キャンセル報が届かなくても解除する
+EEW_MONITOR_MAX_SEC = 300
 
 
 class EewCog(commands.Cog, AudioClientMixin):
@@ -132,7 +131,10 @@ class EewCog(commands.Cog, AudioClientMixin):
         self.eew_state: dict[str, dict] = {}
         self._eew_state_max_size = 50
         self.monitored_event_id = None
-        self.vibration_monitor_task: asyncio.Task | None = None
+        # 【2026-10-05】EEW発表中の強震モニタ・振動レベル通知は KyoshinMonitorCog に集約した
+        # （monitored_event_id を見て通知する）。このタスクは、最終報・キャンセル報が届かない場合に
+        # EEW_MONITOR_MAX_SEC 秒で monitored_event_id を解除するだけの軽量なタイマー。
+        self.eew_monitor_timeout_task: asyncio.Task | None = None
         # 【2026-10-01追加】Wolfx WebSocket 接続ループのタスク。on_ready は
         # Discordゲートウェイの再接続（セッション無効化後の再IDENTIFY等）の
         # たびに再発火することがあり、ガード無しだとその都度接続ループが
@@ -144,12 +146,6 @@ class EewCog(commands.Cog, AudioClientMixin):
         self._last_recv: dict[str, datetime | None] = {
             "wolfx":   None,
             "p2p_eew": None,
-            # 【2026-08-27 追加】EEW発表時の長周期地震動モニタ
-            # （vibration_monitor_loop。jma_s/abrspmx_s画像＋振動レベル）
-            # の通知送信回数・時刻を !status / /qtl_status で確認できる
-            # ようにするため追加。KyoshinMonitorCog側の常時画像解析検知
-            # （"kyoshin"キー）とは独立した別機能のため、キー名も分ける。
-            "long_period_monitor": None,
         }
         self._recv_count: dict[str, int] = {k: 0 for k in self._last_recv}
 
@@ -178,7 +174,7 @@ class EewCog(commands.Cog, AudioClientMixin):
         await asyncio.to_thread(warmup_overseas_cache)
 
     async def cog_unload(self):
-        for bg_task in (self.vibration_monitor_task, self._wolfx_ws_task):
+        for bg_task in (self.eew_monitor_timeout_task, self._wolfx_ws_task):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
 
@@ -409,12 +405,12 @@ class EewCog(commands.Cog, AudioClientMixin):
 
             cumulative_warn_areas = self._update_cumulative_warn_areas(event_id, data, now)
 
-            if start_monitor and serial == 1 and self.monitored_event_id is None:
+            if start_monitor and serial == 1 and self.monitored_event_id is None and ENABLE_KYOSHIN:
                 self.monitored_event_id = event_id
-                if self.vibration_monitor_task:
-                    self.vibration_monitor_task.cancel()
-                self.vibration_monitor_task = asyncio.create_task(self.vibration_monitor_loop(event_id))
-                logger.info(f"EEW 第一報検知 → 強震モニタ監視開始 (EventID={event_id})")
+                if self.eew_monitor_timeout_task:
+                    self.eew_monitor_timeout_task.cancel()
+                self.eew_monitor_timeout_task = asyncio.create_task(self._eew_monitor_timeout(event_id))
+                logger.info(f"EEW 第一報検知 → 強震モニタ通知（KyoshinMonitorCog）に切り替え (EventID={event_id})")
 
             if is_cancel:
                 origin_time = data.get("OriginTime", "不明")
@@ -664,8 +660,8 @@ class EewCog(commands.Cog, AudioClientMixin):
 
             if (is_final or is_cancel) and event_id == self.monitored_event_id:
                 self.monitored_event_id = None
-                if self.vibration_monitor_task:
-                    self.vibration_monitor_task.cancel()
+                if self.eew_monitor_timeout_task:
+                    self.eew_monitor_timeout_task.cancel()
             # generate_and_speak_eew と play_eew_sound はどちらも
             # self.eew_state[event_id] の同じフィールド（last_warn_areas /
             # prev_data）を参照・更新する。以前は generate_and_speak_eew を
@@ -853,96 +849,18 @@ class EewCog(commands.Cog, AudioClientMixin):
     # ===============================
     # 強震モニタ監視ループ（振動レベル + 強震モニタ画像 + 長周期地震動モニタ画像）
     # ===============================
-    async def vibration_monitor_loop(self, target_event_id):
+    async def _eew_monitor_timeout(self, target_event_id):
         """
-        EEW発生時（第一報検知時）から一定時間、jma_s系統・abrspmx_s(LMoni)系統の
-        両画像と振動レベルを2秒間隔でDiscordに通知し続けるループ。
-
-        通知の色は jma_s画像から推定した実震度に基づき、
-        core.kyoshin_shared.JMA_S_SHINDO_COLORS の独自カラーマップで決定する
-        （kyoshin_monitor.py側の画像解析検知通知と共通のロジック・カラーマップを使用）。
+        EEW第一報から EEW_MONITOR_MAX_SEC 秒が経っても最終報・キャンセル報が届かない場合に、
+        monitored_event_id を解除する（解除されると KyoshinMonitorCog はEEW通知を止める）。
+        最終報・キャンセル報が先に届いた場合は呼び出し側がこのタスクをキャンセルする。
         """
-        POLL_INTERVAL_SEC = 2
-
-        image_fetcher = DualImageFetcher()
-
-        _prev_vib_tier: int = 0
-
-        start_time = datetime.now().timestamp()
-        if not ENABLE_KYOSHIN:
-            return
-        channel = self.kyoshin_channel or self.channel
-
         try:
-            while (self.monitored_event_id == target_event_id and
-                   not self.bot.is_closed() and
-                   datetime.now().timestamp() - start_time < 300):
-
-                level = await fetch_vibration_level(self.session)
-                jma_s_url, lmoni_url = await image_fetcher.fetch_urls(self.session)
-
-                if level is not None:
-                    cur_tier = vibration_tier(level)
-                    if cur_tier != _prev_vib_tier:
-                        logger.info(f"振動レベル tier 変化: {_prev_vib_tier} → {cur_tier} (level={level})")
-                        _prev_vib_tier = cur_tier
-                    mp3_key = VIBRATION_TIER_MP3.get(cur_tier)
-                    if mp3_key:
-                        await self.play_mp3(mp3_key)
-                        logger.debug(f"振動レベル MP3 再生: {mp3_key} (level={level})")
-
-                if level is not None or jma_s_url or lmoni_url:
-                    max_shindo = None
-                    if jma_s_url:
-                        jma_s_bytes = await image_fetcher.fetch_jma_s_bytes(self.session)
-                        if jma_s_bytes:
-                            # 【2026-08-29 修正】estimate_max_shindo_from_image は
-                            # KyoshinImageAnalyzer による全画素の色相解析（Pure Pythonの
-                            # ピクセルループ）を内部で行うCPUバウンド処理であり、これを
-                            # イベントループ上で同期呼び出ししていた。EEW発表中は本ループが
-                            # 2秒間隔・最大5分間動き続けるため、その間Discordのハートビート
-                            # 送信・音声キューの消費・他Cogの非同期処理までブロックしうる。
-                            # よりによって「EEW発表中」という最も通知の即時性が求められる
-                            # 場面でイベントループが詰まるのは本末転倒なため、
-                            # cogs/kyoshin_monitor.py._register_stations と同様に
-                            # run_in_executor でワーカースレッドへオフロードする。
-                            loop = asyncio.get_running_loop()
-                            max_shindo = await loop.run_in_executor(
-                                None, estimate_max_shindo_from_image, jma_s_bytes
-                            )
-                    color = shindo_to_color(max_shindo)
-
-                    if level is not None:
-                        level_str = f"**振動レベル: {level}**\n"
-                    else:
-                        level_str = "**振動レベル: 取得中...**\n"
-
-                    description = (
-                        level_str
-                        + "\n※気象庁からの情報ではありません。あくまで参考値としてお使いください。"
-                    )
-                    embed = discord.Embed(
-                        title="強震モニタ",
-                        description=description,
-                        color=color,
-                        timestamp=datetime.now()
-                    )
-
-                    if jma_s_url:
-                        embed.set_image(url=jma_s_url)
-                    if lmoni_url:
-                        embed.set_thumbnail(url=lmoni_url)
-
-                    await channel.send(embed=embed)
-                    self._last_recv["long_period_monitor"] = datetime.now()
-                    self._recv_count["long_period_monitor"] += 1
-
-                await asyncio.sleep(POLL_INTERVAL_SEC)
-
+            await asyncio.sleep(EEW_MONITOR_MAX_SEC)
         except asyncio.CancelledError:
-            logger.info(f"強震モニタ監視終了 (EventID={target_event_id})")
-        except Exception as e:
-            logger.error(f"強震モニタ監視ループ エラー: {e}")
-        finally:
-            if self.monitored_event_id == target_event_id:
-                self.monitored_event_id = None
+            return
+        if self.monitored_event_id == target_event_id:
+            self.monitored_event_id = None
+            logger.info(
+                f"EEW 強震モニタ通知を終了 (EventID={target_event_id}, {EEW_MONITOR_MAX_SEC}秒経過)"
+            )

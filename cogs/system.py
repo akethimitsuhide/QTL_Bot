@@ -1459,9 +1459,9 @@ class SystemCog(commands.Cog):
         else:
             api_lines.append("[ - ] **強震モニタ（画像解析検知）**: 無効")
 
-        # 長周期地震動モニタ（cogs/eew.py の vibration_monitor_loop。
-        # EEW発表時のみ一時的に動作し、jma_s/abrspmx_s画像＋振動レベルを
-        # 通知する別機能）。
+        # 長周期地震動モニタ（EEW発表時の通知。2026-10-05以降は
+        # cogs/kyoshin_monitor.py の通知ループが jma_s/abrspmx_s画像＋振動レベルを
+        # 通知する。EEW発表時のみ一時的に動作する別機能）。
         # 【設計メモ】この機能は「EEWが発表されていない」通常時は
         # 動いていないのが正常であり、他のAPI受信状況のような
         # 「長時間未受信=接続断」という判定は適用できない
@@ -1519,8 +1519,10 @@ class SystemCog(commands.Cog):
             f"{task_status(self._other_attr('fetch_quake_advisory'))} **fetch_quake_advisory**",
             f"{asyncio_task_status(self._kyoshin_attr('_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
             f"**kyoshin_monitor（画像解析検知）**{self._kyoshin_active_events_suffix()}",
-            f"{asyncio_task_status(self._eew_attr('vibration_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
-            f"**vibration_monitor_loop（長周期地震動モニタ、EEW発表時のみ稼働）**",
+            f"{asyncio_task_status(self._kyoshin_attr('_vib_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
+            f"**kyoshin_vibration（振動レベル受信）**",
+            f"{asyncio_task_status(self._kyoshin_attr('_notify_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
+            f"**kyoshin_notify（強震モニタ通知。EEW時・検知時）**",
         ]
         embed.add_field(name="タスク稼働状態", value="\n".join(task_lines), inline=False)
 
@@ -1741,7 +1743,8 @@ class SystemCog(commands.Cog):
                     "fetch_long_period": _loop_status(self._other_attr("fetch_long_period")),
                     "fetch_quake_advisory": _loop_status(self._other_attr("fetch_quake_advisory")),
                     "kyoshin_monitor": _task_status(self._kyoshin_attr("_monitor_task")) if ENABLE_KYOSHIN else "disabled",
-                    "vibration_monitor_loop": _task_status(self._eew_attr("vibration_monitor_task")) if ENABLE_KYOSHIN else "disabled",
+                    "kyoshin_vibration": _task_status(self._kyoshin_attr("_vib_task")) if ENABLE_KYOSHIN else "disabled",
+                    "kyoshin_notify": _task_status(self._kyoshin_attr("_notify_task")) if ENABLE_KYOSHIN else "disabled",
                 }
                 if p2p_hub_stats is not None:
                     tasks_info["p2p_ws_hub_recv_count"] = p2p_hub_stats.get("recv_count", {})

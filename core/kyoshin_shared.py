@@ -119,6 +119,15 @@ def estimate_max_shindo_from_image(image_bytes: bytes) -> float | None:
 # 【2026-09-22 追加】cogs/eew.py の vibration_monitor_loop にだけあった
 # 判定（2000以上=tier3 / 1000以上=tier2 / 100以上=tier1）を、強震モニタの
 # 画像解析検知（cogs/kyoshin_monitor.py）でも同じ基準で使えるよう共通化した。
+def vibration_to_color(level: int) -> int:
+    """振動レベル(kwatch-24h.net)からDiscord Embed色を返す（1000以上=赤、100以上=黄、それ未満=白）。"""
+    if level >= 1000:
+        return 0xFF0000
+    if level >= 100:
+        return 0xFFFF00
+    return 0xFFFFFF
+
+
 VIBRATION_TIER_MP3: dict[int, str] = {3: "lv2000", 2: "lv1000", 1: "lv100"}
 
 
