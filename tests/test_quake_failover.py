@@ -666,3 +666,35 @@ def test_hub_zero_disconnect_seconds_is_immediate_and_startup_counts_as_down():
         await asyncio.sleep(0.1)
         assert not hub3.failover_active
     asyncio.run(run())
+
+
+# ===== Quake.One の取得間隔（2026-10-05追加）=====
+def test_quake_one_poll_seconds_has_floor_of_6_seconds():
+    from core.quake_failover import QuakeOneSource, build_sources
+    assert QuakeOneSource().poll_seconds == 6.0
+    assert QuakeOneSource(1).poll_seconds == 6.0          # 10回/分を超える頻度は指定不可
+    assert QuakeOneSource(12).poll_seconds == 12.0
+    q = [s for s in build_sources(["jma_json", "quake_one"], 3) if s.name == "quake_one"][0]
+    assert q.poll_seconds == 6.0
+    assert [s for s in build_sources(["jma_json"], 3)][0].poll_seconds is None
+
+
+def test_controller_never_lists_a_rate_limited_source_faster_than_its_interval():
+    import time as _t
+
+    async def run():
+        stamps = []
+
+        class Limited(FakeSource):
+            poll_seconds = 0.3
+
+            async def list_items(self, session):
+                stamps.append(_t.monotonic())
+                return []
+        src = Limited([], {})
+        c = QuakeFailoverController(lambda: object(), None, [src], 0.01, lambda: False, catchup_minutes=10**7)
+        for _ in range(3):
+            await c.poll_once()
+        assert all(b - a >= 0.29 for a, b in zip(stamps, stamps[1:]))
+        assert c._next_sleep == 0.3                        # 次回待ちも取得元の間隔
+    asyncio.run(run())

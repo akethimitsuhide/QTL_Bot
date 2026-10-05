@@ -62,6 +62,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import traceback
 import xml.etree.ElementTree as ET
 from collections import OrderedDict, deque
@@ -100,6 +101,9 @@ JMA_INT_TO_P2P_SCALE = {
 }
 
 XML_MAX_BYTES = 2 * 1024 * 1024      # 電文XMLの最大サイズ（想定外の巨大レスポンス対策）
+# Quake.One の list.json の取得間隔の下限（秒）。10回/分（6秒間隔）を超える頻度では
+# 取得しない（2026-10-05追加）。詳細（info.json 等）の取得は数えない。
+QUAKE_ONE_MIN_POLL_SECONDS = 6.0
 MAX_NOTIFY_PER_CYCLE = 10            # 1回のポーリングで通知する最大件数（大量発生時の過剰通知防止）
 MAX_DETAIL_ATTEMPTS = 5              # 詳細の取得を試す最大回数（恒久的な失敗の無限再試行防止）
 REQUEST_TIMEOUT_SEC = 10             # 1リクエストあたりのタイムアウト
@@ -618,6 +622,9 @@ class QuakeFallbackSource:
     """代替取得元の基底クラス。list_items と fetch_detail を実装する。"""
     name = "base"
     label = "base"          # 通知フッター等に出す表示名
+    # この取得元の一覧取得の最小間隔（秒）。None ならコントローラの poll_seconds を使う。
+    # 設定した場合、コントローラは一覧取得の間隔がこの値を下回らないよう待つ。
+    poll_seconds: float | None = None
 
     async def list_items(self, session) -> list[SourceItem]:
         raise NotImplementedError
@@ -743,6 +750,13 @@ class QuakeOneSource(QuakeFallbackSource):
     name = "quake_one"
     label = "Quake.One"
 
+    def __init__(self, poll_seconds: float | None = None):
+        # list.json の取得間隔。下限は QUAKE_ONE_MIN_POLL_SECONDS（10回/分）
+        self.poll_seconds = max(
+            QUAKE_ONE_MIN_POLL_SECONDS,
+            float(poll_seconds) if poll_seconds is not None else QUAKE_ONE_MIN_POLL_SECONDS,
+        )
+
     async def list_items(self, session) -> list[SourceItem]:
         data = await _get_json_limited(session, f"{QUAKE_ONE_BASE}/list.json")
         objs = data.get("objects") if isinstance(data, dict) else data
@@ -780,8 +794,11 @@ SOURCE_FACTORIES = {
 }
 
 
-def build_sources(names: list[str]) -> list[QuakeFallbackSource]:
-    """設定名（QUAKE_FAILOVER_SOURCES）の並び順で取得元を作る。未知の名前は警告して無視。"""
+def build_sources(names: list[str], quake_one_poll_seconds: float | None = None) -> list[QuakeFallbackSource]:
+    """
+    設定名（QUAKE_FAILOVER_SOURCES）の並び順で取得元を作る。未知の名前は警告して無視。
+    quake_one_poll_seconds: Quake.One の list.json の取得間隔（秒。下限6秒＝10回/分）。
+    """
     sources: list[QuakeFallbackSource] = []
     for n in names:
         factory = SOURCE_FACTORIES.get(n)
@@ -792,7 +809,9 @@ def build_sources(names: list[str]) -> list[QuakeFallbackSource]:
             )
             continue
         if not any(isinstance(s, factory) for s in sources):
-            sources.append(factory())
+            sources.append(
+                factory(quake_one_poll_seconds) if factory is QuakeOneSource else factory()
+            )
     return sources
 
 
@@ -836,6 +855,21 @@ class QuakeFailoverController:
         self._catchup = timedelta(minutes=catchup_minutes)
         self._now_fn = now_fn or (lambda: datetime.now(JST))
         self._start_time = self._now_fn()
+        self._last_list_at: dict[str, float] = {}      # 取得元名 -> 直近の一覧取得の時刻（monotonic）
+        self._next_sleep = poll_seconds                # 次のポーリングまでの待ち時間
+
+    async def _list_items(self, src: QuakeFallbackSource, session) -> list[SourceItem]:
+        """
+        一覧取得。src.poll_seconds が設定されている取得元は、前回の一覧取得から
+        その秒数が経過するまで待ってから取得する（Quake.One の 10回/分 の上限を守る）。
+        """
+        interval = getattr(src, "poll_seconds", None)
+        if interval:
+            wait = self._last_list_at.get(src.name, float("-inf")) + interval - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._last_list_at[src.name] = time.monotonic()
+        return await src.list_items(session)
 
     # -- 状態 --
     @property
@@ -871,7 +905,7 @@ class QuakeFailoverController:
         done_any = False
         for src in self._sources:
             try:
-                for it in await src.list_items(session):
+                for it in await self._list_items(src, session):
                     self._remember(f"{src.name}:{it.key}")
                 done_any = True
             except Exception as e:
@@ -891,11 +925,14 @@ class QuakeFailoverController:
             return 0
         for src in self._sources:
             try:
-                items = await src.list_items(session)
+                items = await self._list_items(src, session)
             except Exception as e:
                 logger.warning(f"QuakeFailover: {src.name} の一覧取得に失敗（次の取得元を試します）: {e}")
                 continue
+            # 実際に使った取得元の間隔で次回まで待つ（Quake.One は6秒、他は poll_seconds）
+            self._next_sleep = getattr(src, "poll_seconds", None) or self._poll_seconds
             return await self._process(src, items, session)
+        self._next_sleep = self._poll_seconds
         logger.warning("QuakeFailover: すべての取得元で一覧取得に失敗しました")
         return 0
 
@@ -974,7 +1011,7 @@ class QuakeFailoverController:
                 await self._active.wait()
                 while self._active.is_set() and not self._is_closed():
                     await self.poll_once()
-                    await asyncio.sleep(self._poll_seconds)
+                    await asyncio.sleep(self._next_sleep)
             except asyncio.CancelledError:
                 raise
             except Exception:

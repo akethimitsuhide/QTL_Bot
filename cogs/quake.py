@@ -66,7 +66,7 @@ from core.config import (
     QUAKE_ENABLE_FOREIGN, QUAKE_ENABLE_OTHER,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
-    P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES,
+    P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS,
     P2P_FAILOVER_CATCHUP_MINUTES,
 )
 from core.constants import (
@@ -168,7 +168,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         hub = getattr(self.bot, "p2p_hub", None)
         if P2P_FAILOVER_ENABLE and hub is not None \
                 and (self._failover_task is None or self._failover_task.done()):
-            sources = build_sources(QUAKE_FAILOVER_SOURCES)
+            sources = build_sources(QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS)
             if sources:
                 self._failover = QuakeFailoverController(
                     get_session=lambda: self.session,
