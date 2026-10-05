@@ -41,7 +41,7 @@
 - サマリーEmbedには、保持中の各EEWについて「タイトル（第N報／最終報）・震源地・予想最大震度・マグニチュード・深さ」を新しい順に列挙した後、以下を続けて表示する
   1. 予想最大震度に応じた注意喚起（いずれかのEEWが該当条件を満たせば表示。詳細は下記「EEW警報時の注意喚起文」参照）
   2. **【強い揺れが予想される地域】**（`REGION_MAP`変換後の地方単位。複数EEWの警報対象地域を`merged_warn_regions`として和集合にまとめたもの）
-  3. **【地域ごとの予想震度】**（2026-08-27追加。市区町村・地域単位で、単独EEW通知と同じ「震度X程度」「震度X〜Y程度」形式のグルーピング。複数EEWを横断してマージし、同一地域が複数のEEWで異なる予想震度になっている場合はより大きい方を採用する。ロジックは`core/eew_convert.py`の`build_forecast_groups`/`merge_forecast_groups`/`format_forecast_section`に共通化されており、単独EEW通知の「地域ごとの予想震度」と全く同じ関数を使う）
+  3. **【地域ごとの予想震度】**（2026-08-27追加。市区町村・地域単位で、単独EEW通知と同じ「震度X程度」「震度X〜Y程度」形式のグルーピング。**2026-10-05変更**: `WarnArea[].Shindo1`（地域の最大震度）・`Shindo2`（地域の最小震度）のWolfx API仕様に従い、見出しは「震度{Shindo1}〜{Shindo2}程度」の順（最大〜最小。値の大小による並べ替えはしない）。`Shindo2`が未設定（`null`/`None`/空/「不明」）または`Shindo1`と同値なら「震度{Shindo1}程度」。PLUM法では`Shindo2`は`null`となり常に「震度{Shindo1}程度」。上限なし（「以上」）は最大震度を表す`Shindo1`側に「以上」（または`over`）、`Shindo2`に下限を入れて「震度{下限}以上」と表示する（P2P地震情報の変換`convert_p2p_eew_to_wolfx`も同じ形式で出力）。複数EEWを横断してマージし、同一地域が複数のEEWで異なる予想震度になっている場合はより大きい方を採用する。ロジックは`core/eew_convert.py`の`build_forecast_groups`/`merge_forecast_groups`/`format_forecast_section`に共通化されており、単独EEW通知の「地域ごとの予想震度」と全く同じ関数を使う）
 - Discord Embedの4096文字制限に対応した切り詰め処理を適用（地域数が多い場合は末尾に「（地域が多いため一部省略）」を付記）
 
 - Wolfx・P2P地震情報それぞれについて、EventIDごとの最大Serial番号を独立に管理し、同一ソースからの重複/逆行メッセージ（既に処理済みのSerial以下の再送）のみをスキップする（`EewCog.eew_max_serial_seen`、ソースごとに別々の辞書で管理）
@@ -77,7 +77,7 @@
   - ①WebSocket への接続・再接続の**連続失敗回数**が `P2P_FAILOVER_THRESHOLD`（既定5回）に達した。
   - ②WebSocket に**接続できていない状態**（再接続の待ち時間・接続試行中を含む）が `P2P_FAILOVER_DISCONNECT_SECONDS`（既定10秒、0=切断した瞬間）続いた（2026-10-02追加）。①だけでは、再接続の待ち時間（5→10→20→40秒）と各試行のタイムアウトを5回分待つ間（2026-10-01の障害では約2分）フォールバックが始まらず、その間の地震情報が通知されなかったため。起動直後（最初の接続前）も「接続できていない期間」に数える。短い切断のうちに再接続できた場合は開始しない。
   - 接続しても直後に切れることを繰り返す場合は「接続成功」とみなさず、失敗が積み上がる。
-- **フォールバック中の動作**: `core/quake_failover.py` の `QuakeFailoverController` が、設定された取得元を優先順に試して新着の地震情報を `QUAKE_FAILOVER_POLL_SECONDS`（既定10秒）間隔で取得する。WebSocket の再接続は**並行して続ける**。
+- **フォールバック中の動作**: `core/quake_failover.py` の `QuakeFailoverController` が、設定された取得元を優先順に試して新着の地震情報を `QUAKE_FAILOVER_POLL_SECONDS`（既定10秒）間隔で取得する（**2026-10-05追加**: Quake.One が実際に使われている間は `QUAKE_ONE_POLL_SECONDS`＝既定6秒〈10回/分〉間隔。6秒未満は指定できず切り上げる。数えるのは `list.json` の取得のみで、新着の詳細〈`info.json` 等〉の取得は含めない。コントローラは取得元ごとに前回の一覧取得からの間隔を守る）。WebSocket の再接続は**並行して続ける**。
   - 取得元（`QUAKE_FAILOVER_SOURCES`、既定 `jma_json,jma_xml`）: ①`jma_json`＝気象庁HPのJSON（`bosai/quake/data/list.json` と各詳細JSON）②`jma_xml`＝気象庁防災情報XML（随時フィード `eqvol.xml` と各電文XML）。③`quake_one`＝Quake.One Static API（`http://files.quake.one/list.json`・`:EventID/info.json`・`:EventID/smallScalePoints.json`。2026-10-02追加）。先頭の取得元が失敗（HTTPエラー・タイムアウト等）したら次の取得元を試す。
     - **Quake.One の特性**: 1つの地震につき発表の最終形（震源・震度に関する情報相当）が1件ずつ得られ、震度速報・震源に関する情報の段階は含まない（発表から数分遅れる）。暗号化されない `http` のみの第三者配信データなので、既定では優先順の最後に置き、型・範囲の検証（EventIDは数字のみ、座標・M・深さの範囲、文字列の長さ制限・制御文字除去、list.json と info.json の EventID 照合、1MB超の応答は破棄）を行う。同じ EventID でも続報で `ReportDateTime` が変わるため、既知判定は `EventID@ReportDateTime` 単位。通知は「震度・震源に関する情報」（区域別震度の地図つき）として、`発表機関： Quake.One` で表示する。市町村別の `largeScalePoints.json` は観測点名と一致せず地図に使えないため、現状は使っていない。
   - 取得した電文は P2P地震情報 JMAQuake（code=551）互換の形式へ変換するため、通知処理（`notify_quake`）は P2P 経由と共通。Embed のフッターに「P2P地震情報の障害のため〇〇から取得」と表示する。
@@ -126,6 +126,8 @@
 - PLUM法（仮定震源要素）の場合は、震源のバツ印の代わりに`GIS_MAP_WARNING_COLOR`のドーナツ型の円を描画（警報・予報のいずれの場合も）
 - 震源のバツ印は、赤系の塗りつぶしに紛れて見えにくい「警察署の地図記号」のような見た目だったとの指摘を受け、2026-09-17に「赤バツ印（最前面）＋それより一回り大きい白いバツ印（背面、縁取り）」のデザインに変更した（`_draw_x_mark`。PLUMドーナツは変更していない）
 - EEW（緊急地震速報）の地図（`render_eew_warn_map`・`render_shindo_map`（`enlarge_hypocenter_mark=True`指定時）に限る）では、震源のバツ印が小さく見づらいとの指摘を受け、2026-09-22に表示範囲の広さに応じて1.5倍（日本全体表示時）〜2.0倍（最大ズーム時）に連続的に拡大するようにした（`_zoom_mark_scale`）。地震情報・長周期地震動・震源要素更新のお知らせ・遠地地震の地図（震度速報等）は従来通りの大きさのまま
+
+**配色テーマ・震度アイコンの見た目（2026-10-05追加）**: `GIS_MAP_THEME`（`light`/`dark`/`highlight`）で、陸地・海・区域境界線の配色を切り替えられる（既定の`light`は従来と同じ）。震度の塗り分けの色・震源マークは全テーマ共通。震度アイコン（観測点マーカー・震度速報の区域アイコン）は、角を丸め（`GIS_ICON_CORNER_RADIUS_RATIO`）、アイコンの外側に、アイコン色より彩度の低い色の縁（太さ`GIS_ICON_BORDER_RATIO`＝一辺の1/10、彩度`GIS_ICON_BORDER_SATURATION`）を付けるようにした。文字色は`GIS_ICON_TEXT_COLORS`で震度ごとに指定でき、未指定の震度は従来の色のまま。長周期地震動階級のマーカーは対象外。テストは`tests/test_gis_theme_icon.py`。
 
 **遠地地震（震源が日本国外）向けの地図（2026-09-15追加、2026-09-26に地理院タイル廃止・独自ベクター地図へ統一）**: 地震情報の震源座標が日本の表示範囲外（`core.gis_render.is_outside_japan_bbox()`で判定。震源の緯度経度が日本全体の固定バウンディングボックス〈およそ経度122〜155度・緯度23〜46度〉の範囲外かどうかを見るだけの単純な判定で、実際の国境線やJMAの発表種別コードは見ていない）の場合、`core.gis_render`の日本限定ベクター地図では震源位置を表現できないため、`render_overseas_map()`に切り替わる。世界の国境データ（簡略化版`countries_simplified.geojson`、日本を除く）を陸地色で塗りつぶした背景に、日本の細分区域境界線・震源のバツ印を重ね描きする。この判定は`cogs/quake.py`（地震情報）・`cogs/other.py`（長周期地震動・顕著な地震の震源要素更新）・`cogs/usgs.py`（USGS地震情報）の3箇所で使われている。
 
@@ -210,14 +212,27 @@
 ### 長周期地震動
 - 長周期地震動の観測情報を通知
 
-### 長周期地震動モニタ
-- EEW 発表時に強震モニタ画像（`jma_s` 系統）・長周期地震動モニタ画像（`abrspmx_s` 系統）・振動レベルを通知（2秒間隔で更新）
+### 長周期地震動モニタ・強震モニタ・振動レベルの受信と通知（2026-10-05に `cogs/kyoshin_monitor.py` へ集約）
+以前は、EEW発表時の通知（`EewCog.vibration_monitor_loop`、2秒間隔）と画像解析検知時の通知（`KyoshinMonitorCog`、1秒間隔）が別々に同じ画像を取得・送信していた。取得と通知を `KyoshinMonitorCog` に集約し、次の仕様にした（`vibration_monitor_loop` は廃止。`EewCog` は、EEW第一報で `monitored_event_id` を設定し、最終報・キャンセル報、または `EEW_MONITOR_MAX_SEC`（300秒）の経過で解除するだけ）。
+
+- **受信**（それぞれ有効/無効と間隔を設定可能）
+  - モニタ系: 強震モニタ `jma_s`（`KYOSHIN_RECV_JMA_S_ENABLE`）・長周期地震動モニタ `abrspmx_s`（`KYOSHIN_RECV_LMONI_ENABLE`）を `KYOSHIN_RECV_IMAGE_INTERVAL_SEC`（既定1.0、**最小1秒**）間隔で受信。`jma_s` は画像解析による揺れ検知にも使う（無効にすると画像解析検知もできない）。LMoni の画像は通知を送るときに取得する。
+  - 振動レベル（kwatch-24h.net）: `KYOSHIN_RECV_VIBRATION_ENABLE` が有効なら `KYOSHIN_RECV_VIBRATION_INTERVAL_SEC`（既定2.0、**最小2秒**）間隔で常時受信。**`KYOSHIN_VIBRATION_DETECT_LEVEL`（既定100）以上のときも「揺れを検知」と判定する**（画像解析検知とは独立）。
+- **通知**（`KYOSHIN_NOTIFY_ENABLE`。3つの受信のうち**どれか1つでも有効**なら使える）
+  - **通知間隔 ＝ 有効な受信のうち最短の受信間隔**（1秒以上）。通知は単一のループで送るため、EEW通知・検知通知のどちらも間隔を守る。
+  - **EEW発表時**（`KYOSHIN_NOTIFY_ON_EEW`）: 第一報から最終報・キャンセル報（または最長300秒）まで通知する。
+  - **検知時**（`KYOSHIN_NOTIFY_ON_DETECT`）: 画像解析イベントまたは振動レベル検知がある間、検知が終わるまで通知する。複数のイベントがあるときは、通知条件（観測点数・フェーズ）を満たす最大震度のイベントを1本にまとめて通知する。
+  - **EEW通知中は検知による通知を中断する**（受信間隔・通知間隔を守るため）。検知自体は続け、EEW通知が終了した時点でまだ検知が続いていれば、検知通知を再開する。`KYOSHIN_NOTIFY_ON_EEW=false` の場合はEEW発表中も検知通知を中断しない。
+- 通知の色は、`jma_s` の実震度に基づく独自カラーマップ（画像が無ければ振動レベル：1000以上=赤、100以上=黄）。振動レベル音（`lv100`/`lv1000`/`lv2000`）は、EEW通知では常に、検知通知では `KYOSHIN_DETECT_VIBRATION_SOUND` が有効なときに鳴らす（再生待ちがある間は積み増さない）。
+- 注意: 振動レベルは第三者のサービス（kwatch-24h.net）から**常時**2秒間隔で取得するようになった（以前はEEW発表時・検知通知時のみ）。負荷が気になる場合は `KYOSHIN_RECV_VIBRATION_INTERVAL_SEC` を大きくするか、`KYOSHIN_RECV_VIBRATION_ENABLE=false` にする。
+- Pillow 未導入の場合も、画像解析による揺れ検知だけが無効になり、EEW通知・振動レベルによる検知・通知は続く。
+- 実装: `cogs/kyoshin_monitor.py` の `_vibration_poll_loop`（振動レベル受信）・`_notify_loop`/`_notify_tick`/`_send_notification`（通知）。`core/kyoshin_image_monitor.py` の `KyoshinImageMonitor` は、`send_kyoshin_image=None` なら検知のみ行う。テストは `tests/test_kyoshin_notify.py`。
 
 ### 強震モニタ画像解析検知の通知遅延について（2026-09-22調査・改善）
 他ソフトと比べて通知が10〜25秒程度遅いとの指摘を受け、調査・対応した。
 
 - **検知アルゴリズム自体の起動判定（`KYOSHIN_RISE_THRESHOLD`＝上昇幅1.0、`KYOSHIN_NEIGHBOR_TRIGGER_COUNT`＝近傍同時上昇数、震度0相当時の最小観測点数）は、誤検知対策として意図的に厳しめに設定されている。小さな地震ではP波の立ち上がりが緩く、揺れがある程度大きくなるまで条件を満たさないため、これ自体がP波・S波の到達時間差（震源からの距離次第で10〜25秒程度）に近い遅延の主要因になっている可能性が高い。誤検知が増えると24時間稼働のBotでは通知が乱発するため、この既定値は今回変更していない（`.env.kyoshin.example`側の調整値であり、必要なら運用側で許容できる範囲を見ながら緩めることは可能）**
-- **通知経路側の遅延も特定し、こちらは修正した**: 従来は通知のたびに`jma_s`系統・`abrspmx_s`系統の画像URLを、現在時刻の`KYOSHIN_IMAGE_DELAY_SEC`（既定6）秒前から直列にHEADリクエストで探索し直しており、検知に実際に使った最新フレームを再利用していなかった。加えて振動レベルの取得も直列だった。**2026-09-22修正**: 検知（画像解析）に使った最新フレームのURLを（10秒以内のものであれば）そのまま通知に再利用し、`abrspmx_s`系統の画像探索と振動レベル取得は`asyncio.gather`で並列化した（`cogs/kyoshin_monitor.py`の`_send_kyoshin_image`、`core/kyoshin_shared.py`の`DualImageFetcher.fetch_lmoni_url`・`fetch_urls`の並列化）。検知イベントごとに「イベント生成→初回通知」の所要秒数・検出観測点数・フェーズ・解析画像の古さをINFOログに1回出力するようにしたので（**2026-10-03**: 防災科研の利用規約に配慮し、強震モニタ由来の実測震度の数値はログに出力しない。従来のINFOログの「実震度=…」と、通知スキップ時のDEBUGログの「実震度=…」を削除した。通知の色・検知フェーズ・通知の要否の判定自体は内部で従来どおり実測値を使う）（`qtlbot.log`で`初回通知`を検索）、実機でどの要因がどれだけ効いているか継続して確認できる
+- **通知経路側の遅延も特定し、こちらは修正した**: 従来は通知のたびに`jma_s`系統・`abrspmx_s`系統の画像URLを、現在時刻の`KYOSHIN_IMAGE_DELAY_SEC`（既定6）秒前から直列にHEADリクエストで探索し直しており、検知に実際に使った最新フレームを再利用していなかった。加えて振動レベルの取得も直列だった。**2026-09-22修正**: 検知（画像解析）に使った最新フレームのURLを（10秒以内のものであれば）そのまま通知に再利用し、`abrspmx_s`系統の画像探索と振動レベル取得は`asyncio.gather`で並列化した（`cogs/kyoshin_monitor.py`の`_send_kyoshin_image`〈2026-10-05に通知ループ`_send_notification`へ集約。受信済みの最新フレームを再利用する点は同じ〉、`core/kyoshin_shared.py`の`DualImageFetcher.fetch_lmoni_url`・`fetch_urls`の並列化）。検知イベントごとに「イベント生成→初回通知」の所要秒数・検出観測点数・フェーズ・解析画像の古さをINFOログに1回出力するようにしたので（**2026-10-03**: 防災科研の利用規約に配慮し、強震モニタ由来の実測震度の数値はログに出力しない。従来のINFOログの「実震度=…」と、通知スキップ時のDEBUGログの「実震度=…」を削除した。通知の色・検知フェーズ・通知の要否の判定自体は内部で従来どおり実測値を使う）（`qtlbot.log`で`初回通知`を検索）、実機でどの要因がどれだけ効いているか継続して確認できる
 - 通知の色は `jma_s` 系統の画像から推定した実震度に基づく独自カラーマップで決定（強震モニタ画像解析検知と共通仕様）
 - 振動レベルに応じた音声アラート（該当レベルの間、2秒間隔で継続再生）
   - レベル 100〜999: `lv100.mp3`
@@ -237,7 +252,7 @@
 - **パッチサンプリング（恒久対策、2026-09-09追加）**: `KYOSHIN_RISE_THRESHOLD=1.0`・`KYOSHIN_NEIGHBOR_TRIGGER_COUNT=3`への引き上げは「観測点座標周辺の複数ピクセルを平均・中央値で平滑化するパッチサンプリング等の恒久対策を検討するまでの一時的な緩和措置」とされていたが、これを実装した。`KYOSHIN_PATCH_RADIUS`（既定0＝従来通りの単一ピクセル方式）を1以上にすると、観測点のピクセル位置を中心とした`(2*radius+1)^2`の正方形パッチ内の各ピクセルを個別に震度へ変換し、その中央値（`KYOSHIN_PATCH_AGGREGATION=median`、既定）または平均（`mean`）をその観測点の震度として採用する。RGBを直接平均せず「各ピクセルを震度に変換してから集約」する設計にしているのは、色空間上でのRGB平均がカラースケール外の色と混ざって無意味な値に化ける危険を避けるため。パッチが大きいほど計算量が`(2r+1)^2`倍に増えるため、既定では無効のままとし、`KYOSHIN_SLOW_FETCH_THRESHOLD_SEC`のログを見ながら段階的に有効化・チューニングする想定
 - 画像デコード失敗（配信元画像が生成途中のタイミングで捕まる、想定内の一時的事象）のログは、`KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC`（既定300秒）ごとに件数をまとめて1回だけWARNINGへ集約する（詳細は毎回DEBUGに出る）。1秒間隔ポーリングでは頻発しうるため、毎回WARNINGを出すログノイズを避け、本当に見るべき異常が埋もれないようにした
 - 画像の時刻決定は `latest.json` API（実際に配信されている最新時刻）を優先取得し、失敗時のみ従来のリトライ探索方式にフォールバック
-- 通知には `jma_s` 系統・`abrspmx_s` 系統の両画像と振動レベルを含める
+- 通知には、受信が有効な `jma_s` 系統・`abrspmx_s` 系統の画像と振動レベルを含める（上記「受信と通知」参照）
 - 通知の色は `jma_s` 系統の実震度に基づく独自カラーマップで決定（EEW発表時の強震モニタ通知と共通仕様）
 - Pillow（PIL）が未インストールの場合は自動的に機能をスキップする
 
@@ -360,6 +375,13 @@ cp .env.example .env
 ```
 
 全環境変数の詳細は README 下部の「環境変数リファレンス」を参照してください。
+
+**既存の `.env` に、新しく増えた設定項目を追加したい場合（2026-10-05追加）**
+```bash
+python3 bot.py --merge_env          # .env.example にあって .env に無い項目を、1つずつ確認しながら追加
+python3 bot.py --merge_env --yes    # 確認せず、不足項目をすべて既定値で追加
+```
+`.env.example`（と、`.env.kyoshin` があれば `.env.kyoshin.example`）にあって `.env` に無い項目だけを、説明コメントと既定値を見せながら追加します（Enter=既定値で追加 / `e`=値を入力 / `n`=スキップ / `a`=残りすべて既定値で追加 / `q`=終了）。既存の値は変更・並べ替えせず、追加分はファイル末尾へ説明コメントごと追記し、書き込み前に `.env.bak.<タイムスタンプ>` へバックアップします。コメントアウトされた項目（`# KEY=...`）は不足に含めません。`.env.example` に無い項目（廃止された可能性）は名前だけ表示し、変更しません。トークン等の秘密情報らしい項目を入力する場合は画面に表示されません。Ctrl+C で中断した場合、ファイルは変更されません（`core/env_merge.py`、`tests/test_env_merge.py`）。
 
 #### 3. チャンネル設定
 Bot が通知を送信するテキストチャンネルを作成し、ID を `.env` に設定：
@@ -495,6 +517,11 @@ python3 bot.py --check_env
 | `GIS_MAP_ENABLE` | false | GIS地図描画機能を有効化するか（試験導入のためデフォルト無効） |
 | `GIS_MAP_DATA_DIR` | `<プロジェクトルート>/data/gis` | GeoJSON・観測点一覧のキャッシュ先ディレクトリ（`.gitignore`登録済み） |
 | `GIS_MAP_WARNING_COLOR` | `0xFF0000` | EEW警報の発表地域の塗り色・輪郭色、およびPLUM法時の震源ドーナツマークの色 |
+| `GIS_MAP_THEME` | `light` | **2026-10-05追加**。地図の配色テーマ。`light`＝従来の配色、`dark`＝暗色の陸・海＋明るい境界線、`highlight`＝淡いグレー系で震度・警報の塗り分けを際立たせる。不正な値は`light` |
+| `GIS_ICON_CORNER_RADIUS_RATIO` | `0.15` | **2026-10-05追加**。震度アイコン（観測点マーカー・震度速報の区域アイコン）の角の丸さ。一辺に対する角丸半径の比率（0=四角、0.5=円） |
+| `GIS_ICON_BORDER_RATIO` | `0.1` | **2026-10-05追加**。震度アイコンの縁の太さ。一辺に対する比率（既定=アイコンの1/10）。縁はアイコンの**外側**に付く。0=縁なし |
+| `GIS_ICON_BORDER_SATURATION` | `0.6` | **2026-10-05追加**。縁の色＝アイコン色の彩度に掛ける係数（0〜1。小さいほど灰色寄り。1=アイコンと同じ彩度） |
+| `GIS_ICON_TEXT_COLORS` | （空） | **2026-10-05追加**。震度ごとの文字色。`震度:RRGGBB`をカンマ区切り（震度は`0,1,2,3,4,5-,5+,6-,6+,7`）。例: `6-:FFFFFF,6+:FFFFFF,7:FFFFFF`。未指定の震度は従来の文字色（黒に近い色） |
 
 外部データ（GeoJSON4種・観測点一覧）が未取得の場合、`GIS_MAP_ENABLE=true`でのCogロード時に自動ダウンロードする（初回のみ）。手動で強制再取得したい場合は `python3 bot.py --refresh_gis_data` を使う（stations.jsonの観測点構成が気象庁側で更新された場合など）。
 
@@ -515,6 +542,7 @@ python3 bot.py --check_env
 | `P2P_FAILOVER_DISCONNECT_SECONDS` | 10 | 接続できていない状態（再接続の待ち時間中を含む）がこの秒数続いたら、失敗回数に関わらずフォールバックに入る（最小0=切断した瞬間に開始） |
 | `P2P_FAILOVER_RECOVERY_SECONDS` | 60 | WebSocket が何秒以上連続して接続できたら復旧とみなすか（最小5） |
 | `QUAKE_FAILOVER_POLL_SECONDS` | 10 | フォールバック中の取得間隔（秒、最小5） |
+| `QUAKE_ONE_POLL_SECONDS` | 6 | **2026-10-05追加**。Quake.One の `list.json` の取得間隔（秒）。既定6秒＝10回/分。6秒未満（10回/分を超える頻度）は指定できず6に切り上げる。詳細の取得は数えない |
 | `P2P_FAILOVER_CATCHUP_MINUTES` | 30 | フォールバックが通知対象にする情報の新しさ（分、最小1）。発表がこれより古い情報は通知済みとみなして通知しない |
 | `QUAKE_FAILOVER_SOURCES` | jma_json,jma_xml,quake_one | 取得元の優先順（カンマ区切り。`jma_json`＝気象庁HP JSON、`jma_xml`＝気象庁XML、`quake_one`＝Quake.One） |
 
@@ -560,17 +588,24 @@ python3 bot.py --check_env
 | `KYOSHIN_IMAGE_DELAY_SEC` | 6 | `latest.json` 取得失敗時のフォールバック探索で遡る基準秒数 |
 | `KYOSHIN_IMAGE_STEP_SEC` | 3 | フォールバック探索で画像が見つからない場合に遡るステップ幅（秒） |
 | `KYOSHIN_IMAGE_MAX_RETRY` | 4 | フォールバック探索の最大リトライ回数 |
-| `KYOSHIN_POLL_INTERVAL_SEC` | 1.0 | 観測値取り込み〜イベント判定のポーリング間隔（秒）。EEW発表中（`EewCog.monitored_event_id`が設定されている間）はポーリング自体をスキップし、`EewCog.vibration_monitor_loop`に画像取得を一本化する（防災科研への負荷軽減） |
-| `KYOSHIN_NOTIFY_INTERVAL_SEC` | 1.0 | イベント継続中の通知再送間隔（秒）。EEW発表中は同様に通知をスキップする |
+| `KYOSHIN_RECV_JMA_S_ENABLE` | true | **2026-10-05追加**。強震モニタ（`jma_s`）を受信するか。無効にすると画像解析による揺れ検知もできない |
+| `KYOSHIN_RECV_LMONI_ENABLE` | true | **2026-10-05追加**。長周期地震動モニタ（LMoni, `abrspmx_s`）の画像を受信するか（通知の表示用） |
+| `KYOSHIN_RECV_VIBRATION_ENABLE` | true | **2026-10-05追加**。振動レベル（kwatch-24h.net）を受信するか。有効だと常時受信し、`KYOSHIN_VIBRATION_DETECT_LEVEL`以上で揺れを検知とみなす |
+| `KYOSHIN_RECV_IMAGE_INTERVAL_SEC` | 1.0 | **2026-10-05追加**（旧`KYOSHIN_POLL_INTERVAL_SEC`の置き換え）。モニタ系（`jma_s`・LMoni）の受信間隔（秒）。**最小1.0**（未満は1.0に切り上げ） |
+| `KYOSHIN_RECV_VIBRATION_INTERVAL_SEC` | 2.0 | **2026-10-05追加**。振動レベルの受信間隔（秒）。**最小2.0**（未満は2.0に切り上げ） |
+| `KYOSHIN_VIBRATION_DETECT_LEVEL` | 100 | **2026-10-05追加**。振動レベルがこの値以上のとき、揺れを検知したと判定する（最小1） |
+| `KYOSHIN_NOTIFY_ENABLE` | true | **2026-10-05追加**。強震モニタの通知機能の有効化。通知間隔＝有効な受信のうち最短の受信間隔（旧`KYOSHIN_NOTIFY_INTERVAL_SEC`の置き換え） |
+| `KYOSHIN_NOTIFY_ON_EEW` | true | **2026-10-05追加**。EEW発表時（第一報〜最終報・キャンセル報、最長300秒）に通知するか。通知中は検知による通知を中断する（検知は継続） |
+| `KYOSHIN_NOTIFY_ON_DETECT` | true | **2026-10-05追加**。揺れ検知時（画像解析・振動レベル）に通知するか。検知が終わるまで通知を続ける |
 | `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
 | `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker &lt; Weak &lt; Medium &lt; Strong &lt; Stronger） |
 | `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
-| `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | **2026-08-29追加**。`_fetch_current_shindo_map`（画像ダウンロード・デコード・観測点サンプリング。`KYOSHIN_POLL_INTERVAL_SEC`ごとに常時実行される）のうち、デコード+サンプリング部分の所要時間がこの秒数を超えた場合にWARNINGログを出す。通常はDEBUGログに毎回の所要時間が出るのみ。Raspberry Pi等でのCPU負荷を実測ベースで把握するための計測用設定であり、通常運用では変更不要 |
+| `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | **2026-08-29追加**。`_fetch_current_shindo_map`（画像ダウンロード・デコード・観測点サンプリング。`KYOSHIN_RECV_IMAGE_INTERVAL_SEC`ごとに常時実行される）のうち、デコード+サンプリング部分の所要時間がこの秒数を超えた場合にWARNINGログを出す。通常はDEBUGログに毎回の所要時間が出るのみ。Raspberry Pi等でのCPU負荷を実測ベースで把握するための計測用設定であり、通常運用では変更不要 |
 | `KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC` | 300 | **2026-09-09追加**。画像デコード失敗（想定内の一時的事象）のログをこの秒数ごとに件数集約して1回だけWARNINGに出す（詳細は毎回DEBUGに出る） |
-| `KYOSHIN_DETECT_VIBRATION_SOUND` | true | **2026-09-22追加**。強震モニタの画像解析検知の通知時に、EEW発表時の振動モニタ（`vibration_monitor_loop`）と同じ振動レベル音（`lv100`/`lv1000`/`lv2000`）を鳴らすか。判定基準は`core.kyoshin_shared.vibration_tier`で共通化している。既に音声再生待ちがある間は積み増さない |
+| `KYOSHIN_DETECT_VIBRATION_SOUND` | true | **2026-09-22追加**。強震モニタの揺れ検知の通知時に、EEW発表時の通知と同じ振動レベル音（`lv100`/`lv1000`/`lv2000`）を鳴らすか（EEW発表時の通知では常に鳴らす）。判定基準は`core.kyoshin_shared.vibration_tier`で共通化している。既に音声再生待ちがある間は積み増さない |
 
 **【2026-08-27】誤検知対策アルゴリズム調整値は `.env.kyoshin` に分離**
 以下は、実機ログを見ながらチューニングする上級者向けパラメータのため、`.env.example`（本体）ではなく `.env.kyoshin.example` に分離されている（`.env整理案③・⑩`）。何も設定しなくても以下と同じデフォルト値で動作するため、通常運用では `.env.kyoshin` を作る必要はない。詳細チューニングをしたい場合のみ `cp .env.kyoshin.example .env.kyoshin` して編集する（`python3 bot.py --starter` の詳細設定メニューからも作成できる）。
@@ -764,7 +799,8 @@ curl http://localhost:8080/status | jq
     "warning_poller": "running",
     "fetch_long_period": "running",
     "kyoshin_monitor": "running",
-    "vibration_monitor_loop": "stopped"
+    "kyoshin_vibration": "running",
+    "kyoshin_notify": "running"
   }
 }
 ```
@@ -775,9 +811,12 @@ curl http://localhost:8080/status | jq
 > `tasks.p2p_ws_hub_recv_count` の各種別ごとの受信件数を参照）。
 >
 > `kyoshin`（強震モニタ画像解析検知。KyoshinMonitorCogによる常時検知）と
-> `long_period_monitor`（長周期地震動モニタ。EewCogのvibration_monitor_loopによる
-> EEW発表時のみの一時的な検知）は名前が似ているが別機能。前者は`ENABLE_KYOSHIN`が
-> 有効な限り常時稼働し、後者はEEWが発表されている間だけ`active: true`になる。
+> `long_period_monitor`（長周期地震動モニタ。2026-10-05以降は`KyoshinMonitorCog`が
+> EEW発表時に送る通知。`kyoshin`は揺れ検知時の通知）は、受信回数・最終受信時刻を
+> それぞれ別に集計する。`kyoshin`は`ENABLE_KYOSHIN`が有効な限り常時検知し、
+> `long_period_monitor`の`active`はEEWが発表されている間だけ`true`になる。
+> タスクは`kyoshin_monitor`（`jma_s`受信・画像解析）・`kyoshin_vibration`（振動レベル受信）・
+> `kyoshin_notify`（通知）。
 
 ### GET /health/full（API 疎通確認）
 
@@ -1079,6 +1118,8 @@ python3 -m pytest tests/ -q
 
 ※ `*.json` は `.gitignore` の対象のため、テストデータはJSONファイルではなくテストコード内の辞書として持っている。
 
+2026-10-05追加のテスト: `tests/test_eew_forecast_label.py`（EEW予想震度の見出し）、`tests/test_kyoshin_notify.py`（強震モニタの受信・通知の集約）、`tests/test_gis_theme_icon.py`（地図の配色テーマ・震度アイコン）、`tests/test_env_merge.py`（`--merge_env`）、`tests/test_quake_failover.py`（Quake.Oneの取得間隔を追記）。
+
 ### テストであることの明記
 
 `notify_eew` / `notify_quake` / `notify_tsunami` 等、`is_test` 引数に対応している関数は、
@@ -1242,7 +1283,8 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
    # 特定の観測点の警告ログが繰り返し出る場合は、その観測点が機器異常として
    # ブラックリスト化されている可能性がある（"ブラックリスト化しました" で検索）
    ```
-4. `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` に保存された画像で誤検知・未検知の状況を事後確認
+4. 通知の設定を確認: `KYOSHIN_NOTIFY_ENABLE`・`KYOSHIN_NOTIFY_ON_DETECT`（検知時）・`KYOSHIN_NOTIFY_ON_EEW`（EEW時）が有効か、`KYOSHIN_RECV_*` の受信が1つ以上有効か。EEW通知中は検知通知が中断される（EEW最終報・キャンセル報の後に再開）。振動レベルによる検知は `KYOSHIN_VIBRATION_DETECT_LEVEL` 以上のとき
+5. `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` に保存された画像で誤検知・未検知の状況を事後確認
 4. 揺れが収まった後も通知が続く時間が長い／短いと感じる場合は `KYOSHIN_EVENT_TIMEOUT_SEC`（デフォルト45秒）を調整
 
 ---
@@ -1276,6 +1318,8 @@ QTL_Bot/
     │                                 読み込み一元管理（2026-08-27〜、.env整理案⑩）
     ├── env_starter.py             - `python3 bot.py --starter` 対話式セットアップウィザード
     │                                 （2026-08-27〜）
+    ├── env_merge.py               - `python3 bot.py --merge_env` .envへの不足項目の対話式追加
+    │                                 （2026-10-05〜）
     ├── env_audit.py               - `python3 bot.py --check_env` .env整合性チェック
     │                                 （2026-08-27〜、.env整理案⑦）
     ├── test_runner.py             - `python3 bot.py --test_<対象>` CLIテスト実行機能
@@ -1330,7 +1374,7 @@ QTL_Bot/
 |:---|:---|:---|
 | `ApmCog` | `cogs/apm.py` | OpenTelemetry 計装・Mackerel OTLP 送信（デフォルト無効） |
 | `AudioCog` | `cogs/audio_shared.py` | 音声読み上げ・MP3再生の実体（EewCog・QuakeInfoCogが共有） |
-| `EewCog` | `cogs/eew.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・EEW発表時の強震モニタ通知 |
+| `EewCog` | `cogs/eew.py` | Wolfx WebSocket（EEW）・P2P WebSocket（EEW 警報）・EEW発表中の状態管理（`monitored_event_id`。強震モニタ通知自体は`KyoshinMonitorCog`） |
 | `QuakeInfoCog` | `cogs/quake.py` | P2P API（地震速報・各地の震度等）ポーリング・通知 |
 | `JishinKanchiCog` | `cogs/jishin_kanchi.py` | P2P API（地震感知情報、code=9611）ポーリング・通知（デフォルト無効、`JISHIN_KANCHI_ENABLE=true`で有効化） |
 | `TsunamiCog` | `cogs/tsunami.py` | JMA 津波 API ポーリング・観測情報・予報 / 警報通知、EWS信号音（津波） |
@@ -1338,7 +1382,7 @@ QTL_Bot/
 | `UsgsCog` | `cogs/usgs.py` | USGS API ポーリング・海外地震フィルタリング・通知 |
 | `OtherInfoCog` | `cogs/other.py` | 長周期地震動・気象庁その他情報（後発地震注意情報・南海トラフ・震源要素更新のお知らせ） |
 | `SystemCog` | `cogs/system.py` | Web Dashboard・`!status`・エラー自動通知・リソース監視 |
-| `KyoshinMonitorCog` | `cogs/kyoshin_monitor.py` | 強震モニタ画像の解析による揺れ検知・通知（Pillow が必要） |
+| `KyoshinMonitorCog` | `cogs/kyoshin_monitor.py` | 強震モニタ(`jma_s`)・長周期地震動モニタ(LMoni)・振動レベルの受信と、EEW時・検知時の通知（画像解析検知にはPillowが必要） |
 
 ### 主要関数
 | 関数 | 説明 |
@@ -1354,7 +1398,7 @@ QTL_Bot/
 | `fetch_volcano_info()` | 火山情報ポーリング |
 | `fetch_eruption_info()` | 噴火速報ポーリング（VFVO50） |
 | `fetch_warning_info()` | 噴火警報ポーリング（VFVO53） |
-| `vibration_monitor_loop()` | EEW 発生時の強震モニタ監視（`jma_s`・`abrspmx_s` 両画像＋振動レベル、2秒間隔） |
+| `_eew_monitor_timeout()` | EEW第一報から最長300秒で `monitored_event_id` を解除（強震モニタ通知は `KyoshinMonitorCog._notify_loop`） |
 | `speech_worker()` | AquesTalkPi 音声再生ワーカー |
 | `mp3_worker()` | MP3 再生ワーカー |
 | `start_web_dashboard()` | Web Dashboard（aiohttp） |
@@ -1384,5 +1428,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-10-03（**不具合修正**：③EEWの未知の地域名（「秋田県南部」等）が「その他」と読み上げ・表示され地図でも塗られない不具合を修正（`resolve_chiiki`）。GeoJSONの区域名「奄美(群島)」「釧路地方中南」を電文・`region_map.json`の名称へ読み替え。④Mackerelに課題化されていた想定内の`TimeoutError`/`CancelledError`をエラー扱いにしない（`core/apm.py`の`response_hook`、「APM (Mackerel 連携)」の項）。環境変数の追加・変更はなし。さらに、①台湾付近の地震のEEWで海だけの地図画像が添付された不具合を修正。震源が表示範囲の外、または表示範囲に陸地が無い場合（台湾付近・オホーツク海・日本海中部・小笠原諸島西方沖・硫黄島近海等）は、`render_eew_warn_map`/`render_shindo_map`が自動で海外向け地図（日本全体＋震源、警報地域・震度の塗りつぶしつき）に切り替える（詳細は「遠地地震（震源が日本国外）向けの地図」の項）。起動時に国境データも事前読み込みする。②強震モニタ由来の実測震度（「実震度=…」）をログに出力しないよう変更（防災科研の利用規約への配慮）。環境変数の追加・変更はなし）。以前の更新履歴：2026-10-01（**不具合修正・機能追加**：⑤P2P地震情報 WebSocket の障害時に、気象庁HPのJSON・気象庁XMLから地震情報を代替取得するフォールバックを追加（連続5回接続失敗で切り替え、震源要素・震度分布の内容照合で重複通知を防止。詳細は「P2P地震情報の障害時フォールバック」）。2026-10-02: 再接続の待ち時間中もフォールバックするよう変更（接続できていない状態が `P2P_FAILOVER_DISCONNECT_SECONDS`＝既定10秒続いたら、失敗回数を待たず開始）。フォールバックの初回取得時に過去の地震が再通知されうる不具合を修正（`P2P_FAILOVER_CATCHUP_MINUTES` を追加）。取得元に Quake.One を追加（`QUAKE_FAILOVER_SOURCES` の既定を `jma_json,jma_xml,quake_one` に変更）。区域単位（`isArea`）の points を持つ地震情報は、震度速報以外でも区域の塗りつぶし地図で描画するよう `cogs/quake.py` を修正。新規環境変数: `P2P_FAILOVER_ENABLE` / `P2P_FAILOVER_THRESHOLD` / `P2P_FAILOVER_RECOVERY_SECONDS` / `QUAKE_FAILOVER_POLL_SECONDS` / `QUAKE_FAILOVER_SOURCES`。⓪津波予報・注意報・警報（JMA `tsunami/data/list.json` 由来、VTSE41等）が通知されないことがあった不具合を修正（`cogs/tsunami.py`の`fetch_tsunami_observation`）。津波情報が1件も発表されていない平常時、JMAの`list.json`は空リスト`[]`を返すが、従来は空のときに初期化済みフラグを立てずに処理を終えていたため、平常時にBotを起動すると「初回ポーリング＝起動前から存在した情報として記録のみ・通知しない」の扱いが最初の本物の新規発表まで持ち越され、2026-09-30 14:08発表の津波予報（与那国島近海M6.0、宮古島・八重山地方）が既出情報として記録されるだけで通知されなかった。空リストの場合も初期化済みとして扱うよう修正（再現テストで、起動時リストが空・発表後に1件追加のケースで修正前は通知0件、修正後は通知されることを確認）。さらに、①`on_ready`再発火（Discordゲートウェイ再接続時）への対策。`EewCog`のWolfx WebSocket接続ループ（`connect_eew_ws`）はガード無しで毎回新たに起動されていたため、再接続のたびにWolfxへの接続が増殖してEEWが多重処理される恐れがあった。タスクを保持して二重起動を防ぎ、`cog_unload`でキャンセルするよう修正（他Cogは従来から同方式）。`SystemCog`のWeb Dashboard起動・スラッシュコマンド同期・起動通知も初回の`on_ready`のみ実行するよう修正（再発火時のポート衝突エラー・コマンド同期の重複・起動通知の重複を防止）。②満潮時刻・津波到達予想時刻情報の読み上げ重複防止（`EventGate`）のキーを固定文字列から`EventID`に変更（別の津波イベントが直前のクールダウンの影響を受けないように）。③津波予報（VTSE41）の警報コメントが`Body.Tsunami.Comment`（存在しないキー）を参照していたため表示されなかった不具合を`Body.Comments.WarningComment`参照に修正。④沖合の津波観測に関する情報（VTSE52）の読み上げを追加（詳細は上記`notify_tsunami_observation_offshore`の項）。環境変数の追加・変更はなし）。以前の更新履歴：2026-09-26（**機能改善・地理院タイル廃止**：①Webダッシュボードの地震情報履歴地図（`/quake_map`）で、円マーカーの半径をマグニチュードに応じて可変にし（M3.0〜M8.0を半径5px〜22pxへ線形マッピング）、最大震度が大きい地震ほど後から描画することで地図上での重なり順を「震度が大きいものほど前面」に変更した（震度が同じ場合はマグニチュードが大きい方を優先）。②地理院地図のサーバー側の負荷・大規模地震時のアクセス集中への配慮から、遠地地震（震源が日本国外）向けの地図・Webダッシュボードの背景地図の両方で国土地理院タイルの使用を廃止した。前者は`core/gis_tile_render.py`（削除済み）が担っていたWeb Mercatorタイル重ね合わせを、日本国内向けの地図と同じ独自ベクター地図（`core/gis_render.py`の`render_overseas_map`に統合）に置き換え、同期関数化（HTTP不要になったため）。世界の国境データ（`countries.geojson`、約14MB・頂点数約55万）はそのまま使うと重すぎるため、追加の依存ライブラリなしでRamer-Douglas-Peuckerアルゴリズム（折れ線の間引き）を自前実装し、約0.6〜0.7MB・頂点数約4万まで軽量化した派生キャッシュ（`countries_simplified.geojson`、`core/gis_data.py`）を生成して使い回す設計にした（生成はCPUバウンドなためCog起動時にワーカースレッドへオフロードして事前生成し、実際の海外地震通知時にイベントループが止まらないようにしている）。後者（Webダッシュボード）は、この簡略化国境データ・既存の日本の細分区域データを陸地色で塗りつぶす新エンドポイント（`GET /status/gis_countries`）を追加し、Leafletのタイルレイヤーを廃止して専用ペイン（`landFillPane`）上のGeoJSON塗りつぶしに置き換えた。**実装過程で新たに発見・修正した不具合**：ベクター地図化の実機投入前のシミュレーション検証で、太平洋を挟む日付変更線をまたぐ震源（例：サンフランシスコ等）向けの表示範囲では、震源のバツ印だけでなく国境データ側の各国ポリゴンの経度も表示範囲の座標系に合わせて±360シフトしないと、対象国の陸地が描画されない（震源マークだけが海上に浮いて見える）ことが判明したため、国ごとに最適なシフト量を選ぶ処理（`_pick_lon_shift`）を追加して対応した。環境変数の追加・変更はなし）。以前の更新履歴：2026-09-26（**不具合修正**：海外地震情報（国土地理院タイル使用）の地図で、震源が北米・南米等の西経の場合に震源のバツ印が小さすぎる・表示されない不具合を修正（`core/gis_tile_render.py`。同モジュールは上記の通り、この後の変更で削除済み）。表示範囲（bbox）の算出では、太平洋を挟んだ近い側を選ぶために震源の経度を+360／-360シフトすることがあるが、震源のバツ印・出典表示の位置を求める座標変換には、このシフトを反映していない元の経度をそのまま渡していたため、算出されるピクセル座標がキャンバス範囲外（西へ丸々1周分ずれた位置）になっていた。バツ印・出典表示にも、bbox算出時と同じ経度シフトを適用するよう修正した)。以前の更新履歴：2026-09-25（**監査**：実際のコードとREADME・`.env.example`間の矛盾を精査（コード優先で修正）。**実際のバグとして見つかったもの**: `cogs/system.py`の`on_ready()`内に、`WEB_DASHBOARD_ENABLED`を`os.getenv("WEB_DASHBOARD_ENABLED", "true")`として直接・重複して読み込む古いコードが残っており、モジュールレベルで既に修正済みだったはずの既定値（2026-08-27修正でfalseに統一）を上書きしてしまい、`.env`未設定時にドキュメント上は無効なはずのWeb Dashboardが実際には起動していた。モジュールレベル定数を参照するよう修正。**`.env.example`の記載が古かったもの**: `KYOSHIN_POLL_INTERVAL_SEC`・`KYOSHIN_NOTIFY_INTERVAL_SEC`（旧2.0→現在のコードの既定値1.0。`cogs/quake.py`時代の古いコメントも`cogs/eew.py`に修正）・`KYOSHIN_EVENT_TIMEOUT_SEC`（旧60.0→現在のコードの既定値45.0）。**READMEの記載が古かったもの**: `APM_OTLP_ENDPOINT`のデフォルト値表記（誤ったサブドメイン・`/v1/traces`抜けを修正）、`SCRATCHTTS_URL`を説明文から実際のURLに変更、Cogアーキテクチャ表に`JishinKanchiCog`（`cogs/jishin_kanchi.py`）の記載漏れを追加。その他、震度色・津波色の16進カラー設定、Web Dashboardの全エンドポイント、`!status`/`/qtl_status`コマンド、`CHANNEL_ID`系の空値フォールバック設計等は確認の結果、記載と実装が一致していた)。以前の更新履歴：2026-09-24（**不具合修正**：P2P地震情報EEWのPLUM法（`isAssumption`）発表で、予想震度（全体の`MaxIntensity`・地域ごとの内訳とも）に「以上」が付いてしまう不具合を修正（`core/eew_convert.py`）。2026-09-22の修正で`scaleTo=99`を「震度7」ではなく「以上」（上限なし）として扱うようにした際、非PLUM法・PLUM法の別なく一律「以上」を付けるようにしてしまっていたが、Wolfx側はPLUM法の推定震度を「以上」なしの「震度X程度」で表示しており、実機での挙動と食い違っていた。PLUM法のエリアは`scaleTo=99`を無視し、常に`scaleFrom`（PLUM法自体の推定値）を「震度X程度」として表示するよう修正し、Wolfx側の表示と揃えた（非PLUM法の発表では、従来通り`scaleTo=99`のエリアを「以上」と表示する）)。以前の更新履歴：2026-09-23（**改善**：海外地震情報の地図（国土地理院タイル使用）で、出典表示が震源のバツ印と重なって両方とも見えなくなることがあった問題を、重なる場合のみ出典帯を別の角へ自動でずらすよう修正（USGS発表分で特に発生しやすかった）／震度速報時・緊急地震速報の地図の震度配色が薄く感じるとの指摘を受け、地図描画時のみ明度を90%に落として塗るよう変更（Discord Embedの色自体は変更なし）／陸地・海・区域境界線が縮小表示（Discordのサムネイル等）で判別しづらいとの指摘を受け、海の色の彩度・陸地との明度差を拡大し、区域境界線をさらに濃くした／初めてDiscordのBot作成・サーバー権限設定を行う方向けに、アプリケーション作成〜トークン取得〜Intent有効化〜サーバーへの招待〜チャンネルID確認までの手順をREADMEに追記)。以前の更新履歴：2026-09-22（**不具合修正**：P2P地震情報EEWの`scaleTo=99`（「震度7」ではなく「以上」＝上限なしの意味）の誤解釈により、PLUM法等で予想最大震度が実態と無関係に「7以上」と表示されていたバグを修正（`core/eew_convert.py`。地域ごとの予想震度・地図の塗り色も下限値ベースで一貫させ、Wolfx形式の同種の表記にも対応）／長周期地震動に関する観測情報の観測点マップが、地域名をstations.jsonへ誤って名前引きしていたため1件も描画されず震源のみの1枚目と重複していたバグを修正（観測情報JSON自体の観測点座標を直接使用するよう変更）／強震モニタ画像解析検知の通知経路の遅延（画像URLの再探索・直列取得）を解消（検知に使ったフレームの再利用・並列取得）、検知イベントごとの遅延計測ログを追加、通知時にEEWの振動モニタと同じ振動レベル音を鳴らす機能を追加（`KYOSHIN_DETECT_VIBRATION_SOUND`）／国土地理院タイルの出典表示に「加工して作成」の旨を追記／EEW警報時に地域ごとの予想震度の地図も2枚目として添付するよう変更／EEW地図の震源バツ印を表示範囲に応じて1.5〜2.0倍に拡大)。以前の更新履歴：2026-09-18（**不具合修正**：CLIテストの自動判定（`--test_auto`／`sniff_test_target`）が、長周期地震動に関する観測情報のJSON（`Body.Earthquake`を持つ）を「顕著な地震の震源要素更新のお知らせ」と誤判定するバグを修正（`Body.Intensity`の有無・タイトル文字列で判別。`notify_long_period`に`detail_data`引数を追加し、詳細JSONを直接テストできる`other_long_period_detail`ターゲットを新設）／USGS地震情報にGIS地図描画を追加（`UsgsCog`。座標はUSGSのGeoJSON標準形式をそのまま使用、国内外判定で自動切替）／長周期地震動に関する観測情報に、地震情報向けの観測点座標データ（stations.json）を使った観測点マップ（`render_long_period_map`、`LG_COLORS`使用）を追加（震源マップと合わせて2枚添付）／「各地の震度に関する情報」で震度3以上により拡大表示になった場合、全観測点を見渡せる通常表示の画像も2枚目として併せて添付するよう変更（`render_shindo_map`に`station_zoom_priority`引数を追加）／複数のGIS地図画像をDiscordの複数Embedとして送信する共通処理`core/gis_discord.py`を新設／Webダッシュボードの地震情報履歴地図（`/quake_map`）に、キャッシュ済みの細分区域GeoJSON（`GET /status/gis_local_areas`）があれば区域境界線を重ね描きするよう対応（無ければ従来通りマーカーのみの地図のまま動作）)
+**最終更新**: 2026-10-05（**機能追加・変更**：①Quake.One の `list.json` 取得間隔を `QUAKE_ONE_POLL_SECONDS`（既定6秒＝10回/分、6秒未満は不可）で制御。②強震モニタ・長周期地震動モニタ・振動レベルの受信と通知を `cogs/kyoshin_monitor.py` に集約（受信間隔はモニタ系1秒以上・振動レベル2秒以上、通知間隔＝最短の受信間隔、EEW通知中は検知通知を中断、振動レベル100以上も検知と判定、`EewCog.vibration_monitor_loop` は廃止。旧 `KYOSHIN_POLL_INTERVAL_SEC`・`KYOSHIN_NOTIFY_INTERVAL_SEC` は廃止し `KYOSHIN_RECV_*`・`KYOSHIN_NOTIFY_*` に置き換え）。③地図の配色テーマ（`GIS_MAP_THEME`）と震度アイコンの角丸・外側の縁・文字色を追加（`GIS_ICON_*`）。④`python3 bot.py --merge_env` で `.env` へ不足項目を対話式に追加。⑤EEW「地域ごとの予想震度」の見出しをWolfx仕様（`Shindo1`＝最大、`Shindo2`＝最小）に統一（P2P変換も同じ形式）。新規・変更・廃止の環境変数は `.env.example.txt` 参照）。以前の更新履歴：2026-10-03（**不具合修正**：③EEWの未知の地域名（「秋田県南部」等）が「その他」と読み上げ・表示され地図でも塗られない不具合を修正（`resolve_chiiki`）。GeoJSONの区域名「奄美(群島)」「釧路地方中南」を電文・`region_map.json`の名称へ読み替え。④Mackerelに課題化されていた想定内の`TimeoutError`/`CancelledError`をエラー扱いにしない（`core/apm.py`の`response_hook`、「APM (Mackerel 連携)」の項）。環境変数の追加・変更はなし。さらに、①台湾付近の地震のEEWで海だけの地図画像が添付された不具合を修正。震源が表示範囲の外、または表示範囲に陸地が無い場合（台湾付近・オホーツク海・日本海中部・小笠原諸島西方沖・硫黄島近海等）は、`render_eew_warn_map`/`render_shindo_map`が自動で海外向け地図（日本全体＋震源、警報地域・震度の塗りつぶしつき）に切り替える（詳細は「遠地地震（震源が日本国外）向けの地図」の項）。起動時に国境データも事前読み込みする。②強震モニタ由来の実測震度（「実震度=…」）をログに出力しないよう変更（防災科研の利用規約への配慮）。環境変数の追加・変更はなし）。以前の更新履歴：2026-10-01（**不具合修正・機能追加**：⑤P2P地震情報 WebSocket の障害時に、気象庁HPのJSON・気象庁XMLから地震情報を代替取得するフォールバックを追加（連続5回接続失敗で切り替え、震源要素・震度分布の内容照合で重複通知を防止。詳細は「P2P地震情報の障害時フォールバック」）。2026-10-02: 再接続の待ち時間中もフォールバックするよう変更（接続できていない状態が `P2P_FAILOVER_DISCONNECT_SECONDS`＝既定10秒続いたら、失敗回数を待たず開始）。フォールバックの初回取得時に過去の地震が再通知されうる不具合を修正（`P2P_FAILOVER_CATCHUP_MINUTES` を追加）。取得元に Quake.One を追加（`QUAKE_FAILOVER_SOURCES` の既定を `jma_json,jma_xml,quake_one` に変更）。区域単位（`isArea`）の points を持つ地震情報は、震度速報以外でも区域の塗りつぶし地図で描画するよう `cogs/quake.py` を修正。新規環境変数: `P2P_FAILOVER_ENABLE` / `P2P_FAILOVER_THRESHOLD` / `P2P_FAILOVER_RECOVERY_SECONDS` / `QUAKE_FAILOVER_POLL_SECONDS` / `QUAKE_FAILOVER_SOURCES`。⓪津波予報・注意報・警報（JMA `tsunami/data/list.json` 由来、VTSE41等）が通知されないことがあった不具合を修正（`cogs/tsunami.py`の`fetch_tsunami_observation`）。津波情報が1件も発表されていない平常時、JMAの`list.json`は空リスト`[]`を返すが、従来は空のときに初期化済みフラグを立てずに処理を終えていたため、平常時にBotを起動すると「初回ポーリング＝起動前から存在した情報として記録のみ・通知しない」の扱いが最初の本物の新規発表まで持ち越され、2026-09-30 14:08発表の津波予報（与那国島近海M6.0、宮古島・八重山地方）が既出情報として記録されるだけで通知されなかった。空リストの場合も初期化済みとして扱うよう修正（再現テストで、起動時リストが空・発表後に1件追加のケースで修正前は通知0件、修正後は通知されることを確認）。さらに、①`on_ready`再発火（Discordゲートウェイ再接続時）への対策。`EewCog`のWolfx WebSocket接続ループ（`connect_eew_ws`）はガード無しで毎回新たに起動されていたため、再接続のたびにWolfxへの接続が増殖してEEWが多重処理される恐れがあった。タスクを保持して二重起動を防ぎ、`cog_unload`でキャンセルするよう修正（他Cogは従来から同方式）。`SystemCog`のWeb Dashboard起動・スラッシュコマンド同期・起動通知も初回の`on_ready`のみ実行するよう修正（再発火時のポート衝突エラー・コマンド同期の重複・起動通知の重複を防止）。②満潮時刻・津波到達予想時刻情報の読み上げ重複防止（`EventGate`）のキーを固定文字列から`EventID`に変更（別の津波イベントが直前のクールダウンの影響を受けないように）。③津波予報（VTSE41）の警報コメントが`Body.Tsunami.Comment`（存在しないキー）を参照していたため表示されなかった不具合を`Body.Comments.WarningComment`参照に修正。④沖合の津波観測に関する情報（VTSE52）の読み上げを追加（詳細は上記`notify_tsunami_observation_offshore`の項）。環境変数の追加・変更はなし）。以前の更新履歴：2026-09-26（**機能改善・地理院タイル廃止**：①Webダッシュボードの地震情報履歴地図（`/quake_map`）で、円マーカーの半径をマグニチュードに応じて可変にし（M3.0〜M8.0を半径5px〜22pxへ線形マッピング）、最大震度が大きい地震ほど後から描画することで地図上での重なり順を「震度が大きいものほど前面」に変更した（震度が同じ場合はマグニチュードが大きい方を優先）。②地理院地図のサーバー側の負荷・大規模地震時のアクセス集中への配慮から、遠地地震（震源が日本国外）向けの地図・Webダッシュボードの背景地図の両方で国土地理院タイルの使用を廃止した。前者は`core/gis_tile_render.py`（削除済み）が担っていたWeb Mercatorタイル重ね合わせを、日本国内向けの地図と同じ独自ベクター地図（`core/gis_render.py`の`render_overseas_map`に統合）に置き換え、同期関数化（HTTP不要になったため）。世界の国境データ（`countries.geojson`、約14MB・頂点数約55万）はそのまま使うと重すぎるため、追加の依存ライブラリなしでRamer-Douglas-Peuckerアルゴリズム（折れ線の間引き）を自前実装し、約0.6〜0.7MB・頂点数約4万まで軽量化した派生キャッシュ（`countries_simplified.geojson`、`core/gis_data.py`）を生成して使い回す設計にした（生成はCPUバウンドなためCog起動時にワーカースレッドへオフロードして事前生成し、実際の海外地震通知時にイベントループが止まらないようにしている）。後者（Webダッシュボード）は、この簡略化国境データ・既存の日本の細分区域データを陸地色で塗りつぶす新エンドポイント（`GET /status/gis_countries`）を追加し、Leafletのタイルレイヤーを廃止して専用ペイン（`landFillPane`）上のGeoJSON塗りつぶしに置き換えた。**実装過程で新たに発見・修正した不具合**：ベクター地図化の実機投入前のシミュレーション検証で、太平洋を挟む日付変更線をまたぐ震源（例：サンフランシスコ等）向けの表示範囲では、震源のバツ印だけでなく国境データ側の各国ポリゴンの経度も表示範囲の座標系に合わせて±360シフトしないと、対象国の陸地が描画されない（震源マークだけが海上に浮いて見える）ことが判明したため、国ごとに最適なシフト量を選ぶ処理（`_pick_lon_shift`）を追加して対応した。環境変数の追加・変更はなし）。以前の更新履歴：2026-09-26（**不具合修正**：海外地震情報（国土地理院タイル使用）の地図で、震源が北米・南米等の西経の場合に震源のバツ印が小さすぎる・表示されない不具合を修正（`core/gis_tile_render.py`。同モジュールは上記の通り、この後の変更で削除済み）。表示範囲（bbox）の算出では、太平洋を挟んだ近い側を選ぶために震源の経度を+360／-360シフトすることがあるが、震源のバツ印・出典表示の位置を求める座標変換には、このシフトを反映していない元の経度をそのまま渡していたため、算出されるピクセル座標がキャンバス範囲外（西へ丸々1周分ずれた位置）になっていた。バツ印・出典表示にも、bbox算出時と同じ経度シフトを適用するよう修正した)。以前の更新履歴：2026-09-25（**監査**：実際のコードとREADME・`.env.example`間の矛盾を精査（コード優先で修正）。**実際のバグとして見つかったもの**: `cogs/system.py`の`on_ready()`内に、`WEB_DASHBOARD_ENABLED`を`os.getenv("WEB_DASHBOARD_ENABLED", "true")`として直接・重複して読み込む古いコードが残っており、モジュールレベルで既に修正済みだったはずの既定値（2026-08-27修正でfalseに統一）を上書きしてしまい、`.env`未設定時にドキュメント上は無効なはずのWeb Dashboardが実際には起動していた。モジュールレベル定数を参照するよう修正。**`.env.example`の記載が古かったもの**: `KYOSHIN_POLL_INTERVAL_SEC`・`KYOSHIN_NOTIFY_INTERVAL_SEC`（旧2.0→現在のコードの既定値1.0。`cogs/quake.py`時代の古いコメントも`cogs/eew.py`に修正）・`KYOSHIN_EVENT_TIMEOUT_SEC`（旧60.0→現在のコードの既定値45.0）。**READMEの記載が古かったもの**: `APM_OTLP_ENDPOINT`のデフォルト値表記（誤ったサブドメイン・`/v1/traces`抜けを修正）、`SCRATCHTTS_URL`を説明文から実際のURLに変更、Cogアーキテクチャ表に`JishinKanchiCog`（`cogs/jishin_kanchi.py`）の記載漏れを追加。その他、震度色・津波色の16進カラー設定、Web Dashboardの全エンドポイント、`!status`/`/qtl_status`コマンド、`CHANNEL_ID`系の空値フォールバック設計等は確認の結果、記載と実装が一致していた)。以前の更新履歴：2026-09-24（**不具合修正**：P2P地震情報EEWのPLUM法（`isAssumption`）発表で、予想震度（全体の`MaxIntensity`・地域ごとの内訳とも）に「以上」が付いてしまう不具合を修正（`core/eew_convert.py`）。2026-09-22の修正で`scaleTo=99`を「震度7」ではなく「以上」（上限なし）として扱うようにした際、非PLUM法・PLUM法の別なく一律「以上」を付けるようにしてしまっていたが、Wolfx側はPLUM法の推定震度を「以上」なしの「震度X程度」で表示しており、実機での挙動と食い違っていた。PLUM法のエリアは`scaleTo=99`を無視し、常に`scaleFrom`（PLUM法自体の推定値）を「震度X程度」として表示するよう修正し、Wolfx側の表示と揃えた（非PLUM法の発表では、従来通り`scaleTo=99`のエリアを「以上」と表示する）)。以前の更新履歴：2026-09-23（**改善**：海外地震情報の地図（国土地理院タイル使用）で、出典表示が震源のバツ印と重なって両方とも見えなくなることがあった問題を、重なる場合のみ出典帯を別の角へ自動でずらすよう修正（USGS発表分で特に発生しやすかった）／震度速報時・緊急地震速報の地図の震度配色が薄く感じるとの指摘を受け、地図描画時のみ明度を90%に落として塗るよう変更（Discord Embedの色自体は変更なし）／陸地・海・区域境界線が縮小表示（Discordのサムネイル等）で判別しづらいとの指摘を受け、海の色の彩度・陸地との明度差を拡大し、区域境界線をさらに濃くした／初めてDiscordのBot作成・サーバー権限設定を行う方向けに、アプリケーション作成〜トークン取得〜Intent有効化〜サーバーへの招待〜チャンネルID確認までの手順をREADMEに追記)。以前の更新履歴：2026-09-22（**不具合修正**：P2P地震情報EEWの`scaleTo=99`（「震度7」ではなく「以上」＝上限なしの意味）の誤解釈により、PLUM法等で予想最大震度が実態と無関係に「7以上」と表示されていたバグを修正（`core/eew_convert.py`。地域ごとの予想震度・地図の塗り色も下限値ベースで一貫させ、Wolfx形式の同種の表記にも対応）／長周期地震動に関する観測情報の観測点マップが、地域名をstations.jsonへ誤って名前引きしていたため1件も描画されず震源のみの1枚目と重複していたバグを修正（観測情報JSON自体の観測点座標を直接使用するよう変更）／強震モニタ画像解析検知の通知経路の遅延（画像URLの再探索・直列取得）を解消（検知に使ったフレームの再利用・並列取得）、検知イベントごとの遅延計測ログを追加、通知時にEEWの振動モニタと同じ振動レベル音を鳴らす機能を追加（`KYOSHIN_DETECT_VIBRATION_SOUND`）／国土地理院タイルの出典表示に「加工して作成」の旨を追記／EEW警報時に地域ごとの予想震度の地図も2枚目として添付するよう変更／EEW地図の震源バツ印を表示範囲に応じて1.5〜2.0倍に拡大)。以前の更新履歴：2026-09-18（**不具合修正**：CLIテストの自動判定（`--test_auto`／`sniff_test_target`）が、長周期地震動に関する観測情報のJSON（`Body.Earthquake`を持つ）を「顕著な地震の震源要素更新のお知らせ」と誤判定するバグを修正（`Body.Intensity`の有無・タイトル文字列で判別。`notify_long_period`に`detail_data`引数を追加し、詳細JSONを直接テストできる`other_long_period_detail`ターゲットを新設）／USGS地震情報にGIS地図描画を追加（`UsgsCog`。座標はUSGSのGeoJSON標準形式をそのまま使用、国内外判定で自動切替）／長周期地震動に関する観測情報に、地震情報向けの観測点座標データ（stations.json）を使った観測点マップ（`render_long_period_map`、`LG_COLORS`使用）を追加（震源マップと合わせて2枚添付）／「各地の震度に関する情報」で震度3以上により拡大表示になった場合、全観測点を見渡せる通常表示の画像も2枚目として併せて添付するよう変更（`render_shindo_map`に`station_zoom_priority`引数を追加）／複数のGIS地図画像をDiscordの複数Embedとして送信する共通処理`core/gis_discord.py`を新設／Webダッシュボードの地震情報履歴地図（`/quake_map`）に、キャッシュ済みの細分区域GeoJSON（`GET /status/gis_local_areas`）があれば区域境界線を重ね描きするよう対応（無ければ従来通りマーカーのみの地図のまま動作）)
 **対応 Python**: 3.11+

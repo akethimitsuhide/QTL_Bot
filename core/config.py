@@ -54,6 +54,13 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+
 def _getenv_nonempty(key: str, default: str) -> str:
     """
     os.getenv() の空文字フォールバック問題を回避するヘルパー。
@@ -347,16 +354,31 @@ KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
 
-# 【2026-08-19 1.0に短縮】観測値取り込み〜tick()のポーリング間隔／
-# イベント継続中の画像通知の再送間隔。より短い間隔で検知・通知できる
-# ようにする一方、防災科研サーバーへのリクエスト頻度が単純に倍増する
-# ため、KyoshinMonitorCog側でEEW発表中（EewCog.monitored_event_idが
-# 設定されている間）はこのポーリング・画像通知を一時的に中断し、
-# EewCog.vibration_monitor_loopに画像取得を一本化する連携を追加した
-# （cogs/kyoshin_monitor.py の _is_eew_active 参照）。EEW最終報が
-# 出た時点で通常のポーリングを自動的に再開する。
-KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "1.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
-KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "1.0")) # 秒。イベント継続中の画像通知の再送間隔
+# 【2026-10-05 再設計】強震モニタ・長周期地震動モニタ・振動レベルの受信と通知を
+# cogs/kyoshin_monitor.py に集約した（以前は EewCog.vibration_monitor_loop が
+# EEW発表時の通知を、KyoshinMonitorCog が画像解析検知時の通知をそれぞれ別経路で
+# 取得・送信していた）。旧 KYOSHIN_POLL_INTERVAL_SEC / KYOSHIN_NOTIFY_INTERVAL_SEC は
+# 廃止し、次の設定に置き換えた。
+#
+# 受信（有効/無効と間隔）
+#   モニタ系（強震モニタ jma_s / 長周期地震動モニタ LMoni abrspmx_s）は1秒以上、
+#   振動レベル（kwatch-24h.net）は2秒以上の間隔を空けて受信する。下限未満の値は
+#   下限に切り上げる。jma_s は画像解析による揺れ検知にも使う。
+#   振動レベルが KYOSHIN_VIBRATION_DETECT_LEVEL 以上のときも「揺れを検知」と判定する。
+# 通知
+#   通知間隔は、有効な受信のうち最短の受信間隔（1秒以上）。3つの受信のうち
+#   どれか1つでも有効なら通知機能を使える。EEW発表中は EEW 通知を優先し、
+#   検知による通知は EEW の最終報・キャンセル報（または通知上限時間）まで中断する
+#   （検知自体は続ける）。
+KYOSHIN_RECV_JMA_S_ENABLE         = _env_bool("KYOSHIN_RECV_JMA_S_ENABLE", True)
+KYOSHIN_RECV_LMONI_ENABLE         = _env_bool("KYOSHIN_RECV_LMONI_ENABLE", True)
+KYOSHIN_RECV_VIBRATION_ENABLE     = _env_bool("KYOSHIN_RECV_VIBRATION_ENABLE", True)
+KYOSHIN_RECV_IMAGE_INTERVAL_SEC   = max(1.0, _env_float("KYOSHIN_RECV_IMAGE_INTERVAL_SEC", 1.0))
+KYOSHIN_RECV_VIBRATION_INTERVAL_SEC = max(2.0, _env_float("KYOSHIN_RECV_VIBRATION_INTERVAL_SEC", 2.0))
+KYOSHIN_VIBRATION_DETECT_LEVEL    = max(1, _env_int("KYOSHIN_VIBRATION_DETECT_LEVEL", 100))
+KYOSHIN_NOTIFY_ENABLE             = _env_bool("KYOSHIN_NOTIFY_ENABLE", True)
+KYOSHIN_NOTIFY_ON_EEW             = _env_bool("KYOSHIN_NOTIFY_ON_EEW", True)
+KYOSHIN_NOTIFY_ON_DETECT          = _env_bool("KYOSHIN_NOTIFY_ON_DETECT", True)
 
 # 【2026-09-22 追加】強震モニタの画像解析検知の通知時にも、EEW発表時の
 # 振動モニタ（cogs/eew.py vibration_monitor_loop）と同じ「振動レベル音」
@@ -523,7 +545,7 @@ KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_d
 # 【2026-08-29 追加】強震モニタのポーリング処理（画像ダウンロード・
 # デコード・観測点ピクセルサンプリング）にかかった時間を計測し、
 # この秒数を超えた場合のみ WARNING ログを出す閾値。
-# KYOSHIN_POLL_INTERVAL_SEC（既定1.0秒）ごとに毎回実行される処理
+# KYOSHIN_RECV_IMAGE_INTERVAL_SEC（既定1.0秒）ごとに毎回実行される処理
 # であり、Raspberry Pi等の低スペック環境で処理時間がポーリング間隔に
 # 近づく・超えることがないかを、実測に基づいて把握するために追加した
 # （cogs/kyoshin_monitor.py._fetch_current_shindo_map 参照）。
@@ -569,6 +591,10 @@ P2P_FAILOVER_RECOVERY_SECONDS = max(5, _env_int("P2P_FAILOVER_RECOVERY_SECONDS",
 # 通知されなかった。
 P2P_FAILOVER_DISCONNECT_SECONDS = max(0, _env_int("P2P_FAILOVER_DISCONNECT_SECONDS", 10))
 QUAKE_FAILOVER_POLL_SECONDS   = max(5, _env_int("QUAKE_FAILOVER_POLL_SECONDS", 10))
+# Quake.One の list.json の取得間隔（秒。2026-10-05追加）。既定6秒＝10回/分。
+# これより短い値（10回/分を超える頻度）は指定できず、6秒に切り上げる。
+# 新着の詳細（info.json 等）の取得は数えない。
+QUAKE_ONE_POLL_SECONDS        = max(6.0, _env_float("QUAKE_ONE_POLL_SECONDS", 6.0))
 # フォールバックが通知対象にする情報の新しさ（分）。発表がこれより古い情報は、
 # 障害前に P2P で通知済みとみなして通知しない（初回取得時に過去の地震が
 # まとめて再通知されるのを防ぐ）。障害が長引く場合は増やす（最小1。
@@ -676,6 +702,48 @@ GIS_MAP_DATA_DIR = _getenv_nonempty(
 # デフォルトは赤。ユーザーが.envで変更可能（値の表記は震度色と同じ
 # "0xFF0000" / "#FF0000" / "FF0000" のいずれでもよい）。
 GIS_MAP_WARNING_COLOR = _env_hex_color("GIS_MAP_WARNING_COLOR", 0xFF0000)
+
+# 【2026-10-05追加】地図の配色テーマ（light / dark / highlight）。
+#   light     : 従来の配色（クリーム色の陸・水色の海）
+#   dark      : 暗色の陸・海、明るい境界線
+#   highlight : 陸・海・境界線を淡いグレー系にして、震度・警報の塗り分けを際立たせる
+# 不正な値は light にする。
+GIS_MAP_THEME = (_getenv_nonempty("GIS_MAP_THEME", "light") or "light").strip().lower()
+if GIS_MAP_THEME not in ("light", "dark", "highlight"):
+    GIS_MAP_THEME = "light"
+
+# 【2026-10-05追加】震度アイコン（観測点マーカー・震度速報の区域アイコン）の見た目。
+# 角丸の半径・縁の太さはアイコン一辺に対する比率。縁はアイコンの外側に描く。
+#   GIS_ICON_CORNER_RADIUS_RATIO : 角の丸さ（0=四角、既定0.15、上限0.5=円）
+#   GIS_ICON_BORDER_RATIO        : 縁の太さ（既定0.1=アイコンの1/10、0=縁なし）
+#   GIS_ICON_BORDER_SATURATION   : 縁の色＝アイコン色の彩度に掛ける係数（既定0.6、0〜1。1=同じ彩度）
+#   GIS_ICON_TEXT_COLORS         : 震度ごとの文字色（例 "1:FFFFFF,5-:000000"）。
+#                                  キーは 0,1,2,3,4,5-,5+,6-,6+,7。未指定の震度は従来どおり黒に近い色
+GIS_ICON_CORNER_RADIUS_RATIO = min(0.5, max(0.0, _env_float("GIS_ICON_CORNER_RADIUS_RATIO", 0.15)))
+GIS_ICON_BORDER_RATIO        = min(0.5, max(0.0, _env_float("GIS_ICON_BORDER_RATIO", 0.1)))
+GIS_ICON_BORDER_SATURATION   = min(1.0, max(0.0, _env_float("GIS_ICON_BORDER_SATURATION", 0.6)))
+
+
+def _parse_icon_text_colors(raw: str) -> dict:
+    """"1:FFFFFF,5-:000000" 形式を {"1": 0xFFFFFF, "5-": 0x000000} に変換する（不正な項目は無視）。"""
+    result: dict = {}
+    for item in raw.split(","):
+        if ":" not in item:
+            continue
+        label, _, value = item.partition(":")
+        label = label.strip()
+        value = value.strip().lstrip("#")
+        if value.lower().startswith("0x"):
+            value = value[2:]
+        try:
+            if label and len(value) == 6:
+                result[label] = int(value, 16)
+        except ValueError:
+            continue
+    return result
+
+
+GIS_ICON_TEXT_COLORS = _parse_icon_text_colors(os.getenv("GIS_ICON_TEXT_COLORS", ""))
 
 # ===============================
 # 地震情報 履歴（qtlbot.logベース、地図・表での閲覧機能）
