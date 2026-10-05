@@ -53,7 +53,7 @@ _CODE_GLOB_PATTERNS = ("bot.py", "cogs/*.py", "core/*.py")
 # core/config.py の _require_env）。新しいヘルパー関数を増やしたら
 # ここにも追記すること。
 _GETENV_FUNC_NAMES = (
-    "_env_int", "_env_bool", "_getenv_nonempty", "_require_env",
+    "_env_int", "_env_float", "_env_bool", "_getenv_nonempty", "_require_env",
     "_env_hex_color", "getenv",
 )
 

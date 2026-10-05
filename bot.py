@@ -120,6 +120,10 @@ core/test_runner.py の run_all_cli_tests を参照）。
 こちらも .env が存在しない状態で実行できる必要があるため、--starter と
 同様に core.config を import する前に判定する。
 
+【.env への不足項目の対話式追加（2026-10-05 追加, core/env_merge.py）】
+    python3 bot.py --merge_env          # .env.example にあって .env に無い項目を1つずつ確認して追加
+    python3 bot.py --merge_env --yes    # 確認せず、すべて既定値で追加
+
 【地震情報履歴の一括バックフィル（2026-09-06 追加, core/quake_history_backfill.py）】
 core/quake_history_log.py による構造化ログ（QUAKE_RECORD_V1）を追加する
 前に発生した地震について、P2P地震情報 API から可能な範囲で遡って取得し、
@@ -160,6 +164,14 @@ if "--starter" in sys.argv[1:]:
 if "--check_env" in sys.argv[1:]:
     from core.env_audit import run_env_check
     run_env_check()
+    sys.exit(0)
+
+# ── --merge_env（2026-10-05 追加, core/env_merge.py）
+# .env.example にあって .env に無い項目を、対話式で .env へ追加する。
+# --starter / --check_env と同様、.env が不完全でも実行できるよう core.config より前に処理する。
+if "--merge_env" in sys.argv[1:]:
+    from core.env_merge import run_env_merge
+    run_env_merge()
     sys.exit(0)
 
 # ── --backfill_quake_history（2026-09-06 追加, core/quake_history_backfill.py）
