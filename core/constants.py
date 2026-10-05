@@ -18,6 +18,19 @@ import json
 import logging
 from collections import defaultdict
 
+from core.config import (
+    SHINDO_COLOR_UNKNOWN,
+    SHINDO_COLOR_1,
+    SHINDO_COLOR_2,
+    SHINDO_COLOR_3,
+    SHINDO_COLOR_4,
+    SHINDO_COLOR_5_LOWER,
+    SHINDO_COLOR_5_UPPER,
+    SHINDO_COLOR_6_LOWER,
+    SHINDO_COLOR_6_UPPER,
+    SHINDO_COLOR_7,
+)
+
 logger = logging.getLogger("QTLBot")
 
 
@@ -160,18 +173,21 @@ INT_MAP = {
 }
 
 # 震度コード → Embed 色
+# 【2026-09-13】実際の色コード自体は core/config.py の SHINDO_COLOR_*
+# （.envで上書き可能）に集約した。ここでは震度コードとのマッピングを
+# 組み立てるだけにする（設計方針: os.getenv() はconfig.pyのみで行う）。
 SHINDO_COLORS = {
-    -1: 0x62626B,
-    0:  0x62626B,
-    10: 0x3098BD,
-    20: 0x4CD0A7,
-    30: 0xF6CB51,
-    40: 0xFF9939,
-    45: 0xE52A18,
-    50: 0xC31B1B,
-    55: 0xA30A6B,
-    60: 0x86046E,
-    70: 0x54068E,
+    -1: SHINDO_COLOR_UNKNOWN,
+    0:  SHINDO_COLOR_UNKNOWN,
+    10: SHINDO_COLOR_1,
+    20: SHINDO_COLOR_2,
+    30: SHINDO_COLOR_3,
+    40: SHINDO_COLOR_4,
+    45: SHINDO_COLOR_5_LOWER,
+    50: SHINDO_COLOR_5_UPPER,
+    55: SHINDO_COLOR_6_LOWER,
+    60: SHINDO_COLOR_6_UPPER,
+    70: SHINDO_COLOR_7,
 }
 
 # 長周期地震動階級 → Embed 色

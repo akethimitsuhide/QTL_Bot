@@ -288,6 +288,37 @@ TEST_TARGETS = {
         # コピペミスと見られ、正しい入力JSONを渡してもこの検証のせいで
         # 「フィールド不足」という誤った警告が出ていた
         # （sniff_test_target のフィンガープリントも参照）。
+        # 【2026-09-28追記】VTSE51/52は下記の tsunami_observation_coastal /
+        # tsunami_observation_offshore に分離した。本対象は「各地の
+        # 満潮時刻・津波到達予想時刻に関する情報」等、専用ハンドラ
+        # 未対応の観測系情報向けの汎用フォールバックとして残る。
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "tsunami_observation_coastal": {
+        # 【2026-09-28追加】「津波観測に関する情報」（VTSE51）専用。
+        # 沿岸の潮位観測点を警報区分・地域ごとにグルーピングして表示し、
+        # GIS地図（render_tsunami_observation_map）を添付する。
+        "cog_name": "TsunamiCog",
+        "method": "notify_tsunami_observation_coastal",
+        "data_kwarg": "detail",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "tsunami_observation_offshore": {
+        # 【2026-09-28追加】「沖合の津波観測に関する情報」（VTSE52）専用。
+        # 観測点を一覧表示し、GIS地図（render_tsunami_offshore_map）に
+        # 押し（ドーナツ）／引き（塗り円）・新規追加（黄色フチ）を描画する。
+        "cog_name": "TsunamiCog",
+        "method": "notify_tsunami_observation_offshore",
+        "data_kwarg": "detail",
+        "expected_fields": ["Control", "Head", "Body"],
+    },
+    "tsunami_observation_tide": {
+        # 【2026-09-28追加】「各地の満潮時刻・津波到達予想時刻に関する情報」
+        # 専用。警報区分→地域→観測点（到達予想・満潮時刻）でグルーピングし、
+        # 津波予報区の色分け地図（render_tsunami_map）を添付する。
+        "cog_name": "TsunamiCog",
+        "method": "notify_tsunami_observation_tide",
+        "data_kwarg": "detail",
         "expected_fields": ["Control", "Head", "Body"],
     },
     "tsunami_forecast": {
@@ -348,6 +379,17 @@ TEST_TARGETS = {
         "method": "notify_long_period",
         "data_kwarg": "list_item",
         "expected_fields": [],
+    },
+    "other_long_period_detail": {
+        # 【2026-09-18追加】気象庁HPから直接ダウンロードした完全な
+        # 詳細JSON（Control/Head/Body形式）専用。other_quake_advisory_detail
+        # と同じ理由（list_item形式は"json"キーのファイル名しか持たず、
+        # 完全な詳細データはHTTPで別途取得する前提のため、フルJSONを
+        # そのまま渡したい場合は detail_data 引数を使う必要がある）。
+        "cog_name": "OtherInfoCog",
+        "method": "notify_long_period",
+        "data_kwarg": "detail_data",
+        "expected_fields": ["Control", "Head", "Body"],
     },
     "other_quake_advisory": {
         # list_item形式（quake/data/list.jsonの1エントリ。"json"キーで
@@ -520,14 +562,40 @@ def sniff_test_target(data) -> list[str]:
         tsunami_body = tsunami_body if isinstance(tsunami_body, dict) else {}
 
         if isinstance(tsunami_body.get("Observation"), dict):
-            # tsunami_observation: cogs/tsunami.py notify_tsunami_observation
-            # （Forecastを併せ持つ場合もあるが、Observationがあれば
-            #   優先的にこちらと判定する。実際のVTSE51/52がこの形）
-            matches.append("tsunami_observation")
+            # 【2026-09-28追記】VTSE51「津波観測に関する情報」・VTSE52
+            # 「沖合の津波観測に関する情報」はどちらもBody.Tsunami.
+            # Observationを持ち構造だけでは区別できないため、
+            # Head.Title（実データで確認済み。"沖合の"の有無で判別）で
+            # さらに絞り込む。どちらにも一致しない場合（「各地の満潮
+            # 時刻・津波到達予想時刻に関する情報」等、専用ハンドラ未対応の
+            # 情報種別）は従来通り汎用の tsunami_observation にフォール
+            # バックする。"沖合の津波観測に関する情報" は文字列として
+            # "津波観測に関する情報" を含むため、必ず沖合側を先に判定する
+            # （cogs/tsunami.py fetch_tsunami_observation の判定と同じ順序）。
+            head_title = (data.get("Head") or {}).get("Title", "") or ""
+            if "沖合の津波観測に関する情報" in head_title:
+                matches.append("tsunami_observation_offshore")
+            elif "津波観測に関する情報" in head_title:
+                matches.append("tsunami_observation_coastal")
+            else:
+                # tsunami_observation: cogs/tsunami.py notify_tsunami_observation
+                # （Forecastを併せ持つ場合もあるが、Observationがあれば
+                #   優先的にこちらと判定する）
+                matches.append("tsunami_observation")
         elif isinstance(tsunami_body.get("Forecast"), (dict, list)):
-            # tsunami_forecast: cogs/tsunami.py notify_tsunami_forecast
-            # （Observationを持たずForecastのみ＝VTSE41系）
-            matches.append("tsunami_forecast")
+            # 【2026-09-28追記】「各地の満潮時刻・津波到達予想時刻に関する
+            # 情報」もBody.Tsunami.Forecastを持つため、以前はここで
+            # 無条件に tsunami_forecast（VTSE41、notify_tsunami_forecast）
+            # と誤判定されていた（--test_autoのみに影響。実際の通知経路
+            # fetch_tsunami_observationはHead.Titleの文字列一致で正しく
+            # 振り分けていたため実害は無かった）。Head.Titleで判別する。
+            head_title = (data.get("Head") or {}).get("Title", "") or ""
+            if "満潮時刻" in head_title:
+                matches.append("tsunami_observation_tide")
+            else:
+                # tsunami_forecast: cogs/tsunami.py notify_tsunami_forecast
+                # （Observationを持たずForecastのみ＝VTSE41系）
+                matches.append("tsunami_forecast")
 
         # 【2026-08-31 修正】"Body.EarthquakeInfo" 及び "Body.Earthquake"
         # は、複数の情報種別が同じキーを共有しており、キーの有無だけでは
@@ -591,6 +659,17 @@ def sniff_test_target(data) -> list[str]:
                 # 意図された重複配信（上記と同様の理由で両方提示）
                 matches.append("hypocenter_update")
                 matches.append("other_quake_advisory_detail")
+            elif "長周期地震動" in title_text or isinstance(body.get("Intensity"), dict):
+                # 【2026-09-18追加】長周期地震動に関する観測情報
+                # （Control/Head/Body形式）も Body.Earthquake を持つため、
+                # タイトルが取得できない場合に下のelseへ落ちて
+                # hypocenter_update と誤判定されるバグがあった
+                # （実機テストで発覚：長周期地震動のJSONを渡したのに
+                # 「顕著な地震の震源要素更新のお知らせ」として通知された）。
+                # 長周期地震動データは Body.Intensity（観測情報）を持つ点が
+                # hypocenter_update（震源要素のみ）との構造上の違いのため、
+                # タイトル文字列に加えてこちらでも判定する。
+                matches.append("other_long_period_detail")
             else:
                 # hypocenter_update: cogs/other.py notify_hypocenter_update
                 # （2026-09-01移設。Tsunamiを持たずEarthquakeのみ＝

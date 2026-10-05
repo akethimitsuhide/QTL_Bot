@@ -35,6 +35,7 @@ opentelemetry 関連パッケージが未インストールでも動作に影響
     # Bot終了時
     shutdown_apm()
 """
+import asyncio
 import logging
 
 from core.config import (
@@ -46,6 +47,43 @@ logger = logging.getLogger("QTLBot")
 
 _tracer_provider = None
 _apm_active = False
+
+
+# 【2026-10-03追加】Mackerel APM に「エラー」として課題化されていた、想定内の失敗。
+# aiohttp クライアントの自動計装は、例外が出たリクエストのスパンを一律に
+# ステータス ERROR にして例外を記録する。本Botでは次の2つが通常運用で頻繁に起き、
+# どちらもコード側で捕捉・処理済みのため、障害ではない。
+#   - asyncio.TimeoutError（Python 3.11以降は組み込みの TimeoutError と同一）:
+#       強震モニタ等の外部サーバーの応答が設定秒（例: 5秒）を超えた。失敗時は
+#       次の周期で再試行する設計。
+#   - asyncio.CancelledError: Discord への送信（discord.py の POST）等の途中で、
+#       EEW最終報での強震モニタ監視の終了（task.cancel()）やBot終了により
+#       タスクがキャンセルされた。
+EXPECTED_ERRORS = (asyncio.TimeoutError, asyncio.CancelledError)
+
+
+def is_expected_error(exc) -> bool:
+    """HTTPクライアントのスパンで、障害ではなく想定内とみなす例外か。"""
+    return isinstance(exc, EXPECTED_ERRORS)
+
+
+def _mark_expected_error(span, params) -> None:
+    """
+    aiohttp 計装の response_hook（例外時にも、エラー状態を設定した後に呼ばれる）。
+    想定内の例外（is_expected_error）の場合のみ、スパンのステータスを OK に
+    上書きし、属性 qtl.expected_error=true を付ける。例外の記録（exception イベント）は
+    残るため、発生自体は Mackerel のトレース上で確認できる。
+    HTTP 5xx・接続拒否（ClientConnectorError）・DNS失敗等はエラーのままにする。
+    フックの失敗が通常のリクエスト処理に影響しないよう、例外は握りつぶす。
+    """
+    try:
+        if not is_expected_error(getattr(params, "exception", None)):
+            return
+        from opentelemetry.trace import Status, StatusCode
+        span.set_attribute("qtl.expected_error", True)
+        span.set_status(Status(StatusCode.OK))
+    except Exception:
+        logger.debug("APM: _mark_expected_error でエラー", exc_info=True)
 
 
 def setup_apm() -> bool:
@@ -113,8 +151,11 @@ def setup_apm() -> bool:
             from opentelemetry.instrumentation.aiohttp_client import (
                 AioHttpClientInstrumentor,
             )
-            AioHttpClientInstrumentor().instrument()
-            logger.info("APM: aiohttp クライアントの自動計装を有効化しました")
+            AioHttpClientInstrumentor().instrument(response_hook=_mark_expected_error)
+            logger.info(
+                "APM: aiohttp クライアントの自動計装を有効化しました"
+                "（想定内のTimeoutError/CancelledErrorはエラー扱いにしません）"
+            )
         except ImportError:
             logger.warning(
                 "APM: opentelemetry-instrumentation-aiohttp-client が未インストールのため、"

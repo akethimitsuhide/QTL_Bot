@@ -17,7 +17,10 @@ MP3再生のみを扱う。EEW（緊急地震速報）は cogs/eew.py の EewCog
 
 【この Cog が担当する機能】
 - P2P地震情報 WebSocket（code=551, core.p2p_ws_hub 経由）からの地震情報通知
-- P2P CDN画像のリトライ添付
+- P2P WebSocket の障害時（連続接続失敗が閾値に達した間）、気象庁HPのJSON・
+  気象庁XMLからの代替取得による地震情報通知（2026-10-01〜。
+  core/quake_failover.py 参照。取得元をまたいだ同一内容の重複通知は、
+  震源要素・震度分布の内容照合（QuakeContentDedupe）で防ぐ）
 
 【WebSocket移行について（2026-08 feature/p2p-websocket-migration）】
 従来は本Cog自身が /v2/history を3秒間隔でポーリングしていたが、
@@ -33,16 +36,24 @@ code=551 のメッセージを受け取る方式に移行した（handle_p2p_qua
 - core.constants   : INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP
 - core.helpers     : format_jma_time
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
-- core.p2p_image.P2PImageMixin : p2p_image_url, _attach_p2p_image（多重継承で利用。
-  2026-08-02: 一時的にテキストURL方式へ変更していたが、CDNレスポンス内容の
-  検証（PNGマジックバイト・最小サイズ）を追加した安定版として
-  _attach_p2p_image によるembed埋め込み方式を再度採用）
 - core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
+- core.gis_render.render_shindo_map / is_outside_japan_bbox / render_overseas_map :
+  GIS地図描画（試験導入、2026-09-13〜。GIS_MAP_ENABLE=false・外部データ
+  未取得時はNoneを返すのでその場合は画像添付を省略するだけでよい）。
+  震源が日本国外の場合はrender_overseas_mapに切り替える（2026-09-15〜。
+  2026-09-26に地理院タイル重ね合わせ〈旧core.gis_tile_render〉を廃止し、
+  同期関数・同モジュール内に統合）
+
+【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付（core.p2p_image.
+P2PImageMixin）は、気象庁シェープファイル/GeoJSONベースの地図描画機能
+（試験導入予定）に置き換えるため廃止した。core/p2p_image.py 自体も
+削除済み。
 """
 import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
+import time
 import traceback
 from datetime import datetime
 import logging
@@ -55,6 +66,8 @@ from core.config import (
     QUAKE_ENABLE_FOREIGN, QUAKE_ENABLE_OTHER,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
+    P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS,
+    P2P_FAILOVER_CATCHUP_MINUTES,
 )
 from core.constants import (
     INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP, TSUNAMI_GRADE_ORDER,
@@ -62,16 +75,23 @@ from core.constants import (
 )
 from core.helpers import format_jma_time, format_latlon
 from core.audio import AudioClientMixin
-from core.p2p_image import P2PImageMixin
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.quake_history_log import build_quake_record, format_quake_record_log_line
+from core.gis_render import (
+    render_shindo_map, is_outside_japan_bbox, render_overseas_map, _STATION_ZOOM_MIN_SHINDO,
+)
+from core.gis_data import ensure_gis_data_ready
+from core.gis_discord import build_gis_message_kwargs
+from core.quake_failover import (
+    QuakeContentDedupe, QuakeFailoverController, build_sources, fingerprint_from_p2p,
+)
 
 logger = logging.getLogger("QTLBot")
 
 
-class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
+class QuakeInfoCog(commands.Cog, AudioClientMixin):
     """地震情報（震度速報・各地の震度等）を扱う Cog。"""
 
     def __init__(self, bot: commands.Bot):
@@ -103,6 +123,16 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         self._last_recv: dict[str, datetime | None] = {"quake": None}
         self._recv_count: dict[str, int] = {"quake": 0}
 
+        # 【2026-10-01追加】取得元（P2P WebSocket / 気象庁JSON / 気象庁XML）を
+        # またいだ同一内容の地震情報の重複通知防止。通知済みの内容指紋を保持し、
+        # 判定→通知→記録を1つの Lock で直列化する（P2Pのハンドラと
+        # フォールバックのポーリングタスクが並行して同じ内容を処理し、
+        # どちらも「未通知」と判定して二重に送ってしまうのを防ぐ）。
+        self._quake_dedupe = QuakeContentDedupe()
+        self._quake_notify_lock = asyncio.Lock()
+        self._failover: QuakeFailoverController | None = None
+        self._failover_task: asyncio.Task | None = None
+
     async def cog_load(self):
         self.session = aiohttp.ClientSession(
             headers=self.headers,
@@ -110,8 +140,11 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("QuakeInfoCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "QuakeInfoCog")
 
     async def cog_unload(self):
+        if self._failover_task and not self._failover_task.done():
+            self._failover_task.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
             logger.info("QuakeInfoCog: aiohttp セッションを閉じました")
@@ -128,6 +161,33 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         # last_quake_id のみ一度初期化しておく。
         if self.last_quake_id is None:
             await self._init_last_quake_id()
+
+        # 【2026-10-01追加】P2P WebSocket 障害時の代替取得。on_ready は
+        # Discordゲートウェイの再接続で再発火することがあるため、タスクを
+        # 保持して二重起動を防ぐ。
+        hub = getattr(self.bot, "p2p_hub", None)
+        if P2P_FAILOVER_ENABLE and hub is not None \
+                and (self._failover_task is None or self._failover_task.done()):
+            sources = build_sources(QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS)
+            if sources:
+                self._failover = QuakeFailoverController(
+                    get_session=lambda: self.session,
+                    handler=self.handle_failover_quake,
+                    sources=sources,
+                    poll_seconds=QUAKE_FAILOVER_POLL_SECONDS,
+                    is_closed_fn=self.bot.is_closed,
+                    catchup_minutes=P2P_FAILOVER_CATCHUP_MINUTES,
+                )
+                hub.add_failover_listener(self._failover.set_active)
+                if hub.failover_active:
+                    self._failover.set_active(True)
+                self._failover_task = self.bot.loop.create_task(self._failover.run())
+                logger.info(
+                    "QuakeInfoCog: P2P障害時の代替取得を準備しました "
+                    f"(取得元: {', '.join(s.name for s in sources)})"
+                )
+            else:
+                logger.warning("QuakeInfoCog: QUAKE_FAILOVER_SOURCES に有効な取得元が無いため代替取得は無効です")
 
         logger.info("QuakeInfoCog: on_ready 完了")
 
@@ -233,10 +293,47 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             self._last_recv["quake"] = datetime.now()
             self._recv_count["quake"] += 1
             logger.info(f"P2P地震情報取得: id={data_id}")
-            await self.notify_quake(data)
+            await self._notify_quake_deduped(data)
 
         except Exception:
             logger.error(f"handle_p2p_quake エラー:\n{traceback.format_exc()}")
+
+    async def handle_failover_quake(self, data: dict, source_label: str) -> None:
+        """
+        core.quake_failover.QuakeFailoverController から、P2P WebSocket 障害時の
+        代替取得元（気象庁HPのJSON・XML）で得た地震情報（P2P形式に変換済み）を
+        受け取るハンドラ。P2P経由で通知済みの内容と同じものは通知しない。
+        """
+        self._last_recv["quake"] = datetime.now()
+        self._recv_count["quake"] += 1
+        logger.info(f"代替取得の地震情報: source={source_label} id={data.get('id')}")
+        await self._notify_quake_deduped(data, source_label=source_label)
+
+    async def _notify_quake_deduped(self, data: dict, source_label: str | None = None) -> bool:
+        """
+        同じ内容（震源要素・震度分布）の地震情報が既に通知済みなら通知せず、
+        そうでなければ notify_quake で通知して内容を記録する。通知した場合 True。
+        （取得元をまたいだ重複通知の防止。判定・通知・記録は Lock で直列化する）
+        """
+        async with self._quake_notify_lock:
+            fp = None
+            try:
+                fp = fingerprint_from_p2p(data)
+            except Exception:
+                logger.warning(
+                    f"地震情報の内容照合に失敗したため重複判定なしで通知します:\n{traceback.format_exc()}"
+                )
+            if fp is not None and self._quake_dedupe.is_duplicate(fp, time.monotonic()):
+                logger.info(
+                    f"同一内容の地震情報が通知済みのためスキップしました "
+                    f"(source={source_label or 'P2P地震情報'}, id={data.get('id') or data.get('_id')})"
+                )
+                return False
+            note = f"※P2P地震情報の障害のため{source_label}から取得" if source_label else None
+            await self.notify_quake(data, extra_note=note)
+            if fp is not None:
+                self._quake_dedupe.record(fp, time.monotonic())
+            return True
 
     async def notify_quake(self, data, is_test=False, extra_note=None, skip_speech=False):
         channel = self.quake_channel or self.channel
@@ -317,11 +414,11 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
 
         name_display = "調査中" if issue_type == "ScalePrompt" else name
         # 「震源に関する情報」（Destination）の場合、震源地の横に緯度経度を
-        # 付記する（要件2）。以前は「地図画像の取得に失敗した場合のみ」
-        # 付記していたが、_attach_p2p_image による embed 埋め込み方式を
-        # 採用した現在も、画像添付は非同期（create_task）でメッセージ送信
-        # 後に行われるため、送信時点では成否が確定しない。そのため引き続き
-        # 常に緯度経度を付記する方針を維持する。
+        # 常に付記する（要件2）。以前は「地図画像の取得に失敗した場合のみ」
+        # 付記する案もあったが、地図画像自体が非同期・遅延取得（成否が
+        # 送信時点で未確定）だったため、常時付記する方針にしていた。
+        # 2026-09-13にP2P地図画像添付機能自体を廃止した後も、緯度経度の
+        # 表示自体は単体で有用なため、この方針は変更していない。
         show_latlon_in_name = (
             issue_type == "Destination"
             and latitude != -200 and longitude != -200
@@ -397,8 +494,22 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         if footer_parts:
             embed.set_footer(text=" | ".join(footer_parts))
 
+        # ── GIS地図描画（試験導入、2026-09-13〜） ──
+        # 震度速報（ScalePrompt）は区域単位の points（addrが地域名）
+        # しか持たないため区域塗りつぶし、それ以外の種別で points が
+        # あれば観測点単位（addrが観測点名）とみなしマーカー表示、
+        # pointsが無くても震源情報だけあればバツ印のみ描画する。
+        # 観測点マーカーの場合、震度3以上の観測点があれば拡大表示に
+        # 加えて全観測点を見渡せる通常表示も2枚目として添付する
+        # （2026-09-18追加。_render_quake_gis_map は0〜2枚のPNGを
+        # リストで返す）。GIS_MAP_ENABLE=false・外部データ未取得・
+        # 描画対象が何も無い場合は空リストになるので、その場合は
+        # 画像添付自体を単に省略する（通知本体の送信は妨げない）。
+        gis_images = await self._render_quake_gis_map(issue_type, points, latitude, longitude)
+        send_kwargs = build_gis_message_kwargs(gis_images, embed)
+
         try:
-            sent_msg = await channel.send(embed=embed)
+            await channel.send(**send_kwargs)
         except Exception as e:
             # notify_quake は他のCogと異なりメソッド全体を包むtry/exceptを
             # 持たない設計のため、送信箇所をピンポイントでtry/exceptし、
@@ -420,11 +531,6 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
             quake_record = build_quake_record(data, title)
             if quake_record is not None:
                 logger.info(format_quake_record_log_line(quake_record))
-
-        # ── 地図画像（embed埋め込み） ──
-        quake_id = data.get("id") or data.get("_id")
-        if quake_id:
-            self.bot.loop.create_task(self._attach_p2p_image(sent_msg, quake_id))
 
         if issue_type == "ScalePrompt" and max_scale_val >= 55:
             now_dt = datetime.now()
@@ -560,6 +666,83 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin, P2PImageMixin):
         if EWS_ENABLE and not is_test and dom_tsunami in ("Warning", "MajorWarning"):
             if self._should_play_ews(eq, hypo, dom_tsunami):
                 await self._play_ews_signal(dom_tsunami)
+
+    async def _render_quake_gis_map(self, issue_type: str, points: list, latitude, longitude) -> list:
+        """
+        地震情報通知向けのGIS地図画像（PNG bytes）のリストを生成する
+        （GIS地図描画機能、試験導入。core/gis_render.py参照）。0〜2枚を
+        返す（呼び出し側は core.gis_discord.build_gis_message_kwargs()
+        にそのまま渡せばよい）。
+
+        - issue_type == "ScalePrompt"（震度速報）: points は区域単位
+          （addrが core.gis_data の local_areas.geojson の区域名と一致
+          する想定）のため、区域を震度で塗りつぶす（1枚のみ）。
+        - それ以外の種別で points があれば、観測点単位（addrが
+          stations.json の観測点名と一致する想定）とみなし、観測点
+          ごとのマーカーを描画する。震度3以上の観測点が1件でもあれば、
+          その周辺への拡大表示（1枚目）に加えて、震度3未満の場合と
+          同じ拡大縮小方法（全観測点を見渡せる通常表示）の画像も
+          2枚目として添付する（2026-09-18追加。「拡大表示しか無く
+          全体像が分かりにくい」との指摘のため。震度3以上の観測点が
+          無い場合は両者が同じ画像になるため1枚のみ返す）。
+        - points が無くても、震源の緯度経度が有効であればバツ印のみの
+          地図を返す（震度分布が不明な情報種別＝Destination等向け）。
+        - 震源が日本国外（遠地地震に関する情報＝Foreign 等）の場合は、
+          日本限定の区域データでは震源位置を表現できないため、世界の
+          国境データを使う render_overseas_map に切り替える
+          （2026-09-15追加、2026-09-26に地理院タイル重ね合わせを廃止し
+          独自ベクター地図化。この場合は1枚のみ）。
+
+        GIS_MAP_ENABLE=false・外部データ未取得・描画対象が何もない
+        場合は空リストを返す（core.gis_render.render_shindo_map 参照）。
+        """
+        hypo_lonlat = None
+        if latitude != -200 and longitude != -200:
+            hypo_lonlat = (longitude, latitude)
+
+        if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
+            overseas = render_overseas_map(hypo_lonlat)
+            return [overseas] if overseas else []
+
+        region_shindo = None
+        station_shindo = None
+        if points:
+            shindo_map = {
+                p.get("addr"): p.get("scale")
+                for p in points
+                if p.get("addr") and p.get("scale") is not None
+            }
+            # 【2026-10-02追加】震度速報に限らず、points がすべて区域単位
+            # （isArea=True。Quake.One経由の「細分区域別の震度」等）の場合も
+            # 区域の塗りつぶしにする（観測点名として扱うと一致せず描画されない）。
+            # P2P地震情報では isArea=True は震度速報の points にのみ使われる。
+            points_are_areas = all(p.get("isArea") for p in points)
+            if issue_type == "ScalePrompt" or points_are_areas:
+                region_shindo = shindo_map
+            else:
+                station_shindo = shindo_map
+
+        primary = render_shindo_map(
+            region_shindo=region_shindo,
+            station_shindo=station_shindo,
+            hypocenter_lonlat=hypo_lonlat,
+            show_region_icons=bool(region_shindo),
+        )
+        images = [primary] if primary else []
+
+        has_strong_station = station_shindo and any(
+            code >= _STATION_ZOOM_MIN_SHINDO for code in station_shindo.values()
+        )
+        if has_strong_station:
+            normal_view = render_shindo_map(
+                station_shindo=station_shindo,
+                hypocenter_lonlat=hypo_lonlat,
+                station_zoom_priority=False,
+            )
+            if normal_view:
+                images.append(normal_view)
+
+        return images
 
     def _should_play_ews(self, eq: dict, hypo: dict, dom_tsunami: str) -> bool:
         """

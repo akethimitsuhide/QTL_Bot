@@ -120,6 +120,10 @@ core/test_runner.py の run_all_cli_tests を参照）。
 こちらも .env が存在しない状態で実行できる必要があるため、--starter と
 同様に core.config を import する前に判定する。
 
+【.env への不足項目の対話式追加（2026-10-05 追加, core/env_merge.py）】
+    python3 bot.py --merge_env          # .env.example にあって .env に無い項目を1つずつ確認して追加
+    python3 bot.py --merge_env --yes    # 確認せず、すべて既定値で追加
+
 【地震情報履歴の一括バックフィル（2026-09-06 追加, core/quake_history_backfill.py）】
 core/quake_history_log.py による構造化ログ（QUAKE_RECORD_V1）を追加する
 前に発生した地震について、P2P地震情報 API から可能な範囲で遡って取得し、
@@ -130,6 +134,16 @@ qtlbot.log へ書き足す：
 Discordへの接続は不要なため、Botを起動せずここで完結して終了する。
 ただし --starter / --check_env とは異なり、通常運用中のBotに対して行う
 操作のため .env が正しく設定済みであることを前提とする。
+
+【GISデータの手動再取得（2026-09-13 追加, core/gis_data.py）】
+GIS地図描画機能（試験導入）が使う外部データ（気象庁シェープファイル
+由来のGeoJSON3種＋世界の国境データ＋観測点一覧 stations.json）を強制的に再取得する：
+
+    python3 bot.py --refresh_gis_data
+
+通常は GIS_MAP_ENABLE=true でのCogロード時に「キャッシュが無ければ
+取得」する方式のため初回セットアップでは不要。気象庁側で観測点構成が
+更新された際などに手動で最新化したい場合に使う。
 
 【起動手順】
     初めて導入する場合はまず .env を作成する（対話形式ウィザード）:
@@ -152,6 +166,14 @@ if "--check_env" in sys.argv[1:]:
     run_env_check()
     sys.exit(0)
 
+# ── --merge_env（2026-10-05 追加, core/env_merge.py）
+# .env.example にあって .env に無い項目を、対話式で .env へ追加する。
+# --starter / --check_env と同様、.env が不完全でも実行できるよう core.config より前に処理する。
+if "--merge_env" in sys.argv[1:]:
+    from core.env_merge import run_env_merge
+    run_env_merge()
+    sys.exit(0)
+
 # ── --backfill_quake_history（2026-09-06 追加, core/quake_history_backfill.py）
 # 地震情報の地図・表閲覧機能（/quake_map, core/quake_history_log.py）向けの
 # 構造化ログ（QUAKE_RECORD_V1）を追加する以前に発生した地震について、
@@ -172,6 +194,33 @@ if "--backfill_quake_history" in sys.argv[1:]:
         f"{_newly_logged}件を新たにqtlbot.logへ記録しました。"
     )
     sys.exit(0)
+
+# ── --refresh_gis_data（2026-09-13 追加, core/gis_data.py）
+# GIS地図描画機能（試験導入）が使う外部データ（気象庁シェープファイル
+# 由来のGeoJSON3種＋世界の国境データ＋気象庁の観測点一覧 stations.json）を強制的に
+# 再ダウンロードする。通常は GIS_MAP_ENABLE=true でのCogロード時に
+# 「キャッシュが無ければ取得」する方式のため、初回セットアップでは
+# このコマンドは不要。stations.json は気象庁側で観測点構成が変わる
+# ことがあるため、その際に手動で最新化したい場合に使う。
+# Discordへの接続は不要なため、Bot本体を起動せずここで完結する。
+if "--refresh_gis_data" in sys.argv[1:]:
+    import asyncio as _asyncio
+    import aiohttp as _aiohttp
+    from core.logging_setup import setup_logging as _setup_logging
+    from core.gis_data import ensure_gis_data as _ensure_gis_data
+    _setup_logging()
+
+    async def _refresh_gis_data():
+        async with _aiohttp.ClientSession() as _session:
+            return await _ensure_gis_data(_session, force=True)
+
+    _ok = _asyncio.run(_refresh_gis_data())
+    if _ok:
+        print("[GIS] GISデータ（GeoJSON3種・国境データ・観測点一覧）を再取得しました。")
+        sys.exit(0)
+    else:
+        print("[GIS] GISデータの再取得に一部失敗しました。ログを確認してください。")
+        sys.exit(1)
 
 import asyncio
 import logging

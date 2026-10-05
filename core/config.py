@@ -54,6 +54,13 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+
 def _getenv_nonempty(key: str, default: str) -> str:
     """
     os.getenv() の空文字フォールバック問題を回避するヘルパー。
@@ -78,6 +85,31 @@ def _env_bool(key: str, default: bool) -> bool:
     if not v:
         return default
     return v.strip().lower() in ("1", "true", "yes")
+
+
+def _env_hex_color(key: str, default: int) -> int:
+    """
+    16進カラーコード（例: "0x3098BD" / "#3098BD" / "3098BD"）を
+    int（discord.Embed の color 引数にそのまま渡せる形式）に変換する。
+
+    "0x" プレフィックス・"#" プレフィックスのどちらでも受け付ける
+    （HTML/CSS で見慣れた "#RRGGBB" 表記でも .env に書けるようにするため）。
+    未設定・空文字・不正な値の場合は default（＝現行の配色）にフォール
+    バックし、ここで起動を止めることはしない（配色設定の誤りで Bot が
+    起動しなくなるのは過剰なため、警告ログを出して安全側の既定値を使う）。
+    """
+    v = os.getenv(key, "").strip()
+    if not v:
+        return default
+    v = v.removeprefix("0x").removeprefix("0X").removeprefix("#")
+    try:
+        return int(v, 16)
+    except ValueError:
+        logger.warning(
+            f"{key} の値 {os.getenv(key)!r} は16進カラーコードとして解釈できません。"
+            f"デフォルト値 (0x{default:06X}) を使用します。"
+        )
+        return default
 
 
 # ===============================
@@ -322,16 +354,37 @@ KYOSHIN_IMAGE_DELAY_SEC      = _env_int("KYOSHIN_IMAGE_DELAY_SEC", 6)         # 
 KYOSHIN_IMAGE_STEP_SEC       = _env_int("KYOSHIN_IMAGE_STEP_SEC", 3)          # 秒。画像が見つからない場合にさらに遡るステップ幅
 KYOSHIN_IMAGE_MAX_RETRY      = _env_int("KYOSHIN_IMAGE_MAX_RETRY", 4)         # 回。画像検索の最大リトライ回数
 
-# 【2026-08-19 1.0に短縮】観測値取り込み〜tick()のポーリング間隔／
-# イベント継続中の画像通知の再送間隔。より短い間隔で検知・通知できる
-# ようにする一方、防災科研サーバーへのリクエスト頻度が単純に倍増する
-# ため、KyoshinMonitorCog側でEEW発表中（EewCog.monitored_event_idが
-# 設定されている間）はこのポーリング・画像通知を一時的に中断し、
-# EewCog.vibration_monitor_loopに画像取得を一本化する連携を追加した
-# （cogs/kyoshin_monitor.py の _is_eew_active 参照）。EEW最終報が
-# 出た時点で通常のポーリングを自動的に再開する。
-KYOSHIN_POLL_INTERVAL_SEC    = float(os.getenv("KYOSHIN_POLL_INTERVAL_SEC", "1.0"))   # 秒。観測値取り込み〜tick()のポーリング間隔
-KYOSHIN_NOTIFY_INTERVAL_SEC  = float(os.getenv("KYOSHIN_NOTIFY_INTERVAL_SEC", "1.0")) # 秒。イベント継続中の画像通知の再送間隔
+# 【2026-10-05 再設計】強震モニタ・長周期地震動モニタ・振動レベルの受信と通知を
+# cogs/kyoshin_monitor.py に集約した（以前は EewCog.vibration_monitor_loop が
+# EEW発表時の通知を、KyoshinMonitorCog が画像解析検知時の通知をそれぞれ別経路で
+# 取得・送信していた）。旧 KYOSHIN_POLL_INTERVAL_SEC / KYOSHIN_NOTIFY_INTERVAL_SEC は
+# 廃止し、次の設定に置き換えた。
+#
+# 受信（有効/無効と間隔）
+#   モニタ系（強震モニタ jma_s / 長周期地震動モニタ LMoni abrspmx_s）は1秒以上、
+#   振動レベル（kwatch-24h.net）は2秒以上の間隔を空けて受信する。下限未満の値は
+#   下限に切り上げる。jma_s は画像解析による揺れ検知にも使う。
+#   振動レベルが KYOSHIN_VIBRATION_DETECT_LEVEL 以上のときも「揺れを検知」と判定する。
+# 通知
+#   通知間隔は、有効な受信のうち最短の受信間隔（1秒以上）。3つの受信のうち
+#   どれか1つでも有効なら通知機能を使える。EEW発表中は EEW 通知を優先し、
+#   検知による通知は EEW の最終報・キャンセル報（または通知上限時間）まで中断する
+#   （検知自体は続ける）。
+KYOSHIN_RECV_JMA_S_ENABLE         = _env_bool("KYOSHIN_RECV_JMA_S_ENABLE", True)
+KYOSHIN_RECV_LMONI_ENABLE         = _env_bool("KYOSHIN_RECV_LMONI_ENABLE", True)
+KYOSHIN_RECV_VIBRATION_ENABLE     = _env_bool("KYOSHIN_RECV_VIBRATION_ENABLE", True)
+KYOSHIN_RECV_IMAGE_INTERVAL_SEC   = max(1.0, _env_float("KYOSHIN_RECV_IMAGE_INTERVAL_SEC", 1.0))
+KYOSHIN_RECV_VIBRATION_INTERVAL_SEC = max(2.0, _env_float("KYOSHIN_RECV_VIBRATION_INTERVAL_SEC", 2.0))
+KYOSHIN_VIBRATION_DETECT_LEVEL    = max(1, _env_int("KYOSHIN_VIBRATION_DETECT_LEVEL", 100))
+KYOSHIN_NOTIFY_ENABLE             = _env_bool("KYOSHIN_NOTIFY_ENABLE", True)
+KYOSHIN_NOTIFY_ON_EEW             = _env_bool("KYOSHIN_NOTIFY_ON_EEW", True)
+KYOSHIN_NOTIFY_ON_DETECT          = _env_bool("KYOSHIN_NOTIFY_ON_DETECT", True)
+
+# 【2026-09-22 追加】強震モニタの画像解析検知の通知時にも、EEW発表時の
+# 振動モニタ（cogs/eew.py vibration_monitor_loop）と同じ「振動レベル音」
+# （lv100 / lv1000 / lv2000）を鳴らすか。レベル判定は共通
+# （core.kyoshin_shared.vibration_tier）。
+KYOSHIN_DETECT_VIBRATION_SOUND = _env_bool("KYOSHIN_DETECT_VIBRATION_SOUND", True)
 
 # HSVマスク処理で「揺れ候補ピクセル」とみなす実震度の下限値。
 # core.kyoshin_shared.estimate_max_shindo_from_image
@@ -492,7 +545,7 @@ KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_d
 # 【2026-08-29 追加】強震モニタのポーリング処理（画像ダウンロード・
 # デコード・観測点ピクセルサンプリング）にかかった時間を計測し、
 # この秒数を超えた場合のみ WARNING ログを出す閾値。
-# KYOSHIN_POLL_INTERVAL_SEC（既定1.0秒）ごとに毎回実行される処理
+# KYOSHIN_RECV_IMAGE_INTERVAL_SEC（既定1.0秒）ごとに毎回実行される処理
 # であり、Raspberry Pi等の低スペック環境で処理時間がポーリング間隔に
 # 近づく・超えることがないかを、実測に基づいて把握するために追加した
 # （cogs/kyoshin_monitor.py._fetch_current_shindo_map 参照）。
@@ -517,6 +570,46 @@ FETCH_FAILURE_THRESHOLD = _env_int("FETCH_FAILURE_THRESHOLD", 3)
 FETCH_BACKOFF_SECONDS   = _env_int("FETCH_BACKOFF_SECONDS", 60)
 
 # ===============================
+# P2P地震情報 WebSocket 障害時のフォールバック（2026-10-01 追加）
+# ===============================
+# P2P地震情報 WebSocket への再接続が P2P_FAILOVER_THRESHOLD 回連続で失敗
+# （切断・接続タイムアウト）した場合、地震情報（震度速報・震源に関する
+# 情報・各地の震度に関する情報）を気象庁の公開データの定期取得に切り替える。
+# 切り替え後も WebSocket の再接続は並行して続け、接続が
+# P2P_FAILOVER_RECOVERY_SECONDS 秒以上安定したらフォールバックを停止する。
+# 同じ内容（震源要素・震度分布）の地震情報が取得元をまたいで重複通知
+# されないよう、通知前に内容（core/quake_failover.py QuakeContentDedupe）で
+# 照合する。詳細は README.md「P2P地震情報の障害時フォールバック」参照。
+P2P_FAILOVER_ENABLE           = _env_bool("P2P_FAILOVER_ENABLE", True)
+P2P_FAILOVER_THRESHOLD        = max(1, _env_int("P2P_FAILOVER_THRESHOLD", 5))
+P2P_FAILOVER_RECOVERY_SECONDS = max(5, _env_int("P2P_FAILOVER_RECOVERY_SECONDS", 60))
+# 接続回数に関わらず、WebSocket に接続できていない状態（再接続の待ち時間・接続
+# 試行中を含む）がこの秒数続いたらフォールバックに入る（2026-10-02追加。0=切断
+# した瞬間に開始）。接続失敗の連続回数（P2P_FAILOVER_THRESHOLD）の条件と併用し、
+# どちらか早い方で開始する。再接続は 5→10→20→40→60秒と待ち時間が延びるため、
+# 回数だけだと2026-10-01の障害では開始まで約2分かかり、その間の地震情報が
+# 通知されなかった。
+P2P_FAILOVER_DISCONNECT_SECONDS = max(0, _env_int("P2P_FAILOVER_DISCONNECT_SECONDS", 10))
+QUAKE_FAILOVER_POLL_SECONDS   = max(5, _env_int("QUAKE_FAILOVER_POLL_SECONDS", 10))
+# Quake.One の list.json の取得間隔（秒。2026-10-05追加）。既定6秒＝10回/分。
+# これより短い値（10回/分を超える頻度）は指定できず、6秒に切り上げる。
+# 新着の詳細（info.json 等）の取得は数えない。
+QUAKE_ONE_POLL_SECONDS        = max(6.0, _env_float("QUAKE_ONE_POLL_SECONDS", 6.0))
+# フォールバックが通知対象にする情報の新しさ（分）。発表がこれより古い情報は、
+# 障害前に P2P で通知済みとみなして通知しない（初回取得時に過去の地震が
+# まとめて再通知されるのを防ぐ）。障害が長引く場合は増やす（最小1。
+# 重複照合の保持時間6時間より短くすること）。
+P2P_FAILOVER_CATCHUP_MINUTES  = max(1, _env_int("P2P_FAILOVER_CATCHUP_MINUTES", 30))
+# 取得元の優先順（カンマ区切り）。先頭から順に試し、最初に応答した
+# 取得元の結果を使う。指定できる値: jma_json（気象庁HP JSON）, jma_xml（気象庁XML）,
+# quake_one（Quake.One Static API。2026-10-02〜。http のみの第三者配信のため既定では最後）
+QUAKE_FAILOVER_SOURCES = [
+    s.strip().lower()
+    for s in _getenv_nonempty("QUAKE_FAILOVER_SOURCES", "jma_json,jma_xml,quake_one").split(",")
+    if s.strip()
+]
+
+# ===============================
 # キュー設定
 # ===============================
 SPEECH_QUEUE_MAXSIZE = _env_int("SPEECH_QUEUE_MAXSIZE", 200)
@@ -537,29 +630,120 @@ WOLFX_WSS = "wss://ws-api.wolfx.jp/jma_eew"
 P2P_WSS   = "wss://api.p2pquake.net/v2/ws"
 P2P_API   = "https://api.p2pquake.net/v2/history"
 
-# P2P地震情報の地図画像埋め込み（CDNへのリトライポーリング）を一時的に
-# 無効化するフラグ。原因切り分けのため画像埋め込み処理自体をオフに
-# できるようにする。無効化時は core.p2p_image.P2PImageMixin
-# .build_p2p_image_url_text() が生成する画像URLを通知本文に含めることで、
-# Discord自体のリンクプレビュー機能により画像が自動展開される
-# （Bot側でのリトライ・embed編集は行わない）。
-P2P_IMAGE_ATTACH_ENABLED = _env_bool("P2P_IMAGE_ATTACH_ENABLED", True)
+# 【2026-09-13 廃止】P2P地震情報CDNの動的地図画像添付機能
+# （core/p2p_image.py の P2PImageMixin）は、気象庁シェープファイル/
+# GeoJSONベースの独自地図描画機能（試験導入予定）に置き換えるため
+# 廃止した。P2P_IMAGE_ATTACH_ENABLED・P2P_IMAGE_CDN_CONCURRENCY は
+# それに伴い削除済み。既存の .env にこれらのキーが残っていても、
+# 単に参照されなくなるだけで無害（未知のキーは無視される）。
 
-# P2P地震情報CDN（cdn.p2pquake.net）への同時アクセス数の上限。
-# QuakeInfoCog/TsunamiCog/EewCog/JishinKanchiCog等、core.p2p_image.
-# P2PImageMixin を使う全Cogを横断した共有の同時実行数制限として使う
-# （core/p2p_image.py 側でモジュールレベルの asyncio.Semaphore を
-# この値で生成する）。
+# ===============================
+# 震度色（Embed / 今後のGIS地図描画で共通利用予定）
+# ===============================
+# core/constants.py の SHINDO_COLORS はこれらの値から組み立てられる。
+# 気象庁の公式配色ではなく本Bot独自の配色のため、環境に合わせて
+# ユーザーがカスタマイズできるよう .env で上書き可能にした
+# （2026-09-13）。未設定時は従来通りの配色がそのまま使われる。
+# 値は "0x3098BD" "#3098BD" "3098BD" のいずれの表記でもよい。
+SHINDO_COLOR_UNKNOWN  = _env_hex_color("SHINDO_COLOR_UNKNOWN",  0x62626B)  # 不明・震度0
+SHINDO_COLOR_1        = _env_hex_color("SHINDO_COLOR_1",        0x3098BD)  # 震度1
+SHINDO_COLOR_2        = _env_hex_color("SHINDO_COLOR_2",        0x4CD0A7)  # 震度2
+SHINDO_COLOR_3        = _env_hex_color("SHINDO_COLOR_3",        0xF6CB51)  # 震度3
+SHINDO_COLOR_4        = _env_hex_color("SHINDO_COLOR_4",        0xFF9939)  # 震度4
+SHINDO_COLOR_5_LOWER  = _env_hex_color("SHINDO_COLOR_5_LOWER",  0xE52A18)  # 震度5弱
+SHINDO_COLOR_5_UPPER  = _env_hex_color("SHINDO_COLOR_5_UPPER",  0xC31B1B)  # 震度5強
+SHINDO_COLOR_6_LOWER  = _env_hex_color("SHINDO_COLOR_6_LOWER",  0xA30A6B)  # 震度6弱
+SHINDO_COLOR_6_UPPER  = _env_hex_color("SHINDO_COLOR_6_UPPER",  0x86046E)  # 震度6強
+SHINDO_COLOR_7        = _env_hex_color("SHINDO_COLOR_7",        0x54068E)  # 震度7
+
+# ===============================
+# 津波色設定（Embed / GIS地図描画で共通利用、2026-09-14〜）
+# ===============================
+# 従来 cogs/tsunami.py にハードコードされていた津波情報のEmbed色を
+# こちらに集約し、震度色と同様に .env で上書き可能にした。
+# GIS地図描画（core/gis_render.py の render_tsunami_map）の津波予報区
+# 沿岸線の色分けにも同じ値を使う。
+TSUNAMI_COLOR_MAJOR_WARNING = _env_hex_color("TSUNAMI_COLOR_MAJOR_WARNING", 0xD344FC)  # 大津波警報
+TSUNAMI_COLOR_WARNING       = _env_hex_color("TSUNAMI_COLOR_WARNING",       0xF93022)  # 津波警報
+TSUNAMI_COLOR_WATCH         = _env_hex_color("TSUNAMI_COLOR_WATCH",         0xEEDB2D)  # 津波注意報
+# 津波予報（若干の海面変動。気象庁の警報コード71/72/73）専用の色
+# （2026-09-26追加）。従来 cogs/tsunami.py の notify_tsunami_forecast内に
+# ハードコードされていたEmbed色（0x80FFFF、水色）をこちらへ集約し、他の
+# 3段階と同様に.envで上書き可能にした。GIS地図描画（render_tsunami_map）
+# 側でも同じ値を使う（従来はこの段階だけGIS地図の対象外になっており、
+# 津波予報のみが発表された場合に地図が描画されない不具合があったため、
+# 対象に追加した際にあわせて色も導入した）。
+TSUNAMI_COLOR_FORECAST      = _env_hex_color("TSUNAMI_COLOR_FORECAST",      0x80FFFF)  # 津波予報
+TSUNAMI_COLOR_UNKNOWN       = _env_hex_color("TSUNAMI_COLOR_UNKNOWN",       0x56BCFC)  # 不明・その他
+
+# ===============================
+# GIS地図描画設定（試験導入、2026-09-13〜）
+# ===============================
+# core/gis_data.py（外部データのダウンロード・キャッシュ）・
+# core/gis_render.py（Pillowによる地図画像生成）参照。
+# 廃止したP2P地震情報CDNの動的地図画像添付機能の置き換えとして、
+# 気象庁のシェープファイル形式のGISデータ（有志によりGeoJSON化された
+# もの、CC-BY-4.0）を用いて震源・震度分布等を独自に描画する。
 #
-# 【2026-08-23 追加の経緯】
-# 大規模地震（震度5弱、茨城県南部の地震）発生時、震度速報→各地の
-# 震度に関する情報等、短時間に複数のP2P地震情報レポートが連続発表
-# され、それぞれが独立した画像添付タスクとして並行実行された結果、
-# 同一CDNへの同時多発的なリクエストが実際に発生し、5件中3件が
-# 20回リトライ後も失敗、残り2件も15〜17回目でようやく成功（約90〜
-# 100秒要した）という実害を確認した。同時実行数を制限することで
-# CDNへの負荷を平準化し、個々のリクエストの成功率を上げる狙い。
-P2P_IMAGE_CDN_CONCURRENCY = _env_int("P2P_IMAGE_CDN_CONCURRENCY", 3)
+# デフォルト無効（EWS_ENABLEと同じオプトイン方式）。試験導入のため。
+GIS_MAP_ENABLE = _env_bool("GIS_MAP_ENABLE", False)
+
+# ダウンロードしたGeoJSON・観測点一覧のキャッシュ先ディレクトリ。
+# GeoJSON配布元はCC-BY-4.0のためリポジトリへの誤コミットを避けたく、
+# このディレクトリは.gitignoreに登録している。LOG_FILE_PATHと同様、
+# 未設定時はプロジェクトルート基準の絶対パスとし、実行時のカレント
+# ディレクトリに依存しないようにする。
+GIS_MAP_DATA_DIR = _getenv_nonempty(
+    "GIS_MAP_DATA_DIR", os.path.join(_PROJECT_ROOT_DIR, "data", "gis")
+)
+
+# 緊急地震速報（警報）の発表地域の塗り色・輪郭色、およびPLUM法時の
+# 震源ドーナツマークの色（共通の「警戒色」として1つの変数で管理）。
+# デフォルトは赤。ユーザーが.envで変更可能（値の表記は震度色と同じ
+# "0xFF0000" / "#FF0000" / "FF0000" のいずれでもよい）。
+GIS_MAP_WARNING_COLOR = _env_hex_color("GIS_MAP_WARNING_COLOR", 0xFF0000)
+
+# 【2026-10-05追加】地図の配色テーマ（light / dark / highlight）。
+#   light     : 従来の配色（クリーム色の陸・水色の海）
+#   dark      : 暗色の陸・海、明るい境界線
+#   highlight : 陸・海・境界線を淡いグレー系にして、震度・警報の塗り分けを際立たせる
+# 不正な値は light にする。
+GIS_MAP_THEME = (_getenv_nonempty("GIS_MAP_THEME", "light") or "light").strip().lower()
+if GIS_MAP_THEME not in ("light", "dark", "highlight"):
+    GIS_MAP_THEME = "light"
+
+# 【2026-10-05追加】震度アイコン（観測点マーカー・震度速報の区域アイコン）の見た目。
+# 角丸の半径・縁の太さはアイコン一辺に対する比率。縁はアイコンの外側に描く。
+#   GIS_ICON_CORNER_RADIUS_RATIO : 角の丸さ（0=四角、既定0.15、上限0.5=円）
+#   GIS_ICON_BORDER_RATIO        : 縁の太さ（既定0.1=アイコンの1/10、0=縁なし）
+#   GIS_ICON_BORDER_SATURATION   : 縁の色＝アイコン色の彩度に掛ける係数（既定0.6、0〜1。1=同じ彩度）
+#   GIS_ICON_TEXT_COLORS         : 震度ごとの文字色（例 "1:FFFFFF,5-:000000"）。
+#                                  キーは 0,1,2,3,4,5-,5+,6-,6+,7。未指定の震度は従来どおり黒に近い色
+GIS_ICON_CORNER_RADIUS_RATIO = min(0.5, max(0.0, _env_float("GIS_ICON_CORNER_RADIUS_RATIO", 0.15)))
+GIS_ICON_BORDER_RATIO        = min(0.5, max(0.0, _env_float("GIS_ICON_BORDER_RATIO", 0.1)))
+GIS_ICON_BORDER_SATURATION   = min(1.0, max(0.0, _env_float("GIS_ICON_BORDER_SATURATION", 0.6)))
+
+
+def _parse_icon_text_colors(raw: str) -> dict:
+    """"1:FFFFFF,5-:000000" 形式を {"1": 0xFFFFFF, "5-": 0x000000} に変換する（不正な項目は無視）。"""
+    result: dict = {}
+    for item in raw.split(","):
+        if ":" not in item:
+            continue
+        label, _, value = item.partition(":")
+        label = label.strip()
+        value = value.strip().lstrip("#")
+        if value.lower().startswith("0x"):
+            value = value[2:]
+        try:
+            if label and len(value) == 6:
+                result[label] = int(value, 16)
+        except ValueError:
+            continue
+    return result
+
+
+GIS_ICON_TEXT_COLORS = _parse_icon_text_colors(os.getenv("GIS_ICON_TEXT_COLORS", ""))
 
 # ===============================
 # 地震情報 履歴（qtlbot.logベース、地図・表での閲覧機能）

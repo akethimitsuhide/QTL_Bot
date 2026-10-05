@@ -17,12 +17,59 @@ EewCog._convert_p2p_eew_to_wolfx() / EewCog._extract_alert_regions()
 変わらない）。
 """
 import logging
+import re
 import traceback
 from collections import defaultdict
 
 from core.helpers import safe_int, safe_float
 
 logger = logging.getLogger("QTLBot")
+
+# 地域ごとの予想震度の上限が「以上」（上限なし。気象庁電文 To="over"、
+# P2P地震情報 scaleTo=99）であることを表す値。
+#
+# 【2026-10-05 変更】WarnArea[].Shindo1 / Shindo2 の意味を Wolfx API 仕様に
+# 統一した。Shindo1＝地域の最大震度、Shindo2＝地域の最小震度（どちらも
+# 「5弱」「6強」等の文字列）。PLUM法の発表では Shindo2 は null/None になる。
+# 上限なし（「以上」）は、最大震度を表す Shindo1 側に OPEN_UPPER_LABEL（または
+# "over"）を入れ、Shindo2 に下限を入れて表す（例: Shindo1="以上", Shindo2="5弱"
+# → 「震度5弱以上」）。P2P地震情報の変換（convert_p2p_eew_to_wolfx）も同じ形式で出力する。
+OPEN_UPPER_LABEL = "以上"
+OPEN_UPPER_LABELS = (OPEN_UPPER_LABEL, "over")
+
+
+def _norm_shindo(value) -> str | None:
+    """
+    WarnArea の Shindo1/Shindo2 の値を正規化する。
+    None・空文字・"null"/"none"（大文字小文字不問）・"不明" は未設定（None）として扱う。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("null", "none") or text == "不明":
+        return None
+    return text
+
+
+def _area_shindo(area: dict, is_assumption: bool = False) -> tuple[str | None, str | None, bool]:
+    """
+    WarnArea 1件から (最大震度, 最小震度, 上限なしか) を返す（Wolfx仕様）。
+
+    - 上限なし（Shindo1 が「以上」/"over"）: (None, 下限, True)。下限が無ければ (None, None, True)
+    - PLUM法（is_assumption）: Shindo2 は使わず、(Shindo1 または Shindo2, None, False)
+    - それ以外: (Shindo1, Shindo2, False)。どちらか未設定ならもう一方だけで1値として扱う
+    """
+    s1 = _norm_shindo(area.get("Shindo1"))
+    s2 = _norm_shindo(area.get("Shindo2"))
+    if s1 is not None and s1.lower() in [x.lower() for x in OPEN_UPPER_LABELS]:
+        return None, s2, True
+    if is_assumption:
+        return (s1 or s2), None, False
+    if s1 is None:
+        return s2, None, False
+    if s2 is None or s1 == s2:
+        return s1, None, False
+    return s1, s2, False
 
 
 def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
@@ -38,7 +85,11 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
       earthquake.originTime           : 発生時刻（"2026/05/15 20:22:02" 形式）
       earthquake.condition            : "仮定震源要素" のとき PLUM 法
       areas[].scaleFrom / scaleTo     : int（-1/0/10/20/30/40/45/50/55/60/70）
-                                        scaleTo のみ 99（以上）あり
+                                        scaleTo のみ 99 あり。99 は「震度7」ではなく
+                                        気象庁電文の To="over"＝「以上」（上限なし）を
+                                        表す。例: scaleFrom=45, scaleTo=99 は
+                                        「震度5弱以上」（2026-09-22 訂正。従来は
+                                        99を震度7として扱っていた）
       areas[].kindCode                : "10"=警報未到達 / "11"=到達済 / "19"=PLUM法
       areas[].arrivalTime             : 到達予測時刻（null の場合あり）
       areas[].name                    : 細分区域名
@@ -103,8 +154,9 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             "19": "警報",    # PLUM法
         }
 
-        max_scale_val = -1
-        warn_areas    = []
+        max_scale_val  = -1
+        max_scale_open = False  # 最大震度が「以上」（上限なし）由来か
+        warn_areas     = []
         has_warn      = False  # kindCode=10 or 19 が1つでもあれば isWarn=True
 
         for area in areas:
@@ -113,45 +165,70 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             st = safe_int(area.get("scaleTo",   -1))
 
             # 最大震度追跡。
-            # scaleTo=99（震度7以上）は「70(震度7)以上」を意味するため、
-            # 70として扱う必要がある。st in (-1, 99) のとき scaleFrom
-            # （下限値）にフォールバックしてしまうと、99のケースで
-            # 本来の上限値(70)ではなく下限値を採用してしまうバグになる
-            # （例: scaleFrom=45"5弱", scaleTo=99"7以上" → 誤って5弱扱い）。
-            if st == 99:
-                effective = 70
-            elif st != -1:
-                effective = st
+            #
+            # 【2026-09-22 修正】scaleTo=99 は「震度7」ではなく、気象庁電文の
+            # To="over"＝「以上」（上限なし）を表す（例: scaleFrom=45,
+            # scaleTo=99 は「震度5弱以上」）。従来は99を震度7（70）として
+            # 扱っていたため、PLUM法（各地を「5弱以上」等と推定する）の
+            # 発表で、全体の予想最大震度が実態と無関係に「7以上」と
+            # 表示され、地域内訳（5弱・5強等）とも食い違っていた。
+            #
+            # 【2026-09-24 訂正】上記修正は「以上」表記自体をPLUM法にも
+            # 一律適用してしまっており、これが新たな不具合だった
+            # （タローさんからの指摘: Wolfx側はPLUM法で「以上」を出さず
+            # 「震度X程度」のみを表示しており、P2P側も同様に処理すべき）。
+            # scaleTo=99を「以上」として扱う（is_open）のは非PLUM法の
+            # エリアに限定する。PLUM法（is_plum）のエリアは、scaleTo=99を
+            # st=-1（不明）と同様に無視し、常にscaleFrom（下限＝PLUM法の
+            # 推定値そのもの）を採用する。これにより、後段の
+            # build_forecast_groups等は「震度X程度」ラベルを持つ
+            # is_assumption分岐（Wolfx側と共通のロジック）に流れる。
+            if st == 99 and not is_plum:
+                effective, is_open = sf, sf != -1
+            elif st != -1 and st != 99:
+                effective, is_open = st, False
             else:
-                effective = sf if sf != -1 else -1
+                effective, is_open = sf, False
             if effective > max_scale_val:
-                max_scale_val = effective
+                max_scale_val, max_scale_open = effective, is_open
+            elif effective == max_scale_val and is_open:
+                max_scale_open = True
 
             # kindCode=10 or 19 のエリアが1つでもあれば警報フラグ
             # kindCode=11（到達済）だけの場合は isWarn=False のまま
             if kind_code in ("10", "19"):
                 has_warn = True
 
-            shindo1 = scale_map.get(sf, "不明")
-            shindo2_val = 70 if st == 99 else st
-            shindo2 = scale_map.get(shindo2_val, shindo1)
+            # Wolfx仕様: Shindo1＝最大震度、Shindo2＝最小震度（PLUM法・片方のみ判明は None）。
+            # P2P の scaleFrom＝最小、scaleTo＝最大。scaleTo=99（上限なし）は
+            # Shindo1 に「以上」、Shindo2 に下限を入れる（非PLUM法のみ。PLUM法は
+            # scaleTo=99 を無視し、Shindo1 に推定値、Shindo2 は None）。
+            low  = scale_map.get(sf) if sf != -1 else None
+            high = scale_map.get(st) if st not in (-1, 99) else None
+            if is_plum:
+                shindo1, shindo2 = (low or high), None
+            elif st == 99:
+                shindo1, shindo2 = (OPEN_UPPER_LABEL, low) if low else (None, None)
+            elif high and low:
+                shindo1, shindo2 = high, low
+            else:
+                shindo1, shindo2 = (high or low), None
 
             warn_areas.append({
                 "Chiiki":      area.get("name", ""),
                 "Pref":        area.get("pref", ""),
-                "Shindo1":     shindo1,
-                "Shindo2":     shindo2,
+                "Shindo1":     shindo1,   # 最大震度（Wolfx仕様）
+                "Shindo2":     shindo2,   # 最小震度（PLUM法等は None）
                 "Type":        kind_type_map.get(kind_code, "警報"),
                 "KindCode":    kind_code,
                 # arrivalTime は null の場合があるので None → "" に正規化
                 "ArrivalTime": area.get("arrivalTime") or "",
             })
 
-        # MaxIntensity
-        if any(safe_int(a.get("scaleTo", -1)) == 99 for a in areas):
-            max_intensity = "7以上"
-        else:
-            max_intensity = scale_map.get(max_scale_val, "不明")
+        # MaxIntensity（全エリアの予想震度の最大。「以上」由来なら「5弱以上」等）
+        max_intensity = scale_map.get(max_scale_val, "不明")
+        if max_scale_open and max_scale_val not in (-1, 70):
+            max_intensity += OPEN_UPPER_LABEL
 
         raw_depth = hypo.get("depth", -1)
         depth = safe_int(raw_depth) if safe_int(raw_depth) != -1 else -1
@@ -178,16 +255,52 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             "MaxIntensity": max_intensity,
             "WarnArea":     warn_areas,
             "_source":      "P2P地震情報",
-            # P2P地震情報の地図画像URL（cdn.p2pquake.net/app/images/{id}_trim_big.png）
-            # 生成に使うメッセージID。2026-08-19: EEW（警報）の地図画像対応のため追加。
-            # Wolfx由来のEEW（source="wolfx"）にはこのIDは存在せず、P2P由来
-            # （source="p2p_eew"）のときのみ利用可能（cogs/eew.py notify_eew参照）。
-            "_p2p_image_id": p2p_data.get("id"),
         }
 
     except Exception:
         logger.error(f"P2P→Wolfx変換エラー:\n{traceback.format_exc()}")
         return None
+
+
+# 都道府県名の先頭一致（北海道・東京都・大阪府・京都府・「〇〇県」）。
+_PREF_PREFIX_RE = re.compile(r"^(北海道|東京都|大阪府|京都府|.{2,3}?県)")
+
+# 未知の地域名の警告ログを、同じ名称につき1回だけ出すための集合。
+_warned_unknown_chiiki: set = set()
+
+
+def resolve_chiiki(chiiki: str, known_names) -> list:
+    """
+    EEWの地域名（Chiiki）を、既知の細分区域名（known_names。通常は
+    REGION_MAP のキー）へ解決して、該当する区域名のリストを返す
+    （2026-10-03追加）。
+
+    背景: 電文・配信元によって、同じ地域が既知の名称と違う表記で届くこと
+    がある（例: 「秋田県南部」。既知の細分区域名は「秋田県沿岸南部」
+    「秋田県内陸南部」の2つ）。従来は REGION_MAP に無い名称を一律に
+    「その他」として通知・読み上げし、GIS地図でも塗られなかった。
+
+    解決の規則（誤って別の地域に割り当てないよう保守的にしている）:
+      1. known_names に完全一致すれば、その名称のみ。
+      2. 無ければ、同じ都道府県（先頭一致）の既知の区域のうち、都道府県名
+         を除いた部分が末尾一致するものを全て返す（例: 「秋田県南部」→
+         「南部」で終わる「秋田県沿岸南部」「秋田県内陸南部」）。
+         都道府県名を判別できない・都道府県名を除いた部分が2文字未満・
+         候補が5件を超える場合は、曖昧なので解決しない（空リスト）。
+    """
+    if not chiiki:
+        return []
+    names = known_names if isinstance(known_names, (set, frozenset, dict)) else set(known_names)
+    if chiiki in names:
+        return [chiiki]
+    m = _PREF_PREFIX_RE.match(chiiki)
+    if not m:
+        return []
+    pref, rest = m.group(1), chiiki[m.end():]
+    if len(rest) < 2:
+        return []
+    cands = sorted(n for n in names if n.startswith(pref) and n[len(pref):].endswith(rest))
+    return cands if 0 < len(cands) <= 5 else []
 
 
 def extract_alert_regions(data: dict, region_map: dict) -> set:
@@ -198,12 +311,27 @@ def extract_alert_regions(data: dict, region_map: dict) -> set:
     region_map は core.constants.REGION_MAP を呼び出し元から渡す
     （このモジュールをBotの状態から独立させるため、モジュール内で
     core.constants を直接インポートしない設計とする）。
+
+    【2026-10-03変更】region_map に無い地域名は、従来は一律「その他」に
+    していたが、resolve_chiiki で既知の区域名へ解決を試み、解決先がすべて
+    同じ府県予報区に属する場合はその府県予報区とする。解決できない場合のみ
+    「その他」とし、見落とさないよう名称ごとに1回だけ警告ログを出す。
     """
     alert_regions = set()
     for area in data.get("WarnArea", []):
         chiiki = area.get("Chiiki")
         if chiiki and area.get("Type", "").lower() in ("警報", "到達済"):
-            alert_regions.add(region_map.get(chiiki, "その他"))
+            region = region_map.get(chiiki)
+            if region is None:
+                regions = {region_map[c] for c in resolve_chiiki(chiiki, region_map)}
+                region = regions.pop() if len(regions) == 1 else None
+                if region is None and chiiki not in _warned_unknown_chiiki:
+                    _warned_unknown_chiiki.add(chiiki)
+                    logger.warning(
+                        f"EEWの地域名 {chiiki!r} を既知の区域名に解決できないため「その他」として扱います"
+                        "（region_map.json への追加を検討してください）"
+                    )
+            alert_regions.add(region or "その他")
     return alert_regions
 
 
@@ -250,18 +378,26 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
     WarnArea配列から「震度X程度」「震度X〜Y程度」ラベルごとに地域名を
     グルーピングした dict（ラベル → [地域名, ...]）を返す。
 
+    【2026-10-05 変更】Wolfx API 仕様（Shindo1＝最大震度、Shindo2＝最小震度、
+    PLUM法では Shindo2 は null/None）に従い、見出しは Shindo1〜Shindo2 の順で
+    組み立てる（値の大小による並べ替えはしない）。Shindo2 が未設定または Shindo1
+    と同値なら「震度X程度」。以下の2026-09までの経緯は旧仕様（Shindo1＝下限）での記録。
+
     【2026-08-27 追加】単一EEW通知（notify_eew）と複数EEWサマリー通知
     （「複数の緊急地震速報が発表されています」）の両方で全く同じ
     グルーピングロジックが必要になったため、重複を避けてここに共通化した。
 
     【2026-09-02 修正】以前は shindo1（scaleFrom＝下限値ベース）が
-    「不明」のエリアを、shindo2（scaleTo＝上限値ベース。例えば
-    scaleTo=99「7以上」相当）が判明していても丸ごと表示から除外して
-    いた。この結果、core.eew_convert.convert_p2p_eew_to_wolfx の
-    MaxIntensity計算（全エリアのscaleToを見て「7以上」と判定）と、
-    本関数が生成する地域ごとの震度内訳との間に食い違いが生じ、
-    「全体の予想最大震度は7以上なのに、地域ごとの内訳には6弱・5強
-    までしか出てこない」という実機での報告に一致する不具合があった。
+    「不明」のエリアを、shindo2（scaleTo＝上限値ベース）が判明していても
+    丸ごと表示から除外していた。この結果、convert_p2p_eew_to_wolfx の
+    MaxIntensity計算と、本関数が生成する地域ごとの震度内訳との間に
+    食い違いが生じ、「全体の予想最大震度は7以上なのに、地域ごとの内訳
+    には6弱・5強までしか出てこない」という実機での報告に一致する
+    不具合があった。
+    【2026-09-22 訂正】上記の食い違いの根本原因は、scaleTo=99 を
+    「震度7」と誤解していたこと（実際は「以上」＝上限なし）だった。
+    99は Shindo2="以上" として渡され、本関数は「震度5弱以上」の
+    ように下限のみを表示する（convert_p2p_eew_to_wolfx 参照）。
     下限（scaleFrom）が不明なだけで、上限（scaleTo）は判明している
     エリアは実際に存在しうる（EEW初期の推定でscaleFromが未計算の
     ケース等）。shindo1・shindo2のうち少なくとも一方が判明していれば
@@ -273,41 +409,86 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
         chiiki = area.get("Chiiki")
         if not chiiki:
             continue
-        shindo1 = area.get("Shindo1", "不明")
-        shindo2 = area.get("Shindo2", shindo1)
+        high, low, is_open = _area_shindo(area, is_assumption)
 
-        if is_assumption:
-            # shindo1が不明でもshindo2（上限値）が判明していればそちらを使う
-            display_val = shindo1 if shindo1 != "不明" else shindo2
-            if display_val != "不明":
-                forecast_groups[f"震度{display_val}程度"].append(chiiki)
+        if is_open:
+            # 上限なし（「震度5弱以上」）。下限が不明なら表示できる情報が無いため除外する。
+            if low is not None:
+                forecast_groups[f"震度{low}以上"].append(chiiki)
             continue
-
-        if shindo1 == "不明" and shindo2 == "不明":
-            # 上限・下限とも不明な場合のみ、本当に表示できないため除外する
+        if high is None:
             continue
-
-        if shindo1 == "不明":
-            # 下限は不明だが上限（例: 7以上→"7"）は判明している
-            label = f"震度{shindo2}程度"
-        elif shindo2 == "不明":
-            # 逆に上限のみ不明なケース（通常は起こりにくいが念のため対応）
-            label = f"震度{shindo1}程度"
-        elif shindo1 == shindo2:
-            label = f"震度{shindo1}程度"
+        if low is None:
+            label = f"震度{high}程度"
         else:
-            r1, r2 = shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map)
-            high, low = (shindo1, shindo2) if r1 >= r2 else (shindo2, shindo1)
+            # Wolfx仕様どおり Shindo1（最大）〜Shindo2（最小）の順で表示する
             label = f"震度{high}〜{low}程度"
         forecast_groups[label].append(chiiki)
     return dict(forecast_groups)
+
+
+def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool = False,
+                            known_names=None) -> dict:
+    """
+    WarnArea配列から「地域名（Chiiki、REGION_MAP変換前の生の名称）→
+    震度コード（int_mapのキー。10,20,...,70）」のフラットな辞書を作る。
+
+    core/gis_render.py のGIS地図描画（震度分布の地域塗りつぶし）向けに、
+    build_forecast_groups（ラベル→地域名リストのグルーピング）とは別に
+    追加した（2026-09-13）。ロジック自体はbuild_forecast_groupsと同様、
+    Shindo1（下限）・Shindo2（上限）のうち高い方を採用する
+    （PLUM法＝is_assumption時はShindo1のみを使う点も同様）。
+    Shindo1・Shindo2とも「不明」の地域は結果に含めない。
+
+    known_names（既知の細分区域名。省略可。通常は REGION_MAP のキー）を渡すと、
+    それに無い地域名（例: 「秋田県南部」）を resolve_chiiki で既知の区域名
+    （「秋田県沿岸南部」「秋田県内陸南部」）へ解決し、その全てに同じ震度を
+    割り当てる（2026-10-03追加。解決できない地域名は従来どおり生の名称のまま
+    残る＝GIS地図では塗られない）。同じ区域に複数の震度が割り当たる場合は
+    高い方を使う。
+    """
+    result: dict = {}
+    for area in warn_areas:
+        chiiki = area.get("Chiiki")
+        if not chiiki:
+            continue
+        high, low, is_open = _area_shindo(area, is_assumption)
+        if is_open:
+            # 上限なし（「以上」）: 下限を、その地域の代表震度として塗る
+            if low is None:
+                continue
+            code = shindo_rank(low, int_map)
+        else:
+            if high is None:
+                continue
+            code = max(shindo_rank(high, int_map), shindo_rank(low, int_map) if low else 0)
+
+        if code:  # shindo_rank は未知の値に対して0を返すため、0は除外する
+            targets = [chiiki]
+            if known_names is not None and chiiki not in known_names:
+                targets = resolve_chiiki(chiiki, known_names) or [chiiki]
+            for t in targets:
+                result[t] = max(result.get(t, 0), code)
+    return result
+
+
+def _label_rank(label: str, int_map: dict) -> float:
+    """
+    「震度5弱程度」「震度6弱〜5強程度」「震度5弱以上」等の予想震度ラベルを
+    大小比較用の数値ランクに変換する（範囲の場合は高い方）。「以上」
+    （上限なし）は同じ階級の「程度」より僅かに上（+0.5）として扱う。
+    """
+    is_open = label.endswith(OPEN_UPPER_LABEL)
+    body = label[: -len(OPEN_UPPER_LABEL)] if is_open else label
+    rank = max(shindo_rank(s.strip("震度程度〜"), int_map) for s in body.split("〜"))
+    return rank + (0.5 if is_open else 0)
 
 
 def sorted_forecast_labels(forecast_groups: dict, int_map: dict) -> list:
     """forecast_groups のラベルを、震度が高い順にソートして返す。"""
     return sorted(
         forecast_groups.keys(),
-        key=lambda lbl: max(shindo_rank(s.strip("震度程度〜"), int_map) for s in lbl.split("〜")),
+        key=lambda lbl: _label_rank(lbl, int_map),
         reverse=True,
     )
 
@@ -351,7 +532,7 @@ def merge_forecast_groups(warn_areas_list: list, int_map: dict) -> dict:
     for warn_areas, is_assumption in warn_areas_list:
         groups = build_forecast_groups(warn_areas, int_map, is_assumption=is_assumption)
         for label, chiikis in groups.items():
-            rank = max(shindo_rank(s.strip("震度程度〜"), int_map) for s in label.split("〜"))
+            rank = _label_rank(label, int_map)
             for chiiki in chiikis:
                 prev = best_by_chiiki.get(chiiki)
                 if prev is None or rank > prev[0]:

@@ -38,6 +38,7 @@ cogs/other.py
 - core.audio.AudioMixin : speak_local, play_mp3（多重継承で利用）
 """
 import os
+import io
 import discord
 from discord.ext import commands, tasks
 import aiohttp
@@ -53,10 +54,15 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
-from core.helpers import format_jma_time, truncate_embed_description
+from core.helpers import format_jma_time, truncate_embed_description, parse_jma_coordinate
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.gis_render import (
+    render_shindo_map, render_long_period_map, is_outside_japan_bbox, render_overseas_map,
+)
+from core.gis_data import ensure_gis_data_ready
+from core.gis_discord import build_gis_message_kwargs
 
 logger = logging.getLogger("QTLBot")
 
@@ -104,6 +110,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             connector=aiohttp.TCPConnector(limit=50, ttl_dns_cache=300),
         )
         logger.info("OtherInfoCog: aiohttp セッションを作成しました")
+        await ensure_gis_data_ready(self.session, "OtherInfoCog")
 
     async def cog_unload(self):
         for loop_task in (self.fetch_long_period, self.fetch_quake_advisory):
@@ -117,6 +124,25 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         if self.session and not self.session.closed:
             await self.session.close()
             logger.info("OtherInfoCog: aiohttp セッションを閉じました")
+
+    async def _render_hypocenter_gis_map(self, lat, lon) -> bytes | None:
+        """
+        震源の緯度経度だけからGIS地図画像（PNG bytes）を生成する共通処理
+        （2026-09-17追加。notify_long_period・notify_hypocenter_update
+        で使用）。震源が日本国外の場合は render_overseas_map に切り替える
+        （cogs/quake.py の _render_quake_gis_map と同じ判定方法。
+        2026-09-26に地理院タイル重ね合わせを廃止し独自ベクター地図化、
+        同期関数になったためawait不要）。
+
+        lat, lon が None（震源座標を取得できなかった場合）は None を返す。
+        GIS_MAP_ENABLE=false・外部データ未取得の場合も各render関数が
+        Noneを返すため、その場合も同様にNoneを返す。
+        """
+        if lat is None or lon is None:
+            return None
+        if is_outside_japan_bbox(lon, lat):
+            return render_overseas_map((lon, lat))
+        return render_shindo_map(hypocenter_lonlat=(lon, lat))
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -240,7 +266,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         await self.bot.wait_until_ready()
 
 
-    async def notify_long_period(self, list_item, is_test=False, extra_note=None):
+    async def notify_long_period(self, list_item=None, is_test=False, extra_note=None, detail_data=None):
         if not ENABLE_LONG_PERIOD and not is_test:
             return
         channel = self.other_channel or self.channel
@@ -248,15 +274,23 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             return
 
         try:
-            json_filename = list_item.get("json")
-            if not json_filename:
-                return
-
-            detail_url = f"https://www.jma.go.jp/bosai/ltpgm/data/{json_filename}"
-            async with self.session.get(detail_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
-                if resp.status != 200:
+            if detail_data is None:
+                json_filename = list_item.get("json")
+                if not json_filename:
                     return
-                detail = await resp.json()
+
+                detail_url = f"https://www.jma.go.jp/bosai/ltpgm/data/{json_filename}"
+                async with self.session.get(detail_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    if resp.status != 200:
+                        return
+                    detail = await resp.json()
+            else:
+                # 【2026-09-18追加】CLIテスト（core/test_runner.py の
+                # other_long_period_detail）から、気象庁HPで直接ダウン
+                # ロードした完全な詳細JSON（Control/Head/Body形式）を
+                # そのまま渡せるようにするための経路。notify_quake_advisory
+                # の detail_data 引数と同じパターン。
+                detail = detail_data
 
             source = detail.get("Control", {}).get("PublishingOffice", "気象庁")
 
@@ -271,23 +305,36 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             max_lg = str(intensity.get("MaxLgInt", "不明"))
 
             depth_str = "不明"
+            hypo_lat = None
+            hypo_lon = None
             coord = eq.get("Hypocenter", {}).get("Area", {}).get("Coordinate", "")
-            if coord and '-' in coord:
-                try:
-                    depth_m = int(coord.split('-')[-1].split('/')[0])
-                    depth_km = abs(depth_m) // 1000
-                    if depth_km > 0:
-                        depth_str = f"{depth_km}km"
-                except Exception:
-                    pass
+            parsed_coord = parse_jma_coordinate(coord)
+            if parsed_coord:
+                hypo_lat, hypo_lon, depth_km = parsed_coord
+                if depth_km is not None and depth_km > 0:
+                    depth_str = f"{depth_km}km"
 
             lg_groups = defaultdict(list)
+            # GIS地図（観測点マップ）用の観測点リスト [{"lat","lon","level"}]。
+            # 【2026-09-22 修正】以前は地域名（Area.Name）と地域の最大階級を
+            # 「観測点名→階級」として渡していたため、stations.json の名前引きで
+            # 1件も一致せず観測点が描画されなかった。観測情報JSONの
+            # IntensityStation[]（Name/LgInt/latlon）から、座標ごと直接組み立てる。
+            lg_stations = []
             for pref in intensity.get("Pref", []):
                 for area in pref.get("Area", []):
                     area_name = area.get("Name", "")
                     lg_int = area.get("MaxLgInt", "不明")
                     if lg_int != "不明" and area_name:
                         lg_groups[lg_int].append(area_name)
+                    for st in area.get("IntensityStation", []) or []:
+                        latlon = st.get("latlon") or {}
+                        st_lg = st.get("LgInt")
+                        if st_lg in (None, "") or "lat" not in latlon or "lon" not in latlon:
+                            continue
+                        lg_stations.append({
+                            "lat": latlon["lat"], "lon": latlon["lon"], "level": str(st_lg),
+                        })
 
             description = (
                 f"**発表機関： {source}**\n"
@@ -322,7 +369,27 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if footer:
                 embed.set_footer(text=footer)
 
-            await channel.send(embed=embed)
+            # ── GIS地図描画（試験導入、2026-09-17〜。観測点マップは2026-09-18追加） ──
+            # 1枚目: 震源のバツ印マップ（長周期地震動階級はSHINDO_COLORSの
+            # 震度スケールとは別の尺度のため、震源マップ側には地域色分けを
+            # 行わない）。震源が海外の場合は国土地理院タイルに自動切替。
+            # 2枚目: 観測情報JSON内の観測点座標（IntensityStation[].latlon）
+            # を使って、観測点ごとの長周期地震動階級を色分けしたマップ
+            # （render_long_period_map、LG_COLORS使用。2026-09-22に
+            # stations.json 依存から変更）。いずれかが存在しない/
+            # GIS_MAP_ENABLE=falseの場合はNoneが返るので、その場合は
+            # 該当する方の画像添付を単に省略する。
+            gis_images = []
+            hypo_map = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
+            if hypo_map:
+                gis_images.append(hypo_map)
+            station_map = render_long_period_map(lg_stations=lg_stations, hypocenter_lonlat=(
+                (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
+            ))
+            if station_map:
+                gis_images.append(station_map)
+
+            await channel.send(**build_gis_message_kwargs(gis_images, embed))
             if not is_test:
                 record_delivery(True, "長周期地震動")
                 record_notification("長周期地震動", "長周期地震動に関する観測情報", hypo_name)
@@ -537,6 +604,10 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             hypo_name = hypo.get("Area", {}).get("Name", "不明")
             magnitude = eq.get("Magnitude", "不明")
 
+            coord = hypo.get("Area", {}).get("Coordinate_WGS", "")
+            parsed_coord = parse_jma_coordinate(coord)
+            hypo_lat, hypo_lon = (parsed_coord[0], parsed_coord[1]) if parsed_coord else (None, None)
+
             free_form = body.get("Comments", {}).get("FreeFormComment", "")
 
             description = (
@@ -564,7 +635,17 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if is_test:
                 embed.set_footer(text="※これはテスト通知です。")
 
-            await channel.send(embed=embed)
+            # ── GIS地図描画（試験導入、2026-09-17〜） ──
+            gis_file = None
+            gis_image_bytes = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
+            if gis_image_bytes:
+                gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
+                embed.set_image(url="attachment://gis_map.png")
+
+            if gis_file:
+                await channel.send(embed=embed, file=gis_file)
+            else:
+                await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "震源要素更新")
                 record_notification("震源要素更新", title)

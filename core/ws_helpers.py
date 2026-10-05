@@ -22,6 +22,7 @@ async def ws_connect_loop(
     on_disconnect=None,
     init_delay: int = 5,
     max_delay: int = 60,
+    on_connect=None,
 ):
     """
     WebSocket に接続し、切断時に指数バックオフで自動再接続する共通ループ。
@@ -39,6 +40,9 @@ async def ws_connect_loop(
     on_disconnect: 切断時に呼び出すコールバック（引数なし）。省略可
     init_delay   : 初回再接続待機秒数（デフォルト5秒）
     max_delay    : 最大再接続待機秒数（デフォルト60秒）
+    on_connect   : 接続確立（handler呼び出し直前）に呼び出すコールバック
+                   （引数なし）。省略可（2026-10-01追加。P2PWebSocketHubが
+                   障害時フォールバックの判定に使う）
     """
     delay = init_delay
     consecutive_failures = 0
@@ -53,6 +57,8 @@ async def ws_connect_loop(
                 logger.info(f"{label} WebSocket 接続完了")
                 delay = init_delay  # 接続成功でリセット
                 consecutive_failures = 0
+                if on_connect is not None:
+                    on_connect()
                 await handler(ws)
         except asyncio.CancelledError:
             logger.info(f"{label} WebSocket ループがキャンセルされました")

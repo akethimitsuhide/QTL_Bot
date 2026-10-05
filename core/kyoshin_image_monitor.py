@@ -50,7 +50,7 @@ class KyoshinImageMonitor:
         monitor = KyoshinImageMonitor(
             config=DetectorConfig(),
             get_readings=self._fetch_current_shindo_map,   # 画像解析結果を返す
-            send_kyoshin_image=self._send_kyoshin_image,     # Discord通知処理
+            send_kyoshin_image=self._send_kyoshin_image,  # None なら検知のみ（通知は呼び出し側）    # Discord通知処理
         )
         for sid, neighbors in region_map.items():
             monitor.event_manager.register_station(sid, neighbors=neighbors)
@@ -64,7 +64,7 @@ class KyoshinImageMonitor:
     def __init__(
         self,
         get_readings: GetReadingsFn,
-        send_kyoshin_image: SendImageFn,
+        send_kyoshin_image: SendImageFn | None,
         config: DetectorConfig | None = None,
         on_event_ended: OnEventEndedFn | None = None,
         poll_interval_sec: float = 1.0,
@@ -72,6 +72,9 @@ class KyoshinImageMonitor:
     ):
         self.event_manager = EventManager(config)
         self._get_readings = get_readings
+        # 【2026-10-05】None なら、イベントごとの画像通知ループを起動しない。
+        # 通知は呼び出し側（cogs/kyoshin_monitor.py）が単一の通知ループで一元管理する
+        # （EEW通知との通知間隔の調整のため）。検知（イベントの生成・終了）は従来通り行う。
         self._send_kyoshin_image = send_kyoshin_image
         self._on_event_ended = on_event_ended
         self.poll_interval_sec = poll_interval_sec
@@ -135,6 +138,8 @@ class KyoshinImageMonitor:
     # 画像通知ループの起動・停止
     # ===============================
     def _start_image_loop(self, event_id: str, event: SeismicEvent) -> None:
+        if self._send_kyoshin_image is None:
+            return  # 通知は呼び出し側が一元管理する
         if event_id in self._image_tasks:
             return  # 既に起動済み
 

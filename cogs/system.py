@@ -59,6 +59,7 @@ from core.config import (
     ENABLE_KYOSHIN,
     QUAKE_HISTORY_DEFAULT_LIMIT, QUAKE_HISTORY_CACHE_TTL_SEC,
     DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_ID,
+    GIS_MAP_ENABLE,
 )
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
@@ -66,6 +67,7 @@ from core.notification_log import load_notification_history
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
 from core.eew_history_log import load_eew_history, display_record as display_eew_record
+from core import gis_data
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -416,12 +418,21 @@ setInterval(loadAndRenderNotifications, 30000);
 
 
 # GET /quake_map で返す、地震情報履歴の地図・表表示用HTML。
-# Leaflet（地図描画）はCDNから読み込み、タイルは国土地理院（地理院タイル、
-# 出典表示付き・利用規約上ボット等での定常的な軽量アクセスも許容される
-# 無料タイル）を使う。データ取得元は /status/quake_history のみで、
-# Bot側（Raspberry Pi）は core/quake_history_log.py によるqtlbot.logの
-# スキャン結果をJSONで返すだけ。地図描画・表描画はすべてブラウザ側で
-# 行うため、_DASHBOARD_HTML と同様にRaspberry Pi側の追加負荷は生じない。
+# Leaflet（地図描画）はCDNから読み込む。
+# 【2026-09-26 地理院タイルの使用を廃止】従来は背景地図に国土地理院の
+# 地図タイルを使っていたが、地理院タイルサーバー側の負荷・大規模地震時
+# のアクセス集中への配慮から使用を取りやめた。代わりに、GIS地図描画
+# 機能（試験導入）が管理する世界の国境データ（簡略化版、
+# /status/gis_countries）・日本の細分区域データ（/status/gis_local_areas）
+# を陸地色で塗りつぶす、タイルサーバーに依存しない簡易ベースマップに
+# 切り替えた（詳細は下記JS内のコメント参照）。地震情報自体のデータ取得元
+# は /status/quake_history のみで、地図描画・表描画はすべてブラウザ側で
+# 行うため、_DASHBOARD_HTML と同様にRaspberry Pi側の処理負荷は増えない
+# （ただし、簡易ベースマップ用のGeoJSON〈数百KB程度〉をBot自身が配信する
+# ようになった分、従来の「ブラウザが地理院タイルサーバーへ直接アクセス
+# するだけでBot側の帯域は消費しない」構成と比べると、Bot側の送信帯域は
+# 少し増える。これは地理院タイルサーバーへの依存を無くすためのトレード
+# オフとして許容している）。
 _QUAKE_MAP_HTML = """<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -443,7 +454,10 @@ _QUAKE_MAP_HTML = """<!DOCTYPE html>
               cursor: pointer; font-family: inherit; }
   .btn-link:hover { background: #313244; }
   select.btn-link { padding: 5px 10px; }
-  #map { height: 420px; border-radius: 8px; margin-bottom: 20px; }
+  /* 背景色は core/gis_render.py の _SEA_COLOR (178,205,227) と揃えている
+     （地理院タイル廃止後、GeoJSON読み込み前の一瞬や、国境データを持たない
+     南極等の空白部分でもDiscordの地図画像と近い見た目になるように） */
+  #map { height: 420px; border-radius: 8px; margin-bottom: 20px; background: #b2cde3; }
   .notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
   .notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #313244; }
   .notif-table th { color: #7f849c; font-weight: normal; position: sticky; top: 0; background: #292c3c; }
@@ -531,10 +545,46 @@ let allRecords = [];
 let markers = [];
 
 const map = L.map('map').setView([36.5, 138.0], 5);  // 日本全体が収まる初期表示
-L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
-  attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>',
-  maxZoom: 18,
-}).addTo(map);
+
+// 【2026-09-26 地理院タイルの使用を廃止】
+// 従来は国土地理院タイル（Leafletのタイルレイヤー）を背景地図に使って
+// いたが、地理院タイルサーバー側の負荷・大規模地震時のアクセス集中への
+// 配慮から使用を取りやめた。代わりに、GIS地図描画機能（試験導入）が
+// キャッシュ済みの世界の国境データ（簡略化版、/status/gis_countries）・
+// 日本の細分区域データ（/status/gis_local_areas）を陸地色で塗りつぶす、
+// タイルサーバーに依存しない簡易ベースマップに切り替えた（Bot自身
+// 〈Raspberry Pi〉が配信するのはこの2つのGeoJSON〈合計で数百KB程度〉の
+// みで、地図タイルサーバーへの外部アクセスはブラウザ側・Bot側とも発生
+// しない）。震源マーカーより必ず背面に描画されるよう、専用のレンダリング
+// ペイン（landFillPane、既定のoverlayPane〈z-index:400〉より低いz-index）
+// に配置する。これにより、2つのGeoJSONの読み込み完了タイミングや
+// マーカー描画とのタイミングに関わらず、重なり順が常に保証される
+// （タイミング依存で塗りつぶしがマーカーの上に来てしまう事故を防ぐ）。
+map.createPane('landFillPane');
+map.getPane('landFillPane').style.zIndex = 350;
+
+function loadBaseMapLayer(url, styleOverrides) {
+  fetch(url)
+    .then(r => { if (!r.ok) throw new Error('not available'); return r.json(); })
+    .then(features => {
+      L.geoJSON(features, {
+        pane: 'landFillPane',
+        style: Object.assign({
+          color: '#9a9a9a', weight: 1,
+          fillColor: '#eee8dc', fillOpacity: 1, interactive: false,
+        }, styleOverrides || {}),
+      }).addTo(map);
+    })
+    .catch(() => { /* データ未取得時は#mapのbackground（海色）のみの地図になる（致命的ではない） */ });
+}
+
+// 世界の国境データ（簡略化版、日本を除く）→ 日本の細分区域データの順で
+// 重ねる（日本部分は自前のGeoJSONの方が精密なため、後から重ね描きして
+// 上書きする。core/gis_render.py の render_overseas_map と同じレイヤー
+// 順）。GIS_MAP_ENABLE=false・GeoJSON未取得の場合はいずれも404が返り、
+// その場合は#mapのbackground（海色）だけの地図になる。
+loadBaseMapLayer('/status/gis_countries');
+loadBaseMapLayer('/status/gis_local_areas', { color: '#6e6e6e' });
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -549,6 +599,22 @@ function scaleColor(code) {
   return SHINDO_COLORS[String(code)] || '#62626B';
 }
 
+// マグニチュードに応じた円マーカーの半径(px)。規模が大きいほど円を
+// 大きく表示し、地図を一目見て地震の規模感を掴みやすくする
+// （2026-09-26追加）。M3.0〜M8.0の範囲を半径5px〜22pxへ線形マッピングし、
+// 範囲外は上下限にクランプする。マグニチュード不明（0以下・null等）の
+// 場合は、不明を小さく/大きく見せて誤解を招かないよう、固定の中間値に
+// フォールバックする。
+function magnitudeRadius(mag) {
+  const MIN_MAG = 3.0, MAX_MAG = 8.0;
+  const MIN_R = 5, MAX_R = 22;
+  const m = Number(mag);
+  if (!m || m <= 0) return 9;
+  const clamped = Math.min(Math.max(m, MIN_MAG), MAX_MAG);
+  const ratio = (clamped - MIN_MAG) / (MAX_MAG - MIN_MAG);
+  return MIN_R + ratio * (MAX_R - MIN_R);
+}
+
 function clearMarkers() {
   for (const m of markers) map.removeLayer(m);
   markers = [];
@@ -557,11 +623,24 @@ function clearMarkers() {
 function renderMarkers(records) {
   clearMarkers();
   const pts = [];
-  for (const r of records) {
+  // 最大震度が大きい地震ほど後から描画し、地図上で重なった際に前面に
+  // 表示されるようにする（震度が同じ場合はマグニチュードが大きい方を
+  // 優先。2026-09-26追加）。Leafletは同一ペイン内では後から追加した
+  // レイヤーほど手前に表示されるため、震度の小さい順にソートしてから
+  // 描画すればよい（circleMarkerは既定でoverlayPaneに描画され、上の
+  // landFillPaneより常に手前に来るため、地図の塗りつぶしとの重なりは
+  // そもそも考慮不要）。
+  const sorted = records.slice().sort((a, b) => {
+    const sa = a.max_scale != null ? a.max_scale : -1;
+    const sb = b.max_scale != null ? b.max_scale : -1;
+    if (sa !== sb) return sa - sb;
+    return (a.magnitude || 0) - (b.magnitude || 0);
+  });
+  for (const r of sorted) {
     if (r.latitude == null || r.longitude == null) continue;
     const color = scaleColor(r.max_scale);
     const marker = L.circleMarker([r.latitude, r.longitude], {
-      radius: 7, color: color, fillColor: color, fillOpacity: 0.75, weight: 1,
+      radius: magnitudeRadius(r.magnitude), color: color, fillColor: color, fillOpacity: 0.75, weight: 1,
     }).addTo(map);
     let popup = '<b>' + escapeHtml(r.hypocenter_name) + '</b><br>' +
       escapeHtml(r.time_display) + '<br>' +
@@ -813,6 +892,11 @@ class SystemCog(commands.Cog):
         self._web_app = None
         self._web_runner = None
 
+        # 【2026-10-01追加】on_ready の再発火（Discordゲートウェイ再接続時）で
+        # 繰り返すべきでない処理（Web Dashboard起動・スラッシュコマンド同期・
+        # 起動通知）を初回のみ実行するためのフラグ。
+        self._startup_tasks_done = False
+
     # ===============================
     # Cog起動・終了
     # ===============================
@@ -877,30 +961,45 @@ class SystemCog(commands.Cog):
                 f"(有効={DIGEST_ENABLED}, 間隔={DIGEST_INTERVAL})"
             )
 
-        if _test_runner_module.CLI_TEST_MODE:
-            # CLIテストモード（python3 bot.py --test_xxx ...）では、
-            # systemd の本番プロセス（discord-bot.service）が既に同じ
-            # WEB_DASHBOARD_PORT を使用中の可能性が高いため、Web Dashboard
-            # の起動自体をスキップする（ポート衝突エラーの発生源を断つ）。
-            logger.info(
-                "CLIテストモードのため Web ダッシュボードの起動をスキップします"
-                "（本番プロセスとのポート衝突を回避）"
-            )
-        elif os.getenv("WEB_DASHBOARD_ENABLED", "true").lower() == "true":
-            self.bot.loop.create_task(self.start_web_dashboard())
+        # 【2026-10-01追加】以下はプロセス起動後の初回 on_ready のみ実行する
+        # （再接続による on_ready 再発火で、Dashboardのポート衝突エラー・
+        # コマンド同期の重複（レート制限）・起動通知の重複を起こさないため）。
+        if not self._startup_tasks_done:
+            self._startup_tasks_done = True
+            if _test_runner_module.CLI_TEST_MODE:
+                # CLIテストモード（python3 bot.py --test_xxx ...）では、
+                # systemd の本番プロセス（discord-bot.service）が既に同じ
+                # WEB_DASHBOARD_PORT を使用中の可能性が高いため、Web Dashboard
+                # の起動自体をスキップする（ポート衝突エラーの発生源を断つ）。
+                logger.info(
+                    "CLIテストモードのため Web ダッシュボードの起動をスキップします"
+                    "（本番プロセスとのポート衝突を回避）"
+                )
+            elif WEB_DASHBOARD_ENABLED:
+                # 【2026-09-24 修正】以前はここで
+                # os.getenv("WEB_DASHBOARD_ENABLED", "true") と直接・重複して
+                # 読み込んでおり、既定値が"true"だった。上部（本ファイル
+                # 76〜83行目）の2026-08-27修正で「既定値をfalseに統一した」
+                # はずが、この箇所だけ修正が反映されておらず、.env に
+                # WEB_DASHBOARD_ENABLEDを書かなければ、ドキュメント上は
+                # 無効なはずのWeb Dashboardが実際には起動してしまう状態が
+                # 残っていた（コードとREADME/.env.exampleの記載を突き合わせる
+                # 監査で発見）。モジュールレベル定数WEB_DASHBOARD_ENABLED
+                # （既定false）を参照するよう修正し、重複読み込みを解消した。
+                self.bot.loop.create_task(self.start_web_dashboard())
 
-        # スラッシュコマンドを同期
-        # 複数Cogに分割された今も、この処理は1箇所（SystemCog）でのみ実行すれば良い
-        # （bot.tree はグローバルなコマンドツリーであり、Cog横断で共有される）
-        try:
-            synced = await self.bot.tree.sync()
-            logger.info(f"スラッシュコマンドを同期しました（{len(synced)}件）")
-        except Exception as e:
-            logger.warning(f"スラッシュコマンド同期失敗: {e}")
+            # スラッシュコマンドを同期
+            # 複数Cogに分割された今も、この処理は1箇所（SystemCog）でのみ実行すれば良い
+            # （bot.tree はグローバルなコマンドツリーであり、Cog横断で共有される）
+            try:
+                synced = await self.bot.tree.sync()
+                logger.info(f"スラッシュコマンドを同期しました（{len(synced)}件）")
+            except Exception as e:
+                logger.warning(f"スラッシュコマンド同期失敗: {e}")
 
-        # Bot起動通知（管理者チャンネル宛）
-        # 他Cogのon_readyが出揃うのを少し待ってから送る
-        self.bot.loop.create_task(self._notify_startup())
+            # Bot起動通知（管理者チャンネル宛）
+            # 他Cogのon_readyが出揃うのを少し待ってから送る
+            self.bot.loop.create_task(self._notify_startup())
 
         logger.info("SystemCog: on_ready 完了")
 
@@ -1360,9 +1459,9 @@ class SystemCog(commands.Cog):
         else:
             api_lines.append("[ - ] **強震モニタ（画像解析検知）**: 無効")
 
-        # 長周期地震動モニタ（cogs/eew.py の vibration_monitor_loop。
-        # EEW発表時のみ一時的に動作し、jma_s/abrspmx_s画像＋振動レベルを
-        # 通知する別機能）。
+        # 長周期地震動モニタ（EEW発表時の通知。2026-10-05以降は
+        # cogs/kyoshin_monitor.py の通知ループが jma_s/abrspmx_s画像＋振動レベルを
+        # 通知する。EEW発表時のみ一時的に動作する別機能）。
         # 【設計メモ】この機能は「EEWが発表されていない」通常時は
         # 動いていないのが正常であり、他のAPI受信状況のような
         # 「長時間未受信=接続断」という判定は適用できない
@@ -1420,8 +1519,10 @@ class SystemCog(commands.Cog):
             f"{task_status(self._other_attr('fetch_quake_advisory'))} **fetch_quake_advisory**",
             f"{asyncio_task_status(self._kyoshin_attr('_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
             f"**kyoshin_monitor（画像解析検知）**{self._kyoshin_active_events_suffix()}",
-            f"{asyncio_task_status(self._eew_attr('vibration_monitor_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
-            f"**vibration_monitor_loop（長周期地震動モニタ、EEW発表時のみ稼働）**",
+            f"{asyncio_task_status(self._kyoshin_attr('_vib_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
+            f"**kyoshin_vibration（振動レベル受信）**",
+            f"{asyncio_task_status(self._kyoshin_attr('_notify_task')) if ENABLE_KYOSHIN else '[ - ] 無効'} "
+            f"**kyoshin_notify（強震モニタ通知。EEW時・検知時）**",
         ]
         embed.add_field(name="タスク稼働状態", value="\n".join(task_lines), inline=False)
 
@@ -1642,7 +1743,8 @@ class SystemCog(commands.Cog):
                     "fetch_long_period": _loop_status(self._other_attr("fetch_long_period")),
                     "fetch_quake_advisory": _loop_status(self._other_attr("fetch_quake_advisory")),
                     "kyoshin_monitor": _task_status(self._kyoshin_attr("_monitor_task")) if ENABLE_KYOSHIN else "disabled",
-                    "vibration_monitor_loop": _task_status(self._eew_attr("vibration_monitor_task")) if ENABLE_KYOSHIN else "disabled",
+                    "kyoshin_vibration": _task_status(self._kyoshin_attr("_vib_task")) if ENABLE_KYOSHIN else "disabled",
+                    "kyoshin_notify": _task_status(self._kyoshin_attr("_notify_task")) if ENABLE_KYOSHIN else "disabled",
                 }
                 if p2p_hub_stats is not None:
                     tasks_info["p2p_ws_hub_recv_count"] = p2p_hub_stats.get("recv_count", {})
@@ -1876,10 +1978,76 @@ class SystemCog(commands.Cog):
             """
             GET /quake_map - 地震情報履歴を地図・表で閲覧するHTMLページ。
             データ取得は /status/quake_history のみに依存し、地図・表の
-            描画自体はブラウザ側（Leaflet + 地理院タイル）で行うため、
-            /dashboard 同様Raspberry Pi側の追加負荷は生じない。
+            描画自体はブラウザ側（Leaflet + 独自の簡易ベースマップ。
+            2026-09-26に地理院タイルの使用を廃止し、GeoJSONベースの
+            ベクター描画に切り替えた）で行う。
             """
             return web.Response(text=_QUAKE_MAP_HTML, content_type="text/html")
+
+        async def gis_local_areas_handler(request):
+            """
+            GET /status/gis_local_areas - GIS地図描画機能（試験導入）用に
+            キャッシュ済みの細分区域GeoJSON（AreaForecastLocalE_GIS）の
+            features配列をそのまま返す（2026-09-18追加）。
+
+            /quake_map ページが、日本国内の陸地・区域境界線を描画する
+            簡易ベースマップの一部として使う（2026-09-26〜。地理院タイル
+            廃止に伴い、それまでの「任意の重ね描きオプション」から
+            「背景地図そのものの一部」に役割が変わった。/status/gis_countries
+            〈世界の国境データ〉と組み合わせて使う）。GIS_MAP_ENABLE=false、
+            またはキャッシュ未取得（core/gis_data.pyがまだダウンロード
+            していない）の場合は404を返す。ブラウザ側はこれを「使えない」
+            扱いにして、#mapのbackground（海色）のみの地図を表示すればよい。
+            """
+            if not GIS_MAP_ENABLE:
+                return web.json_response({"error": "GIS_MAP_ENABLE is false"}, status=404)
+            try:
+                features = gis_data.load_local_areas()
+            except Exception as e:
+                logger.error(f"/status/gis_local_areas エラー: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+            if not features:
+                return web.json_response({"error": "local_areas.geojson not cached yet"}, status=404)
+            return web.json_response(features)
+
+        async def gis_countries_handler(request):
+            """
+            GET /status/gis_countries - 世界の国境データ（datasets/
+            geo-countries、日本を除く）を間引いた軽量版のfeatures配列を
+            返す（2026-09-26追加。地理院タイル廃止に伴う変更）。
+
+            /quake_map ページが、地理院タイル廃止後の代替となる簡易
+            ベースマップ（国・地域の陸地を塗りつぶすだけのタイル不使用の
+            背景地図）として使う。core.gis_render.render_overseas_map
+            （遠地地震向けのDiscord通知画像）とも同じデータソース
+            （core.gis_data.load_countries_simplified）を共用している。
+
+            元データ（countries.geojson、258カ国）は約14MBあり、そのまま
+            毎回ブラウザへ配信するには大きすぎるため、
+            core.gis_data.build_simplified_countries_geojson() で
+            Ramer-Douglas-Peuckerアルゴリズムにより間引いた軽量版
+            （約0.6〜0.7MB）をディスクキャッシュして使い回す。生成は
+            CPUバウンドな処理（初回のみ数秒程度）のため、必ずワーカー
+            スレッドへオフロードして実行する（同じ理由の
+            gis_local_areas_handler とは異なり、こちらは初回生成が
+            重いため await ... run_in_executor(...) を使う）。
+
+            GIS_MAP_ENABLE=false、またはcountries.geojson自体が未取得
+            （core/gis_data.pyがまだダウンロードしていない）の場合は404。
+            ブラウザ側はこれを「使えない」扱いにして、#mapのbackground
+            （海色）のみの地図として表示すればよい。
+            """
+            if not GIS_MAP_ENABLE:
+                return web.json_response({"error": "GIS_MAP_ENABLE is false"}, status=404)
+            try:
+                loop = asyncio.get_running_loop()
+                features = await loop.run_in_executor(None, gis_data.load_countries_simplified)
+            except Exception as e:
+                logger.error(f"/status/gis_countries エラー: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+            if not features:
+                return web.json_response({"error": "countries.geojson not cached yet"}, status=404)
+            return web.json_response(features)
 
         async def dashboard_handler(request):
             """
@@ -1900,6 +2068,8 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status/quake_history", quake_history_handler)
             self._web_app.router.add_get("/status/eew_history", eew_history_handler)
             self._web_app.router.add_get("/quake_map", quake_map_handler)
+            self._web_app.router.add_get("/status/gis_local_areas", gis_local_areas_handler)
+            self._web_app.router.add_get("/status/gis_countries", gis_countries_handler)
             self._web_app.router.add_get("/dashboard", dashboard_handler)
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
