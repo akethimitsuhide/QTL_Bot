@@ -26,15 +26,50 @@ from core.helpers import safe_int, safe_float
 logger = logging.getLogger("QTLBot")
 
 # 地域ごとの予想震度の上限が「以上」（上限なし。気象庁電文 To="over"、
-# P2P地震情報 scaleTo=99）であることを表す Shindo2 の値。
-# 【2026-09-22 追加】Wolfx側は電文由来の "over" 相当の値を Shindo2 に
-# 入れてくる可能性があるため、両方の表記を「上限なし」として扱う。
+# P2P地震情報 scaleTo=99）であることを表す値。
+#
+# 【2026-10-05 変更】WarnArea[].Shindo1 / Shindo2 の意味を Wolfx API 仕様に
+# 統一した。Shindo1＝地域の最大震度、Shindo2＝地域の最小震度（どちらも
+# 「5弱」「6強」等の文字列）。PLUM法の発表では Shindo2 は null/None になる。
+# 上限なし（「以上」）は、最大震度を表す Shindo1 側に OPEN_UPPER_LABEL（または
+# "over"）を入れ、Shindo2 に下限を入れて表す（例: Shindo1="以上", Shindo2="5弱"
+# → 「震度5弱以上」）。P2P地震情報の変換（convert_p2p_eew_to_wolfx）も同じ形式で出力する。
 OPEN_UPPER_LABEL = "以上"
 OPEN_UPPER_LABELS = (OPEN_UPPER_LABEL, "over")
 
 
-def _is_open_upper(shindo2: str) -> bool:
-    return shindo2 in OPEN_UPPER_LABELS
+def _norm_shindo(value) -> str | None:
+    """
+    WarnArea の Shindo1/Shindo2 の値を正規化する。
+    None・空文字・"null"/"none"（大文字小文字不問）・"不明" は未設定（None）として扱う。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("null", "none") or text == "不明":
+        return None
+    return text
+
+
+def _area_shindo(area: dict, is_assumption: bool = False) -> tuple[str | None, str | None, bool]:
+    """
+    WarnArea 1件から (最大震度, 最小震度, 上限なしか) を返す（Wolfx仕様）。
+
+    - 上限なし（Shindo1 が「以上」/"over"）: (None, 下限, True)。下限が無ければ (None, None, True)
+    - PLUM法（is_assumption）: Shindo2 は使わず、(Shindo1 または Shindo2, None, False)
+    - それ以外: (Shindo1, Shindo2, False)。どちらか未設定ならもう一方だけで1値として扱う
+    """
+    s1 = _norm_shindo(area.get("Shindo1"))
+    s2 = _norm_shindo(area.get("Shindo2"))
+    if s1 is not None and s1.lower() in [x.lower() for x in OPEN_UPPER_LABELS]:
+        return None, s2, True
+    if is_assumption:
+        return (s1 or s2), None, False
+    if s1 is None:
+        return s2, None, False
+    if s2 is None or s1 == s2:
+        return s1, None, False
+    return s1, s2, False
 
 
 def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
@@ -164,23 +199,26 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             if kind_code in ("10", "19"):
                 has_warn = True
 
-            shindo1 = scale_map.get(sf, "不明")
-            if st == 99 and not is_plum:
-                # 上限なし（「以上」）。build_forecast_groups 等が
-                # 「震度5弱以上」と表示できるよう、専用の表記で渡す。
-                # PLUM法（is_plum）の場合はこの分岐に入らず、下の
-                # scale_map.get(st, shindo1) が st=99 に対応するキーを
-                # 持たないため自然に shindo1 へフォールバックする
-                # （＝Wolfx側のPLUM法表示と同じ「程度」表記になる）。
-                shindo2 = OPEN_UPPER_LABEL
+            # Wolfx仕様: Shindo1＝最大震度、Shindo2＝最小震度（PLUM法・片方のみ判明は None）。
+            # P2P の scaleFrom＝最小、scaleTo＝最大。scaleTo=99（上限なし）は
+            # Shindo1 に「以上」、Shindo2 に下限を入れる（非PLUM法のみ。PLUM法は
+            # scaleTo=99 を無視し、Shindo1 に推定値、Shindo2 は None）。
+            low  = scale_map.get(sf) if sf != -1 else None
+            high = scale_map.get(st) if st not in (-1, 99) else None
+            if is_plum:
+                shindo1, shindo2 = (low or high), None
+            elif st == 99:
+                shindo1, shindo2 = (OPEN_UPPER_LABEL, low) if low else (None, None)
+            elif high and low:
+                shindo1, shindo2 = high, low
             else:
-                shindo2 = scale_map.get(st, shindo1)
+                shindo1, shindo2 = (high or low), None
 
             warn_areas.append({
                 "Chiiki":      area.get("name", ""),
                 "Pref":        area.get("pref", ""),
-                "Shindo1":     shindo1,
-                "Shindo2":     shindo2,
+                "Shindo1":     shindo1,   # 最大震度（Wolfx仕様）
+                "Shindo2":     shindo2,   # 最小震度（PLUM法等は None）
                 "Type":        kind_type_map.get(kind_code, "警報"),
                 "KindCode":    kind_code,
                 # arrivalTime は null の場合があるので None → "" に正規化
@@ -340,6 +378,11 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
     WarnArea配列から「震度X程度」「震度X〜Y程度」ラベルごとに地域名を
     グルーピングした dict（ラベル → [地域名, ...]）を返す。
 
+    【2026-10-05 変更】Wolfx API 仕様（Shindo1＝最大震度、Shindo2＝最小震度、
+    PLUM法では Shindo2 は null/None）に従い、見出しは Shindo1〜Shindo2 の順で
+    組み立てる（値の大小による並べ替えはしない）。Shindo2 が未設定または Shindo1
+    と同値なら「震度X程度」。以下の2026-09までの経緯は旧仕様（Shindo1＝下限）での記録。
+
     【2026-08-27 追加】単一EEW通知（notify_eew）と複数EEWサマリー通知
     （「複数の緊急地震速報が発表されています」）の両方で全く同じ
     グルーピングロジックが必要になったため、重複を避けてここに共通化した。
@@ -366,44 +409,19 @@ def build_forecast_groups(warn_areas: list, int_map: dict, is_assumption: bool =
         chiiki = area.get("Chiiki")
         if not chiiki:
             continue
-        shindo1 = area.get("Shindo1", "不明")
-        shindo2 = area.get("Shindo2", shindo1)
+        high, low, is_open = _area_shindo(area, is_assumption)
 
-        if _is_open_upper(shindo2):
-            # 【2026-09-22 追加、2026-09-24 訂正】上限なし（「震度5弱以上」）。
-            # P2P地震情報の scaleTo=99（気象庁電文 To="over"）由来。
-            # convert_p2p_eew_to_wolfx側でPLUM法（is_assumption）のエリアは
-            # scaleTo=99でもこの表記（Shindo2="以上"）にならないよう
-            # 処理しているため、この分岐に到達するのは非PLUM法のエリアのみ
-            # （PLUM法は下の is_assumption 分岐で「震度X程度」表記になる。
-            # Wolfx側のPLUM法表示と揃えるための仕様）。下限が不明なら
-            # 表示できる情報が無いため除外する。
-            if shindo1 != "不明":
-                forecast_groups[f"震度{shindo1}以上"].append(chiiki)
+        if is_open:
+            # 上限なし（「震度5弱以上」）。下限が不明なら表示できる情報が無いため除外する。
+            if low is not None:
+                forecast_groups[f"震度{low}以上"].append(chiiki)
             continue
-
-        if is_assumption:
-            # shindo1が不明でもshindo2（上限値）が判明していればそちらを使う
-            display_val = shindo1 if shindo1 != "不明" else shindo2
-            if display_val != "不明":
-                forecast_groups[f"震度{display_val}程度"].append(chiiki)
+        if high is None:
             continue
-
-        if shindo1 == "不明" and shindo2 == "不明":
-            # 上限・下限とも不明な場合のみ、本当に表示できないため除外する
-            continue
-
-        if shindo1 == "不明":
-            # 下限は不明だが上限（例: 7以上→"7"）は判明している
-            label = f"震度{shindo2}程度"
-        elif shindo2 == "不明":
-            # 逆に上限のみ不明なケース（通常は起こりにくいが念のため対応）
-            label = f"震度{shindo1}程度"
-        elif shindo1 == shindo2:
-            label = f"震度{shindo1}程度"
+        if low is None:
+            label = f"震度{high}程度"
         else:
-            r1, r2 = shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map)
-            high, low = (shindo1, shindo2) if r1 >= r2 else (shindo2, shindo1)
+            # Wolfx仕様どおり Shindo1（最大）〜Shindo2（最小）の順で表示する
             label = f"震度{high}〜{low}程度"
         forecast_groups[label].append(chiiki)
     return dict(forecast_groups)
@@ -434,29 +452,16 @@ def build_region_shindo_map(warn_areas: list, int_map: dict, is_assumption: bool
         chiiki = area.get("Chiiki")
         if not chiiki:
             continue
-        shindo1 = area.get("Shindo1", "不明")
-        shindo2 = area.get("Shindo2", shindo1)
-
-        if _is_open_upper(shindo2):
+        high, low, is_open = _area_shindo(area, is_assumption)
+        if is_open:
             # 上限なし（「以上」）: 下限を、その地域の代表震度として塗る
-            # （build_forecast_groups と同じ考え方。2026-09-22追加）
-            if shindo1 == "不明":
+            if low is None:
                 continue
-            code = shindo_rank(shindo1, int_map)
-        elif is_assumption:
-            display_val = shindo1 if shindo1 != "不明" else shindo2
-            if display_val == "不明":
-                continue
-            code = shindo_rank(display_val, int_map)
+            code = shindo_rank(low, int_map)
         else:
-            if shindo1 == "不明" and shindo2 == "不明":
+            if high is None:
                 continue
-            if shindo1 == "不明":
-                code = shindo_rank(shindo2, int_map)
-            elif shindo2 == "不明":
-                code = shindo_rank(shindo1, int_map)
-            else:
-                code = max(shindo_rank(shindo1, int_map), shindo_rank(shindo2, int_map))
+            code = max(shindo_rank(high, int_map), shindo_rank(low, int_map) if low else 0)
 
         if code:  # shindo_rank は未知の値に対して0を返すため、0は除外する
             targets = [chiiki]
