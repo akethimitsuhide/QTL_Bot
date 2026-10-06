@@ -772,3 +772,27 @@ def test_oversized_body_is_rejected():
         finally:
             await runner.cleanup()
     asyncio.run(run())
+
+# ===== Quake.One list.json の実際の形式（2026-10-06）=====
+# EventID をキーとする辞書。以前は {"objects": [...]} か配列を想定していて、
+# 起動時に「list.json の形式が想定外です」と失敗していた。
+def test_quake_one_list_accepts_real_dict_keyed_by_event_id():
+    from core.quake_failover import QuakeOneSource
+    real = {
+        "20261006134727": {"ReportDateTime": "2026-10-06T13:49:00+09:00", "OriginDateTime": "2026-10-06T13:47:00+09:00",
+                           "MaxInt": "1", "Magnitude": "2.9", "Hypocenter": "熊本県熊本地方"},
+        "20261006104835": {"ReportDateTime": "2026-10-06T10:50:00+09:00", "OriginDateTime": "2026-10-06T10:48:00+09:00",
+                           "MaxInt": "1", "Magnitude": "3.6", "Hypocenter": "浦河沖"},
+    }
+
+    async def run():
+        items = await QuakeOneSource().list_items(_Session({"http://files.quake.one/list.json": _Resp(raw=json.dumps(real).encode())}))
+        assert {i.key for i in items} == {"20261006134727@2026-10-06T13:49:00+09:00",
+                                          "20261006104835@2026-10-06T10:50:00+09:00"}
+        assert all(i.url.startswith("http://files.quake.one/2026") and i.reported_at is not None for i in items)
+        for bad in ("[]", "{}", "1", '"x"'):
+            try:
+                await QuakeOneSource().list_items(_Session({"http://files.quake.one/list.json": _Resp(raw=bad.encode())}))
+            except RuntimeError:
+                assert bad in ("1", '"x"')       # 辞書でも配列でもない形式だけがエラー
+    asyncio.run(run())

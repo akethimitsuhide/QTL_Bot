@@ -759,7 +759,11 @@ async def _get_json_limited(session, url: str, max_bytes: int = QUAKE_ONE_MAX_BY
 class QuakeOneSource(QuakeFallbackSource):
     """
     Quake.One Static API（http://files.quake.one/）。
-      list.json                     : 最新の地震（{"objects": [{EventID, ReportDateTime, ...}]}）
+      list.json                     : 最新の地震。実際の応答（2026-10-06に実機で確認）は
+                                      {"EventID": {ReportDateTime, OriginDateTime, MaxInt,
+                                      Magnitude, Hypocenter}, ...}（EventID をキーとする辞書）。
+                                      以前の想定 {"objects": [{EventID, ...}]} や配列形式も
+                                      受け付ける（形式が変わった場合に備える）
       :EventID/info.json            : 震源要素・最大震度・コメント
       :EventID/smallScalePoints.json: 細分区域別の震度と区域の重心（GeoJSON）
     同じ EventID でも続報で ReportDateTime が変わるため、既知判定のキーは
@@ -777,14 +781,23 @@ class QuakeOneSource(QuakeFallbackSource):
 
     async def list_items(self, session) -> list[SourceItem]:
         data = await _get_json_limited(session, f"{QUAKE_ONE_BASE}/list.json")
-        objs = data.get("objects") if isinstance(data, dict) else data
-        if not isinstance(objs, list):
+        # 【2026-10-06 修正】実際の list.json は EventID をキーとする辞書
+        # （{"20261006134727": {"ReportDateTime": ..., ...}, ...}）で、従来の想定
+        # （{"objects": [...]} か配列）と違っていたため、起動時に
+        # 「list.json の形式が想定外です」と失敗していた。
+        if isinstance(data, dict) and isinstance(data.get("objects"), list):
+            entries = [("", o) for o in data["objects"]]
+        elif isinstance(data, dict):
+            entries = list(data.items())
+        elif isinstance(data, list):
+            entries = [("", o) for o in data]
+        else:
             raise RuntimeError("list.json の形式が想定外です")
         items = []
-        for o in objs:
+        for key, o in entries:
             if not isinstance(o, dict):
                 continue
-            eid = _text(o.get("EventID"))
+            eid = _text(o.get("EventID")) or _text(key)
             rdt = _clean_text(o.get("ReportDateTime"), 40)
             if not _QUAKE_ONE_EVENT_ID_RE.match(eid):
                 continue
