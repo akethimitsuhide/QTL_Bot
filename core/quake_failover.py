@@ -673,6 +673,25 @@ class JmaJsonSource(QuakeFallbackSource):
         return jma_quake_to_p2p(detail, list_title=item.title, item_key=item.key)
 
 
+async def _read_body_limited(resp, max_bytes: int) -> bytes:
+    """
+    レスポンス本文を最大 max_bytes まで読み切って返す。上限を超えたら RuntimeError。
+
+    【2026-10-06 修正】以前は `await resp.content.read(max_bytes + 1)` で読んでいたが、
+    aiohttp の StreamReader.read(n) は「その時点で届いている分（最大n）」しか返さないため、
+    本文が複数のTCPチャンクに分かれて届くと途中で切れた本文を返していた
+    （jma_xml の「unclosed token」エラーの原因）。iter_chunked で最後まで読む。
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError("応答が想定より大きいため破棄しました")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class JmaXmlSource(QuakeFallbackSource):
     """気象庁防災情報XML（随時フィード eqvol.xml と各電文XML）。"""
     name = "jma_xml"
@@ -680,8 +699,9 @@ class JmaXmlSource(QuakeFallbackSource):
 
     @staticmethod
     async def _read_limited(resp) -> bytes:
-        body = await resp.content.read(XML_MAX_BYTES + 1)
-        if len(body) > XML_MAX_BYTES:
+        try:
+            body = await _read_body_limited(resp, XML_MAX_BYTES)
+        except RuntimeError:
             raise RuntimeError("XMLが想定より大きいため破棄しました")
         # 気象庁の電文XML・フィードは DTD/ENTITY 宣言を使わない。外部からの
         # 入力をパースするため、実体参照の展開による資源枯渇（Billion laughs
@@ -732,9 +752,7 @@ async def _get_json_limited(session, url: str, max_bytes: int = QUAKE_ONE_MAX_BY
     async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SEC)) as resp:
         if resp.status != 200:
             raise RuntimeError(f"HTTP {resp.status}")
-        raw = await resp.content.read(max_bytes + 1)
-    if len(raw) > max_bytes:
-        raise RuntimeError("応答が想定より大きいため破棄しました")
+        raw = await _read_body_limited(resp, max_bytes)
     return json.loads(raw)
 
 

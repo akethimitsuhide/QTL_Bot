@@ -14,6 +14,8 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("BOT_TOKEN", "x")
 os.environ.setdefault("CHANNEL_ID", "1")
@@ -344,6 +346,11 @@ class _Resp:
 
     async def read(self, n=-1):
         return self._raw
+
+    async def iter_chunked(self, n):
+        # 本文を小さなチャンクに分けて返す（2026-10-06: 本番コードは iter_chunked で読む）
+        for i in range(0, len(self._raw), 7):
+            yield self._raw[i:i + 7]
 
     async def __aenter__(self):
         return self
@@ -697,4 +704,71 @@ def test_controller_never_lists_a_rate_limited_source_faster_than_its_interval()
             await c.poll_once()
         assert all(b - a >= 0.29 for a, b in zip(stamps, stamps[1:]))
         assert c._next_sleep == 0.3                        # 次回待ちも取得元の間隔
+    asyncio.run(run())
+
+
+# ===== 本文の読み取り（2026-10-06修正）=====
+# resp.content.read(n) は届いている分しか返さず、複数チャンクの本文が途中で切れていた
+# （jma_xml の「unclosed token」エラーの原因）。
+def _serve(body: bytes, chunk: int = 16384):
+    from aiohttp import web
+
+    async def handler(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        for i in range(0, len(body), chunk):
+            await resp.write(body[i:i + chunk])
+            await asyncio.sleep(0.002)
+        await resp.write_eof()
+        return resp
+    app = web.Application()
+    app.router.add_get("/", handler)
+    return app
+
+
+def test_body_split_across_chunks_is_read_completely_for_xml_and_json():
+    import json
+    import aiohttp
+    from aiohttp import web
+    from core import quake_failover as qf
+
+    xml = b"<feed>\n" + b"".join(b"<entry><title>t%d</title></entry>\n" % i for i in range(5000)) + b"</feed>\n"
+    js = json.dumps({"objects": [{"EventID": "x%d" % i} for i in range(5000)]}).encode()
+
+    async def run():
+        for body in (xml, js):
+            runner = web.AppRunner(_serve(body))
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(f"http://127.0.0.1:{port}/") as r:
+                        assert await qf.JmaXmlSource._read_limited(r) == body if body is xml else True
+                    if body is js:
+                        assert await qf._get_json_limited(s, f"http://127.0.0.1:{port}/") == json.loads(js)
+            finally:
+                await runner.cleanup()
+    asyncio.run(run())
+
+
+def test_oversized_body_is_rejected():
+    import aiohttp
+    from aiohttp import web
+    from core import quake_failover as qf
+
+    async def run():
+        runner = web.AppRunner(_serve(b"x" * 100_000))
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"http://127.0.0.1:{port}/") as r:
+                    with pytest.raises(RuntimeError):
+                        await qf._read_body_limited(r, 50_000)
+        finally:
+            await runner.cleanup()
     asyncio.run(run())
