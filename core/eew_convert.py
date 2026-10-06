@@ -183,6 +183,9 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             # 推定値そのもの）を採用する。これにより、後段の
             # build_forecast_groups等は「震度X程度」ラベルを持つ
             # is_assumption分岐（Wolfx側と共通のロジック）に流れる。
+            # 【2026-10-06 訂正】上記の「常にscaleFrom」は、scaleTo が有限のときは
+            # scaleTo（最大震度）を採る（scaleTo が 99/-1 のときだけ scaleFrom）に変更した。
+            # 全体の最大震度（下の effective）と地域別の Shindo1 を一致させるため。
             if st == 99 and not is_plum:
                 effective, is_open = sf, sf != -1
             elif st != -1 and st != 99:
@@ -201,12 +204,17 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
 
             # Wolfx仕様: Shindo1＝最大震度、Shindo2＝最小震度（PLUM法・片方のみ判明は None）。
             # P2P の scaleFrom＝最小、scaleTo＝最大。scaleTo=99（上限なし）は
-            # Shindo1 に「以上」、Shindo2 に下限を入れる（非PLUM法のみ。PLUM法は
-            # scaleTo=99 を無視し、Shindo1 に推定値、Shindo2 は None）。
+            # Shindo1 に「以上」、Shindo2 に下限を入れる（非PLUM法のみ）。
+            #
+            # 【2026-10-06 修正】PLUM法は Shindo2 を持たない（常に None）ため、Shindo1 に
+            # 入れる値は「最大震度」＝scaleTo（有限のとき）を採る。scaleTo が上限なし（99）
+            # または不明（-1）のときは scaleFrom（下限）を採る。以前は常に scaleFrom を採って
+            # おり、scaleFrom≠scaleTo（例: 45〜50）のとき地域別の表示は「5弱程度」なのに
+            # 全体の予想最大震度（MaxIntensity）は scaleTo 由来の「5強」となる食い違いがあった。
             low  = scale_map.get(sf) if sf != -1 else None
             high = scale_map.get(st) if st not in (-1, 99) else None
             if is_plum:
-                shindo1, shindo2 = (low or high), None
+                shindo1, shindo2 = (high or low), None
             elif st == 99:
                 shindo1, shindo2 = (OPEN_UPPER_LABEL, low) if low else (None, None)
             elif high and low:

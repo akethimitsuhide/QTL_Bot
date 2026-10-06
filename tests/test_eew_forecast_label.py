@@ -69,5 +69,19 @@ def test_p2p_conversion_outputs_wolfx_semantics():
     assert wa == {"A": ("5弱", "4"), "B": ("以上", "5弱"), "C": ("3", "3")}
     plum = convert_p2p_eew_to_wolfx({**base, "earthquake": {**base["earthquake"], "condition": "仮定震源要素"},
                                      "areas": areas})
+    # PLUM法: Shindo2 は常に None。Shindo1 は scaleTo（最大震度。上限なし99・不明は scaleFrom）
     assert {w["Chiiki"]: (w["Shindo1"], w["Shindo2"]) for w in plum["WarnArea"]} == {
-        "A": ("4", None), "B": ("5弱", None), "C": ("3", None)}
+        "A": ("5弱", None), "B": ("5弱", None), "C": ("3", None)}
+
+
+def test_plum_area_value_matches_overall_max_intensity():
+    base = {"issue": {"eventId": "1", "serial": "1"},
+            "earthquake": {"hypocenter": {"name": "x", "depth": 10, "magnitude": 1}, "originTime": "",
+                           "condition": "仮定震源要素"}}
+    for sf, st, expect in ((45, 50, "5強"), (50, 99, "5強"), (55, 99, "6弱"), (45, -1, "5弱"), (-1, 50, "5強")):
+        out = convert_p2p_eew_to_wolfx({**base, "areas": [{"name": "A", "scaleFrom": sf, "scaleTo": st,
+                                                           "kindCode": "19"}]})
+        assert out["WarnArea"][0]["Shindo1"] == expect and out["WarnArea"][0]["Shindo2"] is None
+        assert out["MaxIntensity"] == expect                      # 全体の最大震度と地域別が一致する
+        g = build_forecast_groups(out["WarnArea"], INT_MAP, is_assumption=True)
+        assert g == {f"震度{expect}程度": ["A"]}
