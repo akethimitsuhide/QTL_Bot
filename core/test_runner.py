@@ -270,7 +270,11 @@ TEST_TARGETS = {
     "quake": {
         "cog_name": "QuakeInfoCog",
         "method": "notify_quake",
-        "expected_fields": ["Hypocenter", "MaxIntensity"],
+        # 【2026-10-07 修正】以前は ["Hypocenter", "MaxIntensity"]（Wolfx形式＝eew用のキー）
+        # になっており、正しいP2P地震情報形式（code=551）のJSONを渡しても「対象JSONを
+        # 取り違えている可能性があります」と誤警告が出ていた。notify_quake が実際に読む
+        # のは issue（type）・earthquake（hypocenter/maxScale等）なので、それで検証する。
+        "expected_fields": ["issue", "earthquake"],
     },
     "tsunami": {
         "cog_name": "TsunamiCog",

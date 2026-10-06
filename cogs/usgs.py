@@ -181,8 +181,15 @@ class UsgsCog(commands.Cog, AudioMixin):
           all_hour（過去1時間）はポーリング間隔10分と相性が悪く、
           cooldown が切れた既存IDを再通知してしまう。
         - 新規判定: last_usgs_ids に存在しない event_id のみ通知
-        - cooldown: 通知済み ID を USGS_NOTIFICATION_COOLDOWN 秒保持し、
+        - cooldown: 通知済み ID を最低 USGS_NOTIFICATION_COOLDOWN 秒保持し、
           時刻切れエントリは都度削除してメモリリークを防止
+
+        【2026-10-07 修正】通知済み ID は、cooldown を過ぎても、その ID が今回の
+        フィード（all_day＝過去24時間分）に載っている間は保持する。以前は cooldown
+        （既定300秒）だけで削除していたため、ポーリング間隔（既定600秒）より
+        cooldown が短いと、同じ地震が毎回の取得で再通知されていた（実機ログで、同じ
+        2件が10分ごとに通知され続けることを確認）。フィードから消えた ID は、
+        従来どおり cooldown 経過後に削除する。
         """
         if not USGS_ENABLED:
             return
@@ -216,10 +223,12 @@ class UsgsCog(commands.Cog, AudioMixin):
 
                 now = time.time()
 
-                # cooldown 切れエントリを削除（メモリリーク防止）
+                # cooldown 切れエントリを削除（メモリリーク防止）。ただし、今回のフィードに
+                # まだ載っている ID は残す（残さないと同じ地震を再通知してしまう）
+                feed_ids = {f.get("id") for f in features if isinstance(f, dict)}
                 self.last_usgs_ids = {
                     eid: ts for eid, ts in self.last_usgs_ids.items()
-                    if now - ts < USGS_NOTIFICATION_COOLDOWN
+                    if eid in feed_ids or now - ts < USGS_NOTIFICATION_COOLDOWN
                 }
 
                 notified = 0
