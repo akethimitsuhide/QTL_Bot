@@ -240,6 +240,13 @@ logger = logging.getLogger("QTLBot")
 # Cog登録処理に反映できるようにする。
 _test_target = parse_test_args(sys.argv[1:])
 
+# CLIテストの終了コード（run_*_cli_test が sys.exit(n) したときの n を保持する）。
+# on_ready（discord.py のイベントタスク）内で SystemExit を送出すると
+# "Task exception was never retrieved" の長大なトレースバックが出るうえ
+# 後始末（main() の finally）の前にループが中断されるため、
+# ここで受け止めて、asyncio.run 完了後に改めて sys.exit する。
+_test_exit_code = 0
+
 # ===============================
 # Discord Bot 初期化
 # ===============================
@@ -260,17 +267,22 @@ if _test_target is not None:
         # discord.pyのon_readyは全Cogのon_readyと並行して発火しうるため、
         # 確実性を優先して固定の待機時間を設ける。
         await asyncio.sleep(2)
-        if cog_key == "__all__":
-            # --test_all: json_path にはfixtureディレクトリのパスが入る
-            await run_all_cli_tests(bot, json_path)
-        elif cog_key == "__auto__":
-            # --test_auto: json_path には判定対象のJSONファイルパスが入る
-            # （2026-08-30 追加。core/test_runner.py の
-            #  run_auto_cli_test / sniff_test_target 参照）
-            await run_auto_cli_test(bot, json_path)
-        else:
-            await run_cli_test(bot, cog_key, json_path)
+        global _test_exit_code
+        try:
+            if cog_key == "__all__":
+                # --test_all: json_path にはfixtureディレクトリのパスが入る
+                await run_all_cli_tests(bot, json_path)
+            elif cog_key == "__auto__":
+                # --test_auto: json_path には判定対象のJSONファイルパスが入る
+                # （2026-08-30 追加。core/test_runner.py の
+                #  run_auto_cli_test / sniff_test_target 参照）
+                await run_auto_cli_test(bot, json_path)
+            else:
+                await run_cli_test(bot, cog_key, json_path)
 
+        except SystemExit as e:
+            _test_exit_code = e.code if isinstance(e.code, int) else 1
+            await bot.close()  # 二重呼び出しは無害（既に閉じていれば即return）
 
 async def main():
     setup_logging()
@@ -413,3 +425,5 @@ if __name__ == "__main__":
         logger.error(f"予期しないエラーで終了: {e}\n{traceback.format_exc()}")
     finally:
         logger.info("Bot シャットダウン完了")
+        if _test_exit_code:
+            sys.exit(_test_exit_code)
