@@ -113,7 +113,10 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     事例があったための追加（sniff_test_target 参照）。
     検出時は特別な cog_key "__auto__" を使う。
     """
-    parser = argparse.ArgumentParser(add_help=False)
+    # 【2026-10-07 修正】allow_abbrev=False: 既定の前方一致（--test_ews を --test_e と
+    # 書ける等）を無効化する。曖昧な省略形は argparse が usage 付きの長文エラーで
+    # 終了してしまい、逆に一意に決まる省略形は意図しない対象が実行されうるため。
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--test_all", metavar="FIXTURES_DIR", default=None)
     parser.add_argument("--test_auto", metavar="JSON_PATH", default=None)
     for cog_key, target in TEST_TARGETS.items():
@@ -126,7 +129,26 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
             )
 
     # 未知の引数（Botの他オプション等）があってもエラーにしない
-    known_args, _ = parser.parse_known_args(argv)
+    known_args, unknown = parser.parse_known_args(argv)
+
+    # 【2026-10-07 追加】--test で始まるのに未知の引数は、打ち間違いとして即終了する。
+    # 以前は parse_known_args が黙って無視するため、例えば "--test_aut x.json" の
+    # ような打ち間違いで「テストモードではなく本番モードのBot」が起動し、
+    # 実チャンネルへ実通知を送りうる危険があった（省略形が無効化された今は
+    # 省略形の入力でも同様に起こりうるため、ガードを必須とする）。
+    typo_args = [a for a in unknown if a.startswith("--test")]
+    if typo_args:
+        import difflib
+        valid = ["--test_all", "--test_auto"] + [f"--test_{k}" for k in TEST_TARGETS]
+        print(f"[TEST] エラー: 不明なテスト引数です: {' '.join(typo_args)}")
+        for bad in typo_args:
+            name = bad.split("=", 1)[0]
+            close = difflib.get_close_matches(name, valid, n=3, cutoff=0.6)
+            if close:
+                print(f"[TEST]   もしかして: {', '.join(close)}")
+        print("[TEST]   形式が分からないJSONは --test_auto <JSON> で自動判定できます")
+        print("[TEST]   通常起動を避けるため、Botは起動せず終了します")
+        sys.exit(2)
 
     global CLI_TEST_MODE
 
@@ -154,6 +176,40 @@ def parse_test_args(argv: list[str]) -> tuple[str, str] | None:
     return None
 
 
+def normalize_test_json(data):
+    """
+    【2026-10-07 追加】読み込んだテスト用JSONを、各 notify_* が期待する
+    「1件分の dict」に正規化する。
+
+    経緯: P2P地震情報API（/v2/history）や気象庁の list.json は、レスポンスが
+    「要素1件以上の配列（[ {...} ]）」で返る。それをそのまま保存した
+    fixture（例: eew_sample7.json）を --test_auto に渡すと、sniff_test_target()
+    が isinstance(data, dict) を前提としているため「判定不能」になっていた。
+    --test_eew_p2p / --test_tsunami 等でも、dict 前提の validate_expected_fields・
+    data_converter が配列を受け取って誤動作するため、読み込み口（load_test_json）
+    で一括して先頭1件へ展開する。
+
+    - dict            : そのまま返す
+    - [dict, ...]     : 先頭の1件を返す（2件以上なら注意を表示。履歴APIは新しい順）
+    - 空配列・dict以外: ValueError（呼び出し側でエラー扱い）
+    """
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        if not data:
+            raise ValueError("JSONが空の配列です（テストに使える要素がありません）")
+        if not isinstance(data[0], dict):
+            raise ValueError(
+                f"JSON配列の先頭要素がオブジェクトではありません（{type(data[0]).__name__}）"
+            )
+        if len(data) > 1:
+            print(f"[TEST] 注意: JSONが{len(data)}件の配列です。先頭の1件のみを使用します（残りは無視）")
+        else:
+            print("[TEST] 注意: JSONが1件の配列です。中身の1件を取り出して使用します")
+        return data[0]
+    raise ValueError(f"JSONの最上位がオブジェクト/配列ではありません（{type(data).__name__}）")
+
+
 def load_test_json(json_path: str, exit_on_error: bool = True):
     """
     テスト用JSONファイルを読み込む。
@@ -166,10 +222,15 @@ def load_test_json(json_path: str, exit_on_error: bool = True):
         --test_all 実行中に1つのfixtureが壊れていても他の対象の実行を
         止めないよう、呼び出し元（run_all_cli_tests）で対象単位に
         キャッチしてスキップ扱いにするため。
+        送出される例外は FileNotFoundError / ValueError
+        （json.JSONDecodeError と normalize_test_json の失敗は ValueError）。
+
+    【2026-10-07 修正】配列形式のJSONは normalize_test_json() で先頭1件の
+    dict に展開して返す（戻り値は常に dict）。
     """
     try:
         with open(json_path, encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except FileNotFoundError:
         print(f"[TEST] エラー: JSONファイルが見つかりません: {json_path}")
         if exit_on_error:
@@ -177,6 +238,14 @@ def load_test_json(json_path: str, exit_on_error: bool = True):
         raise
     except json.JSONDecodeError as e:
         print(f"[TEST] エラー: JSONの構文が不正です: {json_path}\n  {e}")
+        if exit_on_error:
+            sys.exit(1)
+        raise
+
+    try:
+        return normalize_test_json(raw)
+    except ValueError as e:
+        print(f"[TEST] エラー: {json_path}: {e}")
         if exit_on_error:
             sys.exit(1)
         raise
@@ -802,7 +871,7 @@ async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path
         # からの呼び出しでも、ここでは常に例外を送出させて捕捉する
         # （単体実行時の sys.exit(1) は run_cli_test 側で別途保証する）。
         data = load_test_json(json_path, exit_on_error=False)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, ValueError):
         return False
 
     validate_expected_fields(cog_key, data)
@@ -1095,7 +1164,7 @@ async def run_auto_cli_test(bot, json_path: str) -> None:
 
     try:
         data = load_test_json(json_path, exit_on_error=False)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, ValueError):
         await bot.close()
         sys.exit(1)
 
@@ -1106,8 +1175,11 @@ async def run_auto_cli_test(bot, json_path: str) -> None:
         print("[TEST]   既存のどの形式（EEW/地震情報/津波/地震感知情報/火山/USGS等）にも")
         print("[TEST]   一致しないようです。sniff_test_target() のフィンガープリントに")
         print("[TEST]   該当ルールが無い新しい形式である可能性があります。")
-        print(f"[TEST]   トップレベルキー: {list(data.keys()) if isinstance(data, dict) else '（dict以外）'}")
-        logger.warning(f"CLIテスト（自動判定）失敗: 候補が見つかりません（トップレベルキー: {list(data.keys()) if isinstance(data, dict) else data}）")
+        print(f"[TEST]   トップレベルキー: {list(data.keys()) if isinstance(data, dict) else f'（dict以外: {type(data).__name__}）'}")
+        logger.warning(
+            f"CLIテスト（自動判定）失敗: 候補が見つかりません"
+            f"（トップレベルキー: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}）"
+        )
         print(banner)
         await bot.close()
         sys.exit(1)

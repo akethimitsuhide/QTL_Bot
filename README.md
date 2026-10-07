@@ -959,6 +959,21 @@ python3 bot.py --test_tsunami_observation_tide      VTSE51_tide.json  # 各地�
 [TEST] 判定結果: --test_tsunami_forecast 相当と判断しました (TsunamiCog.notify_tsunami_forecast)
 ```
 
+**【2026-10-07 追加】配列形式のJSON・テスト引数の打ち間違い対策**
+
+- P2P地震情報API（`/v2/history`）や気象庁の `list.json` は、レスポンスが
+  `[ {...} ]` の**配列**で返る。それをそのまま保存したfixtureを `--test_auto` 等に
+  渡すと「判定不能」になっていたため、読み込み口（`load_test_json`）で配列の**先頭1件**
+  を取り出して扱うようにした（`--test_<対象>` / `--test_all` でも共通。2件以上の配列では
+  注意を表示して先頭のみを使用、空配列・オブジェクト以外はエラー終了）。
+- `--test` で始まる未知の引数（打ち間違い）は、**Botを起動せずに**候補付きのメッセージを
+  表示して終了する（終了コード2）。以前は黙って無視され、テストではなく本番モードの
+  Botが起動して実チャンネルへ通知しうる危険があった。あわせて引数の前方一致
+  （省略形）は無効化した（`--test_eew_p2p` などは正式名で指定すること）。
+- テスト失敗時の `sys.exit` は `bot.py` の `on_ready` で受け止め、
+  "Task exception was never retrieved" のトレースバックを出さずに終了コードを返す。
+- 回帰テスト: `tests/test_test_runner_input.py`
+
 **【2026-08-31 追加】P2P生EEW（code=556）と地震情報（code=551）の判定改善**
 以前は`issue`+`earthquake`という同じトップレベルキーを共有するため、
 P2P地震情報の緊急地震速報（生形式）が誤って「地震情報」と判定されて
