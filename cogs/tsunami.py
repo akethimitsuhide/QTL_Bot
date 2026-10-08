@@ -84,6 +84,7 @@ from core.tsunami_speech import (
 )
 from core.helpers import truncate_embed_description, format_jma_time
 from core.audio import AudioMixin
+from core.startup_guard import reported_since_start
 from core.gis_render import (
     render_tsunami_map, render_tsunami_observation_map, render_tsunami_offshore_map,
 )
@@ -317,7 +318,11 @@ class TsunamiCog(commands.Cog, AudioMixin):
 
                     # 初回ポーリングは「起動前から存在した情報」の可能性が高いため通知しない。
                     # IDだけ記録し、次回以降の本当の新規発生時のみ通知する。
-                    if not self._tsunami_observation_initialized:
+                    # 【2026-10-09修正】発表時刻が起動後の情報は、初回ポーリングでも通知する
+                    # （起動直後のJMA取得失敗で初期化が遅れ、その間に発表された本物の
+                    # 新規情報が「既存情報」として握りつぶされるのを防ぐ）。
+                    if (not self._tsunami_observation_initialized
+                            and not reported_since_start(report_time)):
                         self.last_tsunami_observation_id = current_key
                         logger.info(f"fetch_tsunami_observation: 起動時の既存情報を記録（通知はしない） ID={event_id}")
                         break
@@ -726,7 +731,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     area.get("name"): area.get("grade", "Unknown")
                     for area in areas if area.get("name")
                 }
-                gis_image_bytes = render_tsunami_map(area_grades)
+                gis_image_bytes = await asyncio.to_thread(render_tsunami_map, area_grades)
                 if gis_image_bytes:
                     gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                     embed.set_image(url="attachment://gis_map.png")
@@ -1035,7 +1040,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             gis_file = None
-            gis_image_bytes = render_tsunami_observation_map(map_points, area_grades=area_grades)
+            gis_image_bytes = await asyncio.to_thread(render_tsunami_observation_map, map_points, area_grades=area_grades)
             if gis_image_bytes:
                 gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                 embed.set_image(url="attachment://gis_map.png")
@@ -1161,7 +1166,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             gis_file = None
-            gis_image_bytes = render_tsunami_offshore_map(map_points)
+            gis_image_bytes = await asyncio.to_thread(render_tsunami_offshore_map, map_points)
             if gis_image_bytes:
                 gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                 embed.set_image(url="attachment://gis_map.png")
@@ -1327,7 +1332,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # ── GIS地図描画（津波予報区の色分け。既存のrender_tsunami_mapを再利用）──
             gis_file = None
             if state.areas:
-                gis_image_bytes = render_tsunami_map(state.areas)
+                gis_image_bytes = await asyncio.to_thread(render_tsunami_map, state.areas)
                 if gis_image_bytes:
                     gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                     embed.set_image(url="attachment://gis_map.png")
@@ -1585,22 +1590,20 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 color=color
             )
             
-            # メンション
-            mention = ""
-            if any("大津波警報" in str(x) for x in forecast_items):
-                mention = f"{self.bot.user.mention} "
+            # 【2026-10-09削除】大津波警報時にBot自身へのメンション（self.bot.user.mention）を
+            # 付けていたが、Bot自身へのメンションは誰にも通知されず意図が不明だったため廃止。
 
             # ── GIS地図描画（試験導入、2026-09-16〜） ──
             gis_file = None
-            gis_image_bytes = render_tsunami_map(area_grades)
+            gis_image_bytes = await asyncio.to_thread(render_tsunami_map, area_grades)
             if gis_image_bytes:
                 gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                 embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(mention, embed=embed, file=gis_file)
+                await channel.send(embed=embed, file=gis_file)
             else:
-                await channel.send(mention, embed=embed)
+                await channel.send(embed=embed)
             if not is_test:
                 record_delivery(True, "津波観測情報")
                 record_notification("津波観測情報", title)
@@ -1871,7 +1874,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     for lv, grade in level_to_grade.items()
                     for area_name in [n for names in level_height_areas.get(lv, {}).values() for n in names]
                 }
-                gis_image_bytes = render_tsunami_map(area_grades)
+                gis_image_bytes = await asyncio.to_thread(render_tsunami_map, area_grades)
                 if gis_image_bytes:
                     gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                     embed.set_image(url="attachment://gis_map.png")
