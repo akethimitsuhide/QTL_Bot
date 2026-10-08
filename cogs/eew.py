@@ -616,7 +616,8 @@ class EewCog(commands.Cog, AudioClientMixin):
             )
             gis_images = []
             if data.get("isWarn"):
-                gis_images.append(render_eew_warn_map(
+                gis_images.append(await asyncio.to_thread(
+                    render_eew_warn_map,
                     warn_region_names=cumulative_warn_areas,
                     hypocenter_lonlat=hypo_lonlat,
                     is_plum=is_plum,
@@ -624,14 +625,16 @@ class EewCog(commands.Cog, AudioClientMixin):
                 # 地域別震度が無い場合、render_shindo_map は震源のみの地図に
                 # なり1枚目と重複するため、描画自体を行わない。
                 if region_shindo:
-                    gis_images.append(render_shindo_map(
+                    gis_images.append(await asyncio.to_thread(
+                        render_shindo_map,
                         region_shindo=region_shindo,
                         hypocenter_lonlat=hypo_lonlat,
                         is_plum=is_plum,
                         enlarge_hypocenter_mark=True,
                     ))
             else:
-                gis_images.append(render_shindo_map(
+                gis_images.append(await asyncio.to_thread(
+                    render_shindo_map,
                     region_shindo=region_shindo,
                     hypocenter_lonlat=hypo_lonlat,
                     is_plum=is_plum,

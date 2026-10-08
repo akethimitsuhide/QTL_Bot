@@ -136,26 +136,37 @@ _MAX_DIM = 1400     # 長辺がこのpxを超えないよう、短辺を基準�
 # LANCZOSで縮小することでアンチエイリアスをかける（県境・海岸線の
 # ギザつきを滑らかにする）。_scale は現在の描画倍率で、_supersampled()
 # コンテキスト内でのみ _SUPERSAMPLE になり、それ以外は1（無効）。
-# 本モジュールの描画は常に単一スレッド・同期的に1回の呼び出しで完結する
-# ため、グローバル変数での管理でも競合の心配はない。
+# 【2026-10-09変更】各 render_* は asyncio.to_thread でワーカースレッドから
+# 呼ばれる（描画中にイベントループが止まり、EEW通知・強震モニタ・Discord
+# ハートビートが遅れるのを防ぐため）。複数の描画が同時にスレッドで走っても
+# 倍率が混ざらないよう、_scale はスレッドごとに独立した値（threading.local）
+# として保持する。
 _SUPERSAMPLE = 2
-_scale = 1
+
+
+class _RenderState(threading.local):
+    """スレッドごとの描画状態（threading.local は各スレッドで __init__ が再実行される）。"""
+
+    def __init__(self) -> None:
+        self.scale = 1
+
+
+_state = _RenderState()
 
 
 def _px(value: float) -> int:
-    """現在の描画倍率（_scale）を適用したピクセル値を返す。"""
-    return round(value * _scale)
+    """現在のスレッドの描画倍率（_state.scale）を適用したピクセル値を返す。"""
+    return round(value * _state.scale)
 
 
 @contextmanager
 def _supersampled():
-    """このwithブロック内でのみ _px() が _SUPERSAMPLE 倍の値を返すようにする。"""
-    global _scale
-    _scale = _SUPERSAMPLE
+    """このwithブロック内でのみ _px() が _SUPERSAMPLE 倍の値を返すようにする（スレッド内で有効）。"""
+    _state.scale = _SUPERSAMPLE
     try:
-        yield _scale
+        yield _state.scale
     finally:
-        _scale = 1
+        _state.scale = 1
 
 # ===============================
 # 陸地／海の色分け（2026-09-17追加）

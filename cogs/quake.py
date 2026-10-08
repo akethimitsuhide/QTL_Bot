@@ -701,7 +701,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             hypo_lonlat = (longitude, latitude)
 
         if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
-            overseas = render_overseas_map(hypo_lonlat)
+            overseas = await asyncio.to_thread(render_overseas_map, hypo_lonlat)
             return [overseas] if overseas else []
 
         region_shindo = None
@@ -722,7 +722,8 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             else:
                 station_shindo = shindo_map
 
-        primary = render_shindo_map(
+        primary = await asyncio.to_thread(
+            render_shindo_map,
             region_shindo=region_shindo,
             station_shindo=station_shindo,
             hypocenter_lonlat=hypo_lonlat,
@@ -734,7 +735,8 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             code >= _STATION_ZOOM_MIN_SHINDO for code in station_shindo.values()
         )
         if has_strong_station:
-            normal_view = render_shindo_map(
+            normal_view = await asyncio.to_thread(
+                render_shindo_map,
                 station_shindo=station_shindo,
                 hypocenter_lonlat=hypo_lonlat,
                 station_zoom_priority=False,
