@@ -216,6 +216,10 @@ class UsgsCog(commands.Cog, AudioMixin):
 
                 if not features:
                     logger.debug("USGS: no earthquakes in the past 24 hours")
+                    # 【2026-10-09修正】フィードが空でも初期化済みにする（そうしないと、
+                    # 次に載った最初の本物の地震が「起動時の既存情報」として記録のみ・
+                    # 通知なしになる）。
+                    self._usgs_initialized = True
                     return
 
                 self._last_recv["usgs"] = datetime.now()
@@ -397,9 +401,9 @@ class UsgsCog(commands.Cog, AudioMixin):
             gis_image_bytes = None
             if lon is not None and lat is not None:
                 if is_outside_japan_bbox(lon, lat):
-                    gis_image_bytes = render_overseas_map((lon, lat))
+                    gis_image_bytes = await asyncio.to_thread(render_overseas_map, (lon, lat))
                 else:
-                    gis_image_bytes = render_shindo_map(hypocenter_lonlat=(lon, lat))
+                    gis_image_bytes = await asyncio.to_thread(render_shindo_map, hypocenter_lonlat=(lon, lat))
             if gis_image_bytes:
                 gis_file = discord.File(io.BytesIO(gis_image_bytes), filename="gis_map.png")
                 embed.set_image(url="attachment://gis_map.png")

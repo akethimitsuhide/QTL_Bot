@@ -38,6 +38,7 @@ from core.helpers import format_jma_time
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.startup_guard import reported_since_start
 
 logger = logging.getLogger("QTLBot")
 
@@ -59,6 +60,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
         # -- 火山情報の差分検知状態 --
         self._last_volcano_event_id = None
         self._last_volcano_info_map: dict = {}
+        self._volcano_info_initialized = False  # 初回ポーリング済みか（空リストでも立てる）
         self.volcano_task = None
         self._last_volcano_recv_time = None
         self._volcano_recv_count = 0
@@ -66,12 +68,14 @@ class VolcanoCog(commands.Cog, AudioMixin):
         # -- 噴火速報の差分検知状態 --
         self.eruption_task = None
         self._last_eruption_id = None
+        self._eruption_initialized = False
         self._last_eruption_recv_time = None
         self._eruption_recv_count = 0
 
         # -- 噴火警報の差分検知状態 --
         self.warning_task = None
         self._last_warning_id = None
+        self._warning_initialized = False
         self._last_warning_recv_time = None
         self._warning_recv_count = 0
 
@@ -208,6 +212,12 @@ class VolcanoCog(commands.Cog, AudioMixin):
                 info_list: list[dict] = await resp.json(content_type=None)
                 if not info_list:
                     logger.debug("Volcano: info.json is empty")
+                    # 【2026-10-09修正】空リストでも初期化済みにする（そうしないと、
+                    # 以後 prev が空のまま「初回扱い」が続き、最初の本物の発表が
+                    # 記録のみで通知されなかった）。
+                    if not self._volcano_info_initialized:
+                        self._volcano_info_initialized = True
+                        self._last_volcano_info_map = {}
                     return
 
         except (asyncio.TimeoutError, aiohttp.ClientError) as e:
@@ -223,11 +233,20 @@ class VolcanoCog(commands.Cog, AudioMixin):
         prev: dict[str, dict] = getattr(self, "_last_volcano_info_map", {})
         curr: dict[str, dict] = {item["eventId"]: item for item in info_list if item.get("eventId")}
 
-        if not prev:
-            # 初回起動: 通知はせず現在のリストを記録するだけ（起動時のうるさい通知を防ぐ）
-            logger.info(f"Volcano: 初回起動 現在の情報を記録（通知はしない） 件数={len(curr)}")
-            self._last_volcano_info_map = curr
-            return
+        if not self._volcano_info_initialized:
+            # 初回起動: 通知はせず現在のリストを記録するだけ（起動時のうるさい通知を防ぐ）。
+            # ただし発表時刻が起動後の情報は新規として通知する（2026-10-09追加。起動直後の
+            # 取得失敗で初期化が遅れた間に発表された情報の取りこぼし防止）。
+            self._volcano_info_initialized = True
+            target_ids = [
+                eid for eid, item in curr.items()
+                if reported_since_start(item.get("reportDatetime"))
+            ]
+            if not target_ids:
+                logger.info(f"Volcano: 初回起動 現在の情報を記録（通知はしない） 件数={len(curr)}")
+                self._last_volcano_info_map = curr
+                return
+            logger.info(f"Volcano: 起動後に発表された{len(target_ids)}件を通知します {target_ids}")
         else:
             # 2回目以降: 新規 eventId、または reportDatetime が更新された eventId を対象にする
             target_ids = []
@@ -403,6 +422,10 @@ class VolcanoCog(commands.Cog, AudioMixin):
                 items: list[dict] = await resp.json(content_type=None)
 
             if not items:
+                # 【2026-10-09修正】噴火速報は平常時に空リストが普通。空でも初期化済みに
+                # する（従来はNoneのまま残り、最初の本物の噴火速報が「初回起動
+                # スキップ」として握りつぶされていた）。
+                self._eruption_initialized = True
                 return
 
             # リストは昇順 → 末尾が最新
@@ -411,10 +434,13 @@ class VolcanoCog(commands.Cog, AudioMixin):
             if not event_id:
                 return
 
-            if self._last_eruption_id is None:
-                self._last_eruption_id = event_id
-                logger.info(f"Eruption: 初回起動スキップ eventId={event_id}")
-                return
+            if not self._eruption_initialized:
+                self._eruption_initialized = True
+                if not reported_since_start(latest.get("reportDatetime")):
+                    self._last_eruption_id = event_id
+                    logger.info(f"Eruption: 初回起動スキップ eventId={event_id}")
+                    return
+                logger.info(f"Eruption: 起動後に発表された情報のため通知します eventId={event_id}")
             if self._last_eruption_id == event_id:
                 return
 
@@ -508,6 +534,8 @@ class VolcanoCog(commands.Cog, AudioMixin):
                 items: list[dict] = await resp.json(content_type=None)
 
             if not items:
+                # 【2026-10-09修正】空リストでも初期化済みにする（噴火速報と同型）
+                self._warning_initialized = True
                 return
 
             # リストは昇順 → 末尾が最新
@@ -516,10 +544,13 @@ class VolcanoCog(commands.Cog, AudioMixin):
             if not event_id:
                 return
 
-            if self._last_warning_id is None:
-                self._last_warning_id = event_id
-                logger.info(f"Warning: 初回起動スキップ eventId={event_id}")
-                return
+            if not self._warning_initialized:
+                self._warning_initialized = True
+                if not reported_since_start(latest.get("reportDatetime")):
+                    self._last_warning_id = event_id
+                    logger.info(f"Warning: 初回起動スキップ eventId={event_id}")
+                    return
+                logger.info(f"Warning: 起動後に発表された情報のため通知します eventId={event_id}")
             if self._last_warning_id == event_id:
                 return
 

@@ -58,6 +58,7 @@ from core.helpers import format_jma_time, truncate_embed_description, parse_jma_
 from core.audio import AudioMixin
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
+from core.startup_guard import reported_since_start
 from core.gis_render import (
     render_shindo_map, render_long_period_map, is_outside_japan_bbox, render_overseas_map,
 )
@@ -83,6 +84,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
         # -- 長周期地震動の重複排除状態 --
         self.last_long_period_id = None
+        self._long_period_initialized = False  # 初回ポーリング済みか（空リストでも立てる）
 
         # -- 気象庁その他情報の重複排除状態（7日間TTL） --
         self.last_advisory_ids: dict = {}
@@ -131,8 +133,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         （2026-09-17追加。notify_long_period・notify_hypocenter_update
         で使用）。震源が日本国外の場合は render_overseas_map に切り替える
         （cogs/quake.py の _render_quake_gis_map と同じ判定方法。
-        2026-09-26に地理院タイル重ね合わせを廃止し独自ベクター地図化、
-        同期関数になったためawait不要）。
+        2026-09-26に地理院タイル重ね合わせを廃止し独自ベクター地図化。
+        2026-10-09: 描画は同期処理のため asyncio.to_thread で実行する）。
 
         lat, lon が None（震源座標を取得できなかった場合）は None を返す。
         GIS_MAP_ENABLE=false・外部データ未取得の場合も各render関数が
@@ -141,8 +143,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         if lat is None or lon is None:
             return None
         if is_outside_japan_bbox(lon, lat):
-            return render_overseas_map((lon, lat))
-        return render_shindo_map(hypocenter_lonlat=(lon, lat))
+            return await asyncio.to_thread(render_overseas_map, (lon, lat))
+        return await asyncio.to_thread(render_shindo_map, hypocenter_lonlat=(lon, lat))
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -177,15 +179,24 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                     return
                 data = await resp.json()
                 if not data:
+                    # 【2026-10-09修正】平常時にlist.jsonが空リストを返す場合、従来は
+                    # 初期化されないまま残り、その後の最初の本物の新規発表が
+                    # 「起動時の既存情報」として記録のみ・通知なしになっていた
+                    # （津波観測と同型の不具合）。空＝既存情報なしとして初期化する。
+                    self._long_period_initialized = True
                     return
 
                 latest = data[0]
                 event_id = latest.get("eid")
 
-                if self.last_long_period_id is None:
-                    self.last_long_period_id = event_id
-                    logger.info(f"fetch_long_period: 起動時の既存最新情報を記録（通知はしない） eid={event_id}")
-                    return
+                if not self._long_period_initialized:
+                    self._long_period_initialized = True
+                    if not reported_since_start(latest.get("rdt")):
+                        self.last_long_period_id = event_id
+                        logger.info(f"fetch_long_period: 起動時の既存最新情報を記録（通知はしない） eid={event_id}")
+                        return
+                    # 起動後に発表済み（起動直後の取得失敗で初期化が遅れた等）→ 下で新規として通知
+                    logger.info(f"fetch_long_period: 起動後に発表された情報のため通知します eid={event_id}")
 
                 if self.last_long_period_id != event_id:
                     self.last_long_period_id = event_id
@@ -209,7 +220,11 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 if resp.status != 200:
                     return
                 data = await resp.json()
-                if not data or not isinstance(data, list):
+                if not isinstance(data, list):
+                    return
+                if not data:
+                    # 【2026-10-09修正】空リストでも初期化済みにする（fetch_long_periodと同型）
+                    self._quake_advisory_initialized = True
                     return
 
                 ADVISORY_TTL = 7 * 24 * 3600
@@ -237,7 +252,9 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
                     # 初回ポーリングは「起動前から存在した情報」の可能性が高いため通知しない。
                     # IDだけ記録し、次回以降の本当の新規発生時のみ通知する。
-                    if not self._quake_advisory_initialized:
+                    # 【2026-10-09修正】発表時刻が起動後の情報は、初回ポーリングでも通知する
+                    # （起動直後の取得失敗で初期化が遅れた場合の取りこぼし防止）。
+                    if not self._quake_advisory_initialized and not reported_since_start(item.get("rdt")):
                         logger.info(f"fetch_quake_advisory: 起動時の既存情報を記録（通知はしない） eid={event_id}")
                         continue
 
@@ -383,9 +400,13 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             hypo_map = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
             if hypo_map:
                 gis_images.append(hypo_map)
-            station_map = render_long_period_map(lg_stations=lg_stations, hypocenter_lonlat=(
-                (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
-            ))
+            station_map = await asyncio.to_thread(
+                render_long_period_map,
+                lg_stations=lg_stations,
+                hypocenter_lonlat=(
+                    (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
+                ),
+            )
             if station_map:
                 gis_images.append(station_map)
 
