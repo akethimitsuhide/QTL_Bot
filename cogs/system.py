@@ -64,6 +64,7 @@ from core.config import (
 from core.constants import INT_MAP
 from core.cog_utils import get_cog_attr
 from core.notification_log import load_notification_history
+from core.error_notify_handler import AdminErrorLogHandler, SKIP_ATTR
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
 from core.eew_history_log import load_eew_history, display_record as display_eew_record
@@ -861,6 +862,7 @@ class SystemCog(commands.Cog):
 
         # -- エラー監視 --
         self.error_summary_task: asyncio.Task | None = None
+        self._error_log_handler: AdminErrorLogHandler | None = None  # ERROR ログ → 管理者通知
         self.error_notification_cache: dict = {}
         self.error_count_today: int = 0
         self.daily_error_summary: dict = {}
@@ -908,6 +910,10 @@ class SystemCog(commands.Cog):
         logger.info("SystemCog: aiohttp セッションを作成しました")
 
     async def cog_unload(self):
+        if self._error_log_handler is not None:
+            logger.removeHandler(self._error_log_handler)
+            self._error_log_handler = None
+
         if self.error_summary_task and not self.error_summary_task.done():
             self.error_summary_task.cancel()
             logger.info("error_summary_worker タスクをキャンセルしました")
@@ -941,6 +947,12 @@ class SystemCog(commands.Cog):
                 logger.info(f"管理者チャンネルを設定しました（ID: {ADMIN_CHANNEL_ID}）")
             else:
                 logger.warning(f"管理者チャンネルが見つかりません（ID: {ADMIN_CHANNEL_ID}）")
+
+        # ERROR 以上のログを管理者チャンネルへ自動通知する（on_ready の再発火で二重登録しない）
+        if self.admin_channel and self._error_log_handler is None:
+            self._error_log_handler = AdminErrorLogHandler(self.bot.loop, self.notify_error)
+            logger.addHandler(self._error_log_handler)
+            logger.info("ERROR ログの管理者チャンネル自動通知を有効にしました")
 
         if not self.error_summary_task:
             self.error_summary_task = self.bot.loop.create_task(self.error_summary_worker())
@@ -2410,6 +2422,12 @@ class SystemCog(commands.Cog):
                     return
 
             self.error_notification_cache[error_hash] = current_time
+            # 通知済みハッシュの肥大化防止（ERROR ログ連動で件数が増えうるため）
+            if len(self.error_notification_cache) > 500:
+                self.error_notification_cache = {
+                    h: t for h, t in self.error_notification_cache.items()
+                    if (current_time - t).total_seconds() < ERROR_NOTIFICATION_TTL
+                }
 
             self.error_count_today += 1
             if error_type not in self.daily_error_summary:
@@ -2431,7 +2449,8 @@ class SystemCog(commands.Cog):
             logger.info(f"エラー通知を送信しました: {error_type}")
 
         except Exception as e:
-            logger.error(f"エラー通知の送信に失敗: {e}", exc_info=True)
+            # skip_admin_notify: この失敗ログが再び管理者通知を呼ぶ再帰を防ぐ
+            logger.error(f"エラー通知の送信に失敗: {e}", exc_info=True, extra={SKIP_ATTR: True})
 
     async def error_summary_worker(self) -> None:
         """毎日 00:00 に日次エラーサマリーを生成・送信"""
@@ -2474,7 +2493,7 @@ class SystemCog(commands.Cog):
                 logger.info("error_summary_worker が停止しました")
                 break
             except Exception as e:
-                logger.error(f"error_summary_worker エラー: {e}", exc_info=True)
+                logger.error(f"error_summary_worker エラー: {e}", exc_info=True, extra={SKIP_ATTR: True})
                 await asyncio.sleep(60)
 
     # ===============================
