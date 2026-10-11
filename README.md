@@ -378,10 +378,24 @@ python3 bot.py
 | `WEB_DASHBOARD_PORT` | 8080 | Web Dashboard のポート番号 |
 | `WEB_DASHBOARD_HOST` | 127.0.0.1 | Web Dashboard がバインドするアドレス。このマシン以外からアクセスさせたい場合のみ `0.0.0.0` 等を指定する |
 | `WEB_DASHBOARD_ALLOWED_IPS` | （空） | アクセスを許可するクライアントIPのカンマ区切りリスト（CIDR表記可）。空の場合はIP制限なし |
+| `WEB_DASHBOARD_TOKEN` | （空） | アクセストークン。設定すると `/health` 以外の全ページ・APIで認証が必要になる。空の場合は認証なし |
 | `STATUS_HISTORY_INTERVAL` | 300 | `GET /dashboard`・`GET /status/history` 用のスナップショット記録間隔（秒） |
 | `STATUS_HISTORY_MAXLEN` | 288 | 保持するスナップショットの最大件数（古いものから自動破棄。デフォルトは300秒間隔で24時間分） |
 
 `WEB_DASHBOARD_HOST=0.0.0.0` にする場合は、`WEB_DASHBOARD_ALLOWED_IPS` で許可する IP を絞ることを強く推奨する（絞らないと、ネットワークによっては外部から誰でも `/status` 等にアクセスできる）。
+
+#### トークン認証（`WEB_DASHBOARD_TOKEN`）
+- ブラウザ: 未ログインで `/dashboard` などを開くと `/login` に移動する。トークンを入力するとセッションクッキーが発行され、7 日間ログイン状態が続く。`/logout` でログアウトできる。
+- `curl` など: `Authorization: Bearer <トークン>` ヘッダーを付ける。
+  ```bash
+  curl -H "Authorization: Bearer $WEB_DASHBOARD_TOKEN" http://localhost:8080/status | jq
+  ```
+- 認証不要なのは `/health`（`{"status": "online"}` のみ。外部の死活監視用）と `/login`・`/logout` だけ。`/health/full` を含む他はすべて認証が必要。
+- クッキーにトークン自体は入らない（トークンから導出した値）。トークンを変更すると既存のセッションはすべて無効になる。
+- 同一 IP からログインに 5 回失敗すると、5 分間そのIPからのログインを受け付けない。
+- 16 文字以上のランダムな文字列を推奨する（例: `python3 -c "import secrets; print(secrets.token_urlsafe(24))"`）。
+- クッキーは HttpOnly・SameSite=Lax。HTTPS 経由（リバースプロキシ等）のときだけ Secure も付く。素の HTTP で LAN 外へ公開する場合、トークンは平文で流れるため、`WEB_DASHBOARD_ALLOWED_IPS` や VPN との併用を推奨する。
+- `WEB_DASHBOARD_ALLOWED_IPS` と併用できる（IP 制限が先に適用される）。
 
 ### ステータス表示設定
 | 変数名 | 既定値 | 説明 |
@@ -547,6 +561,7 @@ python3 -m pytest tests/ -q
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
+| `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
 | `test_status_history_view.py` | `/qtl_status` 履歴オプションの表示整形 |
 | `test_error_notify_handler.py` | ERROR ログの管理者通知（対象レベル・再帰防止・スレッド・例外抽出） |
@@ -652,6 +667,7 @@ QTL_Bot/
 │   ├── test_runner.py        --test_*（CLI テスト）
 │   ├── logging_setup.py      ログ設定（ローテーション・重複抑制）
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
+│   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
 │   ├── status_history_view.py   /qtl_status 履歴オプションの表示整形
 │   ├── error_notify_handler.py  ERROR ログ → 管理者チャンネル通知のログハンドラー
 │   ├── qtlbot_log_files.py   qtlbot.log とローテーション世代の列挙

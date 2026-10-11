@@ -69,6 +69,7 @@ from core.config import (
 from core.constants import INT_MAP
 from core.command_access import ACCESS_ADMIN, is_allowed
 from core.status_history_view import format_quake_line, format_eew_line, join_lines
+from core.dashboard_auth import DashboardAuth, MIN_RECOMMENDED_TOKEN_LENGTH
 from core.cog_utils import get_cog_attr
 from core.notification_log import load_notification_history
 from core.error_notify_handler import AdminErrorLogHandler, SKIP_ATTR
@@ -105,6 +106,12 @@ _raw_allowed_ips = os.getenv("WEB_DASHBOARD_ALLOWED_IPS", "").strip()
 WEB_DASHBOARD_ALLOWED_IPS = [
     ip.strip() for ip in _raw_allowed_ips.split(",") if ip.strip()
 ] if _raw_allowed_ips else []
+
+# Web Dashboard のアクセストークン（任意）。設定すると /health 以外の全ページ・APIで認証が必要になる。
+#   - curl 等: Authorization: Bearer <トークン> ヘッダー
+#   - ブラウザ: /login でトークンを入力 → セッションクッキー（7日間）
+# 空（未設定）の場合は認証なし（従来どおり）。詳細は core/dashboard_auth.py。
+WEB_DASHBOARD_TOKEN = os.getenv("WEB_DASHBOARD_TOKEN", "").strip()
 
 # GET /dashboard で返すグラフ表示用HTML。
 # Chart.js は CDN から読み込み、グラフの計算・描画処理はすべて
@@ -1774,6 +1781,15 @@ class SystemCog(commands.Cog):
 
             return await handler(request)
 
+        # トークン認証（WEB_DASHBOARD_TOKEN が設定されている場合のみ）。
+        # IP 許可リストの後段に置く（許可外IPはトークンの試行すらできない）。
+        dashboard_auth = DashboardAuth(WEB_DASHBOARD_TOKEN) if WEB_DASHBOARD_TOKEN else None
+        if dashboard_auth and len(WEB_DASHBOARD_TOKEN) < MIN_RECOMMENDED_TOKEN_LENGTH:
+            logger.warning(
+                f"WEB_DASHBOARD_TOKEN が短すぎます（{MIN_RECOMMENDED_TOKEN_LENGTH}文字以上を推奨）。"
+                f"推測されにくいランダムな文字列にしてください"
+            )
+
         async def status_handler(request):
             """GET /status - ステータス JSON を返す（拡充版）"""
             try:
@@ -2177,7 +2193,12 @@ class SystemCog(commands.Cog):
             return web.Response(text=html, content_type="text/html")
 
         try:
-            self._web_app = web.Application(middlewares=[ip_allowlist_middleware])
+            _middlewares = [ip_allowlist_middleware]
+            if dashboard_auth:
+                _middlewares.append(dashboard_auth.middleware)
+            self._web_app = web.Application(middlewares=_middlewares)
+            if dashboard_auth:
+                dashboard_auth.register_routes(self._web_app)  # /login /logout
             self._web_app.router.add_get("/status", status_handler)
             self._web_app.router.add_get("/status/history", history_handler)
             self._web_app.router.add_get("/status/notifications", notifications_handler)
@@ -2199,15 +2220,16 @@ class SystemCog(commands.Cog):
                 ip_note = f"許可IP: {', '.join(allowed_ips)}"
             else:
                 ip_note = "IP制限なし（WEB_DASHBOARD_HOSTのバインド範囲のみで制御）"
+            auth_note = "トークン認証あり" if dashboard_auth else "トークン認証なし"
             logger.info(
-                f"Web ダッシュボード起動: http://{host}:{port}/status ({ip_note})"
+                f"Web ダッシュボード起動: http://{host}:{port}/status ({ip_note}／{auth_note})"
             )
-            if host == "0.0.0.0" and not allowed_ips:
+            if host == "0.0.0.0" and not allowed_ips and not dashboard_auth:
                 logger.warning(
                     "Web Dashboard が 0.0.0.0（全アドレス）にバインドされ、"
-                    "かつ WEB_DASHBOARD_ALLOWED_IPS も未設定です。"
+                    "かつ WEB_DASHBOARD_ALLOWED_IPS・WEB_DASHBOARD_TOKEN も未設定です。"
                     "ネットワーク環境によっては外部から誰でもアクセスできる状態です。"
-                    "必要に応じて WEB_DASHBOARD_ALLOWED_IPS の設定を推奨します。"
+                    "必要に応じていずれかの設定を推奨します。"
                 )
         except OSError as e:
             # [Errno 98] Address already in use 等。ポートが既に使用中の
