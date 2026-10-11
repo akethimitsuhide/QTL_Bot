@@ -624,6 +624,27 @@ STATUS_SHOW_DISK   = _env_bool("STATUS_SHOW_DISK", True)
 STATUS_SHOW_UPTIME = _env_bool("STATUS_SHOW_UPTIME", True)
 
 # ===============================
+# !status / /qtl_status の実行権限
+# ===============================
+# モード: admin（管理者のみ・既定）/ all（全ユーザー）/ role（指定ロール＋管理者）
+# 履歴オプション（/qtl_status history:...）は本体とは独立に設定できる。
+# 不正値・role でロールID未設定の場合は admin に倒す（core/command_access.py）。
+from core.command_access import parse_access_mode, parse_role_ids, effective_mode  # noqa: E402
+
+QTL_STATUS_ROLE_IDS = parse_role_ids(os.getenv("QTL_STATUS_ROLE_IDS"), "QTL_STATUS_ROLE_IDS")
+QTL_STATUS_ACCESS = effective_mode(
+    parse_access_mode(os.getenv("QTL_STATUS_ACCESS"), "QTL_STATUS_ACCESS"),
+    QTL_STATUS_ROLE_IDS, "QTL_STATUS_ACCESS",
+)
+QTL_STATUS_HISTORY_ROLE_IDS = parse_role_ids(
+    os.getenv("QTL_STATUS_HISTORY_ROLE_IDS"), "QTL_STATUS_HISTORY_ROLE_IDS"
+)
+QTL_STATUS_HISTORY_ACCESS = effective_mode(
+    parse_access_mode(os.getenv("QTL_STATUS_HISTORY_ACCESS"), "QTL_STATUS_HISTORY_ACCESS"),
+    QTL_STATUS_HISTORY_ROLE_IDS, "QTL_STATUS_HISTORY_ACCESS",
+)
+
+# ===============================
 # 外部 API エンドポイント
 # ===============================
 WOLFX_WSS = "wss://ws-api.wolfx.jp/jma_eew"

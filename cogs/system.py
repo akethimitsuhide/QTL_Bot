@@ -34,8 +34,11 @@ import time
 import socket
 import logging
 import asyncio
+import traceback
 from datetime import datetime, timedelta
 from collections import deque
+
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -60,8 +63,12 @@ from core.config import (
     QUAKE_HISTORY_DEFAULT_LIMIT, QUAKE_HISTORY_CACHE_TTL_SEC,
     DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_ID,
     GIS_MAP_ENABLE,
+    QTL_STATUS_ACCESS, QTL_STATUS_ROLE_IDS,
+    QTL_STATUS_HISTORY_ACCESS, QTL_STATUS_HISTORY_ROLE_IDS,
 )
 from core.constants import INT_MAP
+from core.command_access import ACCESS_ADMIN, is_allowed
+from core.status_history_view import format_quake_line, format_eew_line, join_lines
 from core.cog_utils import get_cog_attr
 from core.notification_log import load_notification_history
 from core.error_notify_handler import AdminErrorLogHandler, SKIP_ATTR
@@ -810,6 +817,49 @@ loadAndRender();
 </body>
 </html>
 """
+
+
+# ===============================
+# !status / /qtl_status の実行権限（.env で切り替え）
+# ===============================
+# QTL_STATUS_ACCESS / QTL_STATUS_HISTORY_ACCESS: admin（既定）/ all / role
+# 判定ロジックは core/command_access.py。ここでは Discord の User/Member から
+# 「管理者か」「所持ロールID」を取り出して渡す。DM では User（Member ではない）
+# となり guild_permissions / roles が無いため、管理者でないものとして扱う。
+def _member_access_info(user) -> tuple[bool, list[int]]:
+    perms = getattr(user, "guild_permissions", None)
+    is_admin = bool(perms and perms.administrator)
+    role_ids = [r.id for r in getattr(user, "roles", [])]
+    return is_admin, role_ids
+
+
+def _can_use_status(user) -> bool:
+    is_admin, role_ids = _member_access_info(user)
+    return is_allowed(QTL_STATUS_ACCESS, QTL_STATUS_ROLE_IDS,
+                      is_admin=is_admin, member_role_ids=role_ids)
+
+
+def _can_use_status_history(user) -> bool:
+    is_admin, role_ids = _member_access_info(user)
+    return is_allowed(QTL_STATUS_HISTORY_ACCESS, QTL_STATUS_HISTORY_ROLE_IDS,
+                      is_admin=is_admin, member_role_ids=role_ids)
+
+
+def _status_default_permissions(func):
+    """
+    両方が admin（既定）のときだけ、Discord 側の既定権限を管理者に限定して
+    非管理者のコマンド一覧に出ないようにする（従来と同じ見え方）。
+    それ以外のモードでは Discord 側で制限すると許可したユーザーも使えなく
+    なるため付けない。実際の可否は常にコマンド内で判定する。
+    """
+    if QTL_STATUS_ACCESS == ACCESS_ADMIN and QTL_STATUS_HISTORY_ACCESS == ACCESS_ADMIN:
+        return discord.app_commands.default_permissions(administrator=True)(func)
+    return func
+
+
+async def _status_prefix_check(ctx) -> bool:
+    """!status 用チェック。False を返すと commands.CheckFailure になる。"""
+    return _can_use_status(ctx.author)
 
 
 class SystemCog(commands.Cog):
@@ -1602,7 +1652,7 @@ class SystemCog(commands.Cog):
         return embed
 
     @commands.command(name="status")
-    @commands.has_permissions(administrator=True)
+    @commands.check(_status_prefix_check)
     async def cmd_status(self, ctx):
         """Bot の稼働状態・各API受信状況・Ping を表示する"""
         embed = self._build_status_embed()
@@ -1610,16 +1660,70 @@ class SystemCog(commands.Cog):
 
     @cmd_status.error
     async def cmd_status_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("このコマンドはサーバー管理者のみ実行可能です。", delete_after=5)
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send("このコマンドを実行する権限がありません。", delete_after=5)
 
-    @discord.app_commands.command(name="qtl_status", description="QTL_Bot の稼働状態・各API受信状況を表示します（管理者専用）")
-    @discord.app_commands.default_permissions(administrator=True)
-    async def slash_qtl_status(self, interaction: discord.Interaction):
-        """スラッシュコマンド版ステータス表示"""
-        await interaction.response.defer(ephemeral=False)
-        embed = self._build_status_embed()
-        await interaction.followup.send(embed=embed)
+    @discord.app_commands.command(name="qtl_status", description="QTL_Bot の稼働状態・各API受信状況を表示します")
+    @discord.app_commands.describe(
+        history="直近の履歴を表示する（指定しない場合は稼働状態を表示）",
+        count="履歴の表示件数（1〜10、既定5）",
+    )
+    @discord.app_commands.choices(history=[
+        discord.app_commands.Choice(name="地震情報の履歴", value="quake"),
+        discord.app_commands.Choice(name="緊急地震速報(EEW)の履歴", value="eew"),
+    ])
+    @_status_default_permissions
+    async def slash_qtl_status(
+        self,
+        interaction: discord.Interaction,
+        history: Optional[str] = None,
+        count: discord.app_commands.Range[int, 1, 10] = 5,
+    ):
+        """
+        スラッシュコマンド版ステータス表示。
+
+        - history 未指定: 稼働状態（QTL_STATUS_ACCESS で実行可否を判定）
+        - history 指定  : 履歴表示（QTL_STATUS_HISTORY_ACCESS で判定。本体とは独立。
+                          実行者本人にのみ見える ephemeral で返す）
+        """
+        if history is None:
+            if not _can_use_status(interaction.user):
+                await interaction.response.send_message(
+                    "このコマンドを実行する権限がありません。", ephemeral=True
+                )
+                return
+            await interaction.response.defer(ephemeral=False)
+            embed = self._build_status_embed()
+            await interaction.followup.send(embed=embed)
+            return
+
+        if not _can_use_status_history(interaction.user):
+            await interaction.response.send_message(
+                "履歴を表示する権限がありません。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            embed = await self._build_history_embed(history, count)
+        except Exception:
+            logger.error(f"/qtl_status 履歴の取得に失敗:\n{traceback.format_exc()}")
+            await interaction.followup.send("履歴の取得に失敗しました。ログを確認してください。", ephemeral=True)
+            return
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _build_history_embed(self, kind: str, count: int) -> discord.Embed:
+        """履歴 Embed を組み立てる。ログ全体のスキャンは TTL キャッシュ＋別スレッドで行う。"""
+        if kind == "eew":
+            records = await asyncio.to_thread(self._get_eew_history_cached, count)
+            lines = [format_eew_line(display_eew_record(r)) for r in records[:count]]
+            title = f"EEW の履歴（直近{len(lines)}件）"
+        else:
+            records = await asyncio.to_thread(self._get_quake_history_cached, count)
+            lines = [format_quake_line(display_record(r), INT_MAP) for r in records[:count]]
+            title = f"地震情報の履歴（直近{len(lines)}件）"
+        embed = discord.Embed(title=title, description=join_lines(lines), color=0x3098BD)
+        embed.set_footer(text="qtlbot.log から復元")
+        return embed
 
     # ===============================
     # Web ダッシュボード
