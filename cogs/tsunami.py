@@ -68,6 +68,7 @@ from datetime import datetime
 from collections import defaultdict
 import logging
 
+from core.discord_send import send_with_retry
 from core.config import (
     CHANNEL_ID, TSUNAMI_CHANNEL_ID,
     TSUNAMI_ENABLE,
@@ -737,9 +738,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="津波", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="津波", embed=embed)
             if not is_test:
                 record_delivery(True, "津波情報")
                 record_notification("津波情報", title)
@@ -1046,9 +1047,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="津波", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="津波", embed=embed)
 
             if not is_test:
                 record_delivery(True, "津波観測情報（沿岸）")
@@ -1172,9 +1173,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="津波", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="津波", embed=embed)
 
             if not is_test:
                 record_delivery(True, "津波観測情報（沖合）")
@@ -1338,9 +1339,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="津波", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="津波", embed=embed)
 
             if not is_test:
                 record_delivery(True, "満潮時刻・津波到達予想時刻情報")
@@ -1601,9 +1602,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="津波", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="津波", embed=embed)
             if not is_test:
                 record_delivery(True, "津波観測情報")
                 record_notification("津波観測情報", title)
@@ -1880,9 +1881,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="津波", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="津波", embed=embed)
             if not is_test:
                 record_delivery(True, "津波予報")
                 record_notification("津波予報", title)

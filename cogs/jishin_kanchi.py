@@ -40,6 +40,7 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 
+from core.discord_send import send_with_retry
 from core.config import (
     CHANNEL_ID, JISHIN_KANCHI_CHANNEL_ID, JISHIN_KANCHI_ENABLE,
     JISHIN_KANCHI_MAX_LEVEL, JISHIN_KANCHI_MIN_COUNT,
@@ -356,7 +357,7 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin):
                 embed.set_footer(text="※これはテスト通知です。")
 
             try:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="地震感知情報", embed=embed)
             except Exception as e:
                 record_delivery(False, "地震感知情報", str(e))
                 raise

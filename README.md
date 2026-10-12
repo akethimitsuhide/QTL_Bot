@@ -209,6 +209,7 @@ python3 bot.py
 | `WOLFX_HEARTBEAT_TIMEOUT` | 90 | Wolfx heartbeat タイムアウト（秒） |
 | `FETCH_FAILURE_THRESHOLD` | 3 | API の連続失敗がこの回数に達するとバックオフに入る |
 | `FETCH_BACKOFF_SECONDS` | 60 | API 失敗時のバックオフ待機時間（秒） |
+| `DISCORD_SEND_RETRY_ATTEMPTS` | 3 | Discord への通知送信が一時的に失敗したときの総試行回数（初回を含む。1〜5、1 で再送なし）。詳細は下記「Discord 送信の再送」 |
 
 ### 震度色設定（Embed配色／GIS地図で共通）
 | 変数名 | 既定値 | 説明 |
@@ -397,6 +398,17 @@ python3 bot.py
 - クッキーは HttpOnly・SameSite=Lax。HTTPS 経由（リバースプロキシ等）のときだけ Secure も付く。素の HTTP で LAN 外へ公開する場合、トークンは平文で流れるため、`WEB_DASHBOARD_ALLOWED_IPS` や VPN との併用を推奨する。
 - `WEB_DASHBOARD_ALLOWED_IPS` と併用できる（IP 制限が先に適用される）。
 
+### Discord 送信の再送
+通知（EEW・地震情報・津波・火山・USGS・長周期地震動など気象庁その他・地震感知情報）の送信が一時的に失敗したとき、自動で再送する（`core/discord_send.py`）。
+
+- **再送する**: HTTP 503 などの Discord 側サーバーエラー、DNS 失敗・接続失敗・タイムアウトなどのネットワークエラー。待機は 2 秒 → 4 秒 → … の指数バックオフ（上限 10 秒）。
+- **再送しない**: 権限不足（403）・チャンネル削除（404）・その他の 4xx、実装上の誤り。再送しても直らないため、従来どおり即座にエラーとして扱う。
+- discord.py 自身も、レート制限（429）と HTTP 500・502・504・524 は内部で最大 5 回再試行している。ここでの再送は、それでカバーされない範囲を補うもの。
+- 再送時も同じ `nonce` を使う。タイムアウトで失敗扱いになったが実際には届いていた場合でも、同じ通知が二重に投稿されない（Discord 側で重複排除される）。
+- 最終的に失敗した場合は、従来どおりの例外・失敗記録（配信成功率に反映）になる。
+- 対象外: `!status`・スラッシュコマンドの応答、管理者チャンネルへのエラー通知・ダイジェスト、強震モニタ画像（周期的に送り続けるため、古い画像の再送に意味がない）。
+- 通知に添付する画像は `BytesIO` で渡すこと（パス指定の `discord.File` は送信後に閉じられ、再送できない）。
+
 ### ステータス表示設定
 | 変数名 | 既定値 | 説明 |
 | :--- | :--- | :--- |
@@ -561,6 +573,7 @@ python3 -m pytest tests/ -q
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
+| `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
 | `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
 | `test_status_history_view.py` | `/qtl_status` 履歴オプションの表示整形 |
@@ -668,6 +681,7 @@ QTL_Bot/
 │   ├── logging_setup.py      ログ設定（ローテーション・重複抑制）
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
 │   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
+│   ├── discord_send.py          Discord 送信の再送ヘルパー（一時的な失敗のみ再送）
 │   ├── status_history_view.py   /qtl_status 履歴オプションの表示整形
 │   ├── error_notify_handler.py  ERROR ログ → 管理者チャンネル通知のログハンドラー
 │   ├── qtlbot_log_files.py   qtlbot.log とローテーション世代の列挙

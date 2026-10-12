@@ -58,6 +58,7 @@ import traceback
 from datetime import datetime
 import logging
 
+from core.discord_send import send_with_retry
 from core.config import (
     CHANNEL_ID, QUAKE_CHANNEL_ID,
     QUAKE_MIN_SCALE, QUAKE_MIN_MAG, QUAKE_MIN_DEPTH, QUAKE_MAX_DEPTH,
@@ -509,7 +510,7 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         send_kwargs = build_gis_message_kwargs(gis_images, embed)
 
         try:
-            await channel.send(**send_kwargs)
+            await send_with_retry(channel, _label="地震情報", **send_kwargs)
         except Exception as e:
             # notify_quake は他のCogと異なりメソッド全体を包むtry/exceptを
             # 持たない設計のため、送信箇所をピンポイントでtry/exceptし、

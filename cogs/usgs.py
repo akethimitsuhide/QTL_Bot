@@ -40,6 +40,7 @@ import time
 from datetime import datetime
 import logging
 
+from core.discord_send import send_with_retry
 from core.config import (
     CHANNEL_ID, USGS_CHANNEL_ID,
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
@@ -409,9 +410,9 @@ class UsgsCog(commands.Cog, AudioMixin):
                 embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="USGS", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="USGS", embed=embed)
             record_delivery(True, "USGS")
             record_notification("USGS", title, place)
             

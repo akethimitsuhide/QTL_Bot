@@ -624,6 +624,13 @@ STATUS_SHOW_DISK   = _env_bool("STATUS_SHOW_DISK", True)
 STATUS_SHOW_UPTIME = _env_bool("STATUS_SHOW_UPTIME", True)
 
 # ===============================
+# Discord 送信の再送
+# ===============================
+# 通知の送信が一時的な失敗（503・ネットワークエラー・タイムアウト等）になったときの
+# 総試行回数（初回を含む）。1 で再送なし。範囲は 1〜5。詳細は core/discord_send.py。
+DISCORD_SEND_RETRY_ATTEMPTS = max(1, min(5, _env_int("DISCORD_SEND_RETRY_ATTEMPTS", 3)))
+
+# ===============================
 # !status / /qtl_status の実行権限
 # ===============================
 # モード: admin（管理者のみ・既定）/ all（全ユーザー）/ role（指定ロール＋管理者）

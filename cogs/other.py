@@ -48,6 +48,7 @@ from datetime import datetime
 from collections import defaultdict
 import logging
 
+from core.discord_send import send_with_retry
 from core.config import (
     CHANNEL_ID, OTHER_CHANNEL_ID,
     ENABLE_LONG_PERIOD, ENABLE_ADVISORY,
@@ -410,7 +411,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if station_map:
                 gis_images.append(station_map)
 
-            await channel.send(**build_gis_message_kwargs(gis_images, embed))
+            await send_with_retry(channel, _label="気象庁その他", **build_gis_message_kwargs(gis_images, embed))
             if not is_test:
                 record_delivery(True, "長周期地震動")
                 record_notification("長周期地震動", "長周期地震動に関する観測情報", hypo_name)
@@ -530,7 +531,10 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if image_filename:
                 image_path = os.path.join(base_dir, image_filename)
                 if os.path.exists(image_path):
-                    image_file = discord.File(image_path, filename=image_filename)
+                    # パス指定の discord.File は送信後に閉じられ、送信失敗時の再送
+                    # （core/discord_send.py）ができないため、BytesIO で渡す
+                    with open(image_path, "rb") as _fh:
+                        image_file = discord.File(io.BytesIO(_fh.read()), filename=image_filename)
                     embed.set_image(url=f"attachment://{image_filename}")
                 else:
                     footer_parts.append("地図画像が見つかりません（同じフォルダに置いてください）")
@@ -542,9 +546,9 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if footer_parts:
                 embed.set_footer(text=" | ".join(footer_parts))
             if image_file:
-                await channel.send(embed=embed, file=image_file)
+                await send_with_retry(channel, _label="気象庁その他", embed=embed, file=image_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="気象庁その他", embed=embed)
             if not is_test:
                 record_delivery(True, "気象庁その他")
                 record_notification("気象庁その他", title_text)
@@ -664,9 +668,9 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 embed.set_image(url="attachment://gis_map.png")
 
             if gis_file:
-                await channel.send(embed=embed, file=gis_file)
+                await send_with_retry(channel, _label="気象庁その他", embed=embed, file=gis_file)
             else:
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="気象庁その他", embed=embed)
             if not is_test:
                 record_delivery(True, "震源要素更新")
                 record_notification("震源要素更新", title)
@@ -736,7 +740,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if is_test:
                 embed.set_footer(text="※これはテスト通知です。")
 
-            await channel.send(embed=embed)
+            await send_with_retry(channel, _label="気象庁その他", embed=embed)
             if not is_test:
                 record_delivery(True, "南海トラフ")
                 record_notification("南海トラフ", title)

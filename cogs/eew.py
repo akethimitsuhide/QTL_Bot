@@ -44,6 +44,7 @@ import time
 from datetime import datetime
 import logging
 
+from core.discord_send import send_with_retry
 from core.config import (
     CHANNEL_ID, EEW_CHANNEL_ID, P2P_EEW_CHANNEL_ID,
     KYOSHIN_CHANNEL_ID, OTHER_CHANNEL_ID,
@@ -422,7 +423,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                 embed.description = f"**発生時刻： {origin_time}**\n先程の緊急地震速報はキャンセルされました。"
                 if is_test:
                     embed.set_footer(text="※これはテスト通知です。")
-                await channel.send(embed=embed)
+                await send_with_retry(channel, _label="EEW", embed=embed)
                 if not is_test:
                     record_delivery(True, "EEW")
                     record_notification("EEW", title, data.get("Hypocenter", ""))
@@ -507,7 +508,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                     suffix="\n\n（地域が多いため一部省略）"
                 )
                 embed_summary.description = summary_desc
-                await channel.send(embed=embed_summary)
+                await send_with_retry(channel, _label="EEW", embed=embed_summary)
 
             title_text = data.get('Title', '緊急地震速報')
             serial_text = "最終報" if is_final else f"第{serial}報"
@@ -642,7 +643,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                 ))
 
             try:
-                await channel.send(**build_gis_message_kwargs(gis_images, embed))
+                await send_with_retry(channel, _label="EEW", **build_gis_message_kwargs(gis_images, embed))
             except Exception as e:
                 record_delivery(False, "EEW", str(e))
                 raise
