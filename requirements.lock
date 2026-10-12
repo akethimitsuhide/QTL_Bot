@@ -1,0 +1,53 @@
+# QTL_Bot - 依存パッケージの固定版（ロックファイル）
+#
+# 本番機（Raspberry Pi）で実際に動作している版を固定したもの。
+# requirements.txt（下限指定のみ）の「開発用ツールを除く全項目」と、その依存パッケージ
+# （推移的依存）を含む。再現性のあるインストールには、こちらを使う:
+#
+#   pip install -r requirements.lock
+#
+# 【脆弱性・版ずれの確認】
+#   pip install pip-audit          # 初回のみ
+#   python3 bot.py --audit_deps    # このファイルの内容を既知の脆弱性DBと照合する
+#
+# 【更新するとき】
+#   1. 新しい版を試し、動作確認（pytest・実機）してから、下の版番号を書き換える
+#   2. python3 bot.py --audit_deps で脆弱性が無いことを確認
+#   3. このファイルをコミットする
+#
+# 注: 行末の「; python_version >= ...」は環境マーカー。該当しないPythonでは無視される。
+
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.3
+aiosignal==1.4.0
+attrs==25.3.0
+audioop-lts==0.2.2 ; python_version >= "3.13"
+certifi==2025.1.31
+charset-normalizer==3.4.2
+discord.py==2.7.1
+frozenlist==1.8.0
+googleapis-common-protos==1.75.0
+idna==3.10
+multidict==6.7.1
+opentelemetry-api==1.43.0
+opentelemetry-exporter-otlp-proto-common==1.43.0
+opentelemetry-exporter-otlp-proto-http==1.43.0
+opentelemetry-instrumentation==0.64b0
+opentelemetry-instrumentation-aiohttp-client==0.64b0
+opentelemetry-proto==1.43.0
+opentelemetry-sdk==1.43.0
+opentelemetry-semantic-conventions==0.64b0
+opentelemetry-util-http==0.64b0
+packaging==25.0
+pillow==11.1.0
+propcache==0.4.1
+protobuf==7.35.1
+psutil==7.0.0
+pygame==2.6.1
+python-dotenv==1.0.1
+requests==2.32.3
+typing_extensions==4.15.0
+urllib3==2.3.0
+websockets==16.0
+wrapt==2.2.2
+yarl==1.23.0

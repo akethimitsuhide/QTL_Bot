@@ -98,7 +98,8 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 ```bash
 git clone https://github.com/akethimitsuhide/QTL_Bot.git
 cd QTL_Bot
-pip install -r requirements.txt
+pip install -r requirements.lock   # 本番機で動作確認した版を固定（推奨）
+# pip install -r requirements.txt  # 下限指定のみ（最新版を入れたい場合・開発用ツールも入る）
 
 # AquesTalkPi（任意：音声読み上げ）
 # Raspberry Pi 向け: https://www.a-quest.com/products/aquestalkpi.html
@@ -451,6 +452,38 @@ python3 bot.py
 
 ---
 
+## 依存パッケージの管理
+
+| ファイル | 役割 |
+|:---|:---|
+| `requirements.txt` | 最低限必要な版（下限）の指定。開発用ツール（pytest・flake8 など）を含む |
+| `requirements.lock` | 本番機で動作確認した版を、推移的依存まで固定したもの（開発用ツールは含まない） |
+
+- 本番機のセットアップは `pip install -r requirements.lock` を使う（版が変わって挙動が変わるのを防ぐ）。
+- `requirements.lock` の行末の `; python_version >= "3.13"` は環境マーカーで、該当しない Python では無視される。
+
+### 脆弱性・版ずれの確認（`--audit_deps`）
+```bash
+pip install pip-audit              # 初回のみ（requirements には含まない任意ツール）
+python3 bot.py --audit_deps
+```
+- `.env` が無くても実行できる。Bot 本体は起動しない。
+- 実際にインストールされている版が `requirements.lock` と異なる場合は一覧表示する（情報表示のみ）。
+- `pip-audit` で、ロックされた各パッケージを既知の脆弱性情報（PyPI の脆弱性DB）と照合する。PyPI への問い合わせを行うため、数十秒かかる。
+- 終了コード: `0`=問題なし / `1`=脆弱性あり / `2`=確認できなかった（`pip-audit` 未導入・通信失敗など）。cron で定期実行して終了コードを確認する使い方ができる。
+  ```bash
+  # 例: 毎週月曜 9:00 に確認し、結果をファイルへ
+  0 9 * * 1 cd ~/QTL_Bot && python3 bot.py --audit_deps >> ~/qtl_audit.log 2>&1
+  ```
+
+### 版を更新するとき
+1. 新しい版を試し、`pytest` と実機で動作確認する。
+2. `requirements.lock` の版番号を書き換える（推移的依存も、`pip install` で入った版に合わせる）。
+3. `python3 bot.py --audit_deps` で脆弱性が無いことを確認する。
+4. コミットする。
+
+---
+
 ## Web Dashboard
 
 `WEB_DASHBOARD_ENABLED=true` で有効化する（既定 `127.0.0.1:8080`）。
@@ -489,6 +522,7 @@ curl http://localhost:8080/health/full | jq
 | `--starter` | 対話式セットアップウィザード（`.env` を生成） |
 | `--merge_env [--yes]` | `.env` へ不足項目を追加 |
 | `--check_env` | `.env.example` とコードの整合性チェック |
+| `--audit_deps` | `requirements.lock` の版ずれ確認と既知の脆弱性の照合（要 `pip install pip-audit`） |
 | `--refresh_gis_data` | GIS データの強制再取得 |
 | `--backfill_quake_history` | 過去の地震情報を P2P API から `qtlbot.log` へ補完 |
 | `--test_*` | CLI テスト（次節） |
@@ -573,6 +607,7 @@ python3 -m pytest tests/ -q
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
+| `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
 | `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
 | `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
@@ -682,6 +717,7 @@ QTL_Bot/
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
 │   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
 │   ├── discord_send.py          Discord 送信の再送ヘルパー（一時的な失敗のみ再送）
+│   ├── dependency_audit.py      --audit_deps（版ずれ確認・脆弱性照合）
 │   ├── status_history_view.py   /qtl_status 履歴オプションの表示整形
 │   ├── error_notify_handler.py  ERROR ログ → 管理者チャンネル通知のログハンドラー
 │   ├── qtlbot_log_files.py   qtlbot.log とローテーション世代の列挙

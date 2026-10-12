@@ -1,4 +1,9 @@
 # QTL_Bot - Python 依存パッケージ
+#
+# このファイルは「最低限必要な版（下限）」の指定。再現性のあるインストールには、
+# 本番機で動作確認した版を固定した requirements.lock を使う:
+#   pip install -r requirements.lock
+# 脆弱性・版ずれの確認: pip install pip-audit && python3 bot.py --audit_deps
 
 # Discord Bot フレームワーク
 discord.py>=2.0.0

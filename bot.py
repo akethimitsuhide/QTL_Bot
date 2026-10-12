@@ -145,6 +145,12 @@ GIS地図描画機能（試験導入）が使う外部データ（気象庁シ�
 取得」する方式のため初回セットアップでは不要。気象庁側で観測点構成が
 更新された際などに手動で最新化したい場合に使う。
 
+依存パッケージ（requirements.lock）の版ずれと既知の脆弱性を確認する（要: pip install pip-audit）：
+
+    python3 bot.py --audit_deps
+
+終了コード: 0=問題なし / 1=脆弱性あり / 2=確認できなかった。cron から定期実行できる。
+
 【起動手順】
     初めて導入する場合はまず .env を作成する（対話形式ウィザード）:
         python3 bot.py --starter
@@ -173,6 +179,13 @@ if "--merge_env" in sys.argv[1:]:
     from core.env_merge import run_env_merge
     run_env_merge()
     sys.exit(0)
+
+# ── --audit_deps（2026-10-12 追加, core/dependency_audit.py）
+# requirements.lock の版ずれ確認と、pip-audit による既知の脆弱性の照合。
+# Bot 本体・.env に依存しないため、core.config より前に処理して終了する。
+if "--audit_deps" in sys.argv[1:]:
+    from core.dependency_audit import run_dependency_audit
+    sys.exit(run_dependency_audit())
 
 # ── --backfill_quake_history（2026-09-06 追加, core/quake_history_backfill.py）
 # 地震情報の地図・表閲覧機能（/quake_map, core/quake_history_log.py）向けの
