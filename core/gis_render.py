@@ -107,6 +107,7 @@ from core.config import (
 from core.constants import SHINDO_COLORS, LG_COLORS
 from core.helpers import shindo_short_label
 from core import gis_data
+from core import runtime_settings as _rs
 from core.tsunami_speech import obs_grade_from_height
 
 logger = logging.getLogger("QTLBot")
@@ -187,6 +188,17 @@ _THEMES = {
     "highlight": ((236, 236, 236, 255), (219, 224, 229, 255), (160, 160, 160, 255)),
 }
 _LAND_COLOR, _SEA_COLOR, _BOUNDARY_COLOR = _THEMES.get(GIS_MAP_THEME, _THEMES["light"])
+
+
+def _theme_colors() -> tuple:
+    """
+    現在の配色テーマの (陸地, 海, 区域境界線)。描画のたびに実行時の設定
+    （core/runtime_settings.py。再起動なしで変更可能）から読む。
+    上の _LAND_COLOR 等は起動時（.env の値）の既定値で、描画では使わない。
+    """
+    return _THEMES.get(_rs.get("GIS_MAP_THEME"), _THEMES["light"])
+
+
 # 以下は light の経緯:
 # _LAND_COLOR（陸地）= 薄いクリーム色
 # 海（水色）。_finalize() の合成背景に使う。
@@ -641,7 +653,7 @@ def _draw_land_fill(draw: ImageDraw.ImageDraw, area_set: "_AreaSet",
         for ring in shape.rings:
             if len(ring) < 3:
                 continue
-            draw.polygon(projector.project_ring(ring), fill=_LAND_COLOR)
+            draw.polygon(projector.project_ring(ring), fill=_theme_colors()[0])
 
 
 def _draw_polygon_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
@@ -655,7 +667,7 @@ def _draw_polygon_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
             if len(ring) < 2:
                 continue
             pts = projector.project_ring(ring)
-            draw.line(pts + [pts[0]], fill=_BOUNDARY_COLOR, width=_px(_BOUNDARY_WIDTH))
+            draw.line(pts + [pts[0]], fill=_theme_colors()[2], width=_px(_BOUNDARY_WIDTH))
 
 
 def _draw_line_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
@@ -668,7 +680,7 @@ def _draw_line_boundaries(draw: ImageDraw.ImageDraw, area_set: _AreaSet,
             if len(ring) < 2:
                 continue
             pts = projector.project_ring(ring)
-            draw.line(pts, fill=_BOUNDARY_COLOR, width=_px(_BOUNDARY_WIDTH))
+            draw.line(pts, fill=_theme_colors()[2], width=_px(_BOUNDARY_WIDTH))
 
 
 def _fill_area(draw: ImageDraw.ImageDraw, shape: _AreaShape, projector: _Projector,
@@ -959,7 +971,7 @@ def _finalize(canvas: Image.Image, target_size: Optional[tuple] = None) -> bytes
     _supersampled()で拡大して描画した場合）、LANCZOSで指定サイズへ
     縮小することでアンチエイリアスをかける（2026-09-17追加）。
     """
-    bg = Image.new("RGBA", canvas.size, _SEA_COLOR)
+    bg = Image.new("RGBA", canvas.size, _theme_colors()[1])
     composed = Image.alpha_composite(bg, canvas)
     if target_size and target_size != composed.size:
         composed = composed.resize(target_size, Image.LANCZOS)
@@ -1589,7 +1601,7 @@ def _draw_country_fill(draw: ImageDraw.ImageDraw, projector: _Projector, viewpor
             if len(ring) < 3:
                 continue
             draw_ring = [(lon + shift, lat) for lon, lat in ring] if shift else ring
-            draw.polygon(projector.project_ring(draw_ring), fill=_LAND_COLOR)
+            draw.polygon(projector.project_ring(draw_ring), fill=_theme_colors()[0])
 
 
 def _compute_overseas_viewport(hypo_lonlat: tuple) -> _BBox:

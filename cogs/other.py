@@ -49,9 +49,9 @@ from collections import defaultdict
 import logging
 
 from core.discord_send import send_with_retry
+from core import runtime_settings as rs  # 通知の ON/OFF は実行時の値を読む
 from core.config import (
     CHANNEL_ID, OTHER_CHANNEL_ID,
-    ENABLE_LONG_PERIOD, ENABLE_ADVISORY,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
@@ -285,7 +285,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
 
     async def notify_long_period(self, list_item=None, is_test=False, extra_note=None, detail_data=None):
-        if not ENABLE_LONG_PERIOD and not is_test:
+        if not rs.get("ENABLE_LONG_PERIOD") and not is_test:
             return
         channel = self.other_channel or self.channel
         if not channel:
@@ -439,7 +439,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             logger.error(f"詳細:\n{traceback.format_exc()}")
 
     async def notify_quake_advisory(self, list_item=None, is_test=False, extra_note=None, detail_data=None):
-        if not ENABLE_ADVISORY and not is_test:
+        if not rs.get("ENABLE_ADVISORY") and not is_test:
             return
         channel = self.other_channel or self.channel
         if not channel:

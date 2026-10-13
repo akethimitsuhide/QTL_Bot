@@ -59,12 +59,9 @@ from datetime import datetime
 import logging
 
 from core.discord_send import send_with_retry
+from core import runtime_settings as rs  # 通知フィルターは実行時の値を読む（再起動不要で変更可能）
 from core.config import (
     CHANNEL_ID, QUAKE_CHANNEL_ID,
-    QUAKE_MIN_SCALE, QUAKE_MIN_MAG, QUAKE_MIN_DEPTH, QUAKE_MAX_DEPTH,
-    QUAKE_ENABLE_SCALE_PROMPT, QUAKE_ENABLE_DESTINATION,
-    QUAKE_ENABLE_SCALE_AND_DEST, QUAKE_ENABLE_DETAIL_SCALE,
-    QUAKE_ENABLE_FOREIGN, QUAKE_ENABLE_OTHER,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
     P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS,
@@ -357,27 +354,27 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
 
         if not is_test:
             type_filter_map = {
-                "ScalePrompt":       QUAKE_ENABLE_SCALE_PROMPT,
-                "Destination":       QUAKE_ENABLE_DESTINATION,
-                "ScaleAndDestination": QUAKE_ENABLE_SCALE_AND_DEST,
-                "DetailScale":       QUAKE_ENABLE_DETAIL_SCALE,
-                "Foreign":           QUAKE_ENABLE_FOREIGN,
-                "Other":             QUAKE_ENABLE_OTHER,
+                "ScalePrompt":       rs.get("QUAKE_ENABLE_SCALE_PROMPT"),
+                "Destination":       rs.get("QUAKE_ENABLE_DESTINATION"),
+                "ScaleAndDestination": rs.get("QUAKE_ENABLE_SCALE_AND_DEST"),
+                "DetailScale":       rs.get("QUAKE_ENABLE_DETAIL_SCALE"),
+                "Foreign":           rs.get("QUAKE_ENABLE_FOREIGN"),
+                "Other":             rs.get("QUAKE_ENABLE_OTHER"),
             }
             if not type_filter_map.get(issue_type, True):
                 return
 
             max_scale_val = eq.get("maxScale", -1)
-            if max_scale_val != -1 and max_scale_val < QUAKE_MIN_SCALE:
+            if max_scale_val != -1 and max_scale_val < rs.get("QUAKE_MIN_SCALE"):
                 return
 
             mag_val = hypo.get("magnitude", -1)
-            if mag_val != -1 and mag_val < QUAKE_MIN_MAG:
+            if mag_val != -1 and mag_val < rs.get("QUAKE_MIN_MAG"):
                 return
 
             depth_val = hypo.get("depth", -1)
             if depth_val != -1:
-                if depth_val < QUAKE_MIN_DEPTH or depth_val > QUAKE_MAX_DEPTH:
+                if depth_val < rs.get("QUAKE_MIN_DEPTH") or depth_val > rs.get("QUAKE_MAX_DEPTH"):
                     return
 
         source = data.get("issue", {}).get("source", "P2P地震情報")

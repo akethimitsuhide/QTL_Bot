@@ -53,7 +53,6 @@ from core.config import (
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
     USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX,
     USGS_REGION_LON_MIN, USGS_REGION_LON_MAX,
-    QUAKE_MIN_SCALE, QUAKE_MIN_MAG, QUAKE_MIN_DEPTH, QUAKE_MAX_DEPTH,
     STATUS_SHOW_CPU, STATUS_SHOW_MEM, STATUS_SHOW_DISK, STATUS_SHOW_UPTIME,
     RESOURCE_MONITORING_ENABLED, RESOURCE_CHECK_INTERVAL,
     STATUS_HISTORY_INTERVAL, STATUS_HISTORY_MAXLEN,
@@ -69,6 +68,7 @@ from core.config import (
 from core.constants import INT_MAP
 from core.command_access import ACCESS_ADMIN, is_allowed
 from core.status_history_view import format_quake_line, format_eew_line, join_lines
+from core import runtime_settings as rs
 from core.dashboard_auth import DashboardAuth, MIN_RECOMMENDED_TOKEN_LENGTH
 from core.cog_utils import get_cog_attr
 from core.notification_log import load_notification_history
@@ -1652,7 +1652,7 @@ class SystemCog(commands.Cog):
         # -- フィルター設定 --
         if STATUS_SHOW_UPTIME:
             filter_lines = [
-                f"震度下限: {INT_MAP.get(QUAKE_MIN_SCALE, str(QUAKE_MIN_SCALE))} / M下限: {QUAKE_MIN_MAG} / 深さ: {QUAKE_MIN_DEPTH}〜{QUAKE_MAX_DEPTH}km",
+                f"震度下限: {INT_MAP.get(rs.get('QUAKE_MIN_SCALE'), str(rs.get('QUAKE_MIN_SCALE')))} / M下限: {rs.get('QUAKE_MIN_MAG')} / 深さ: {rs.get('QUAKE_MIN_DEPTH')}〜{rs.get('QUAKE_MAX_DEPTH')}km",
             ]
             embed.add_field(name="フィルター", value="\n".join(filter_lines), inline=False)
 
@@ -1731,6 +1731,69 @@ class SystemCog(commands.Cog):
         embed = discord.Embed(title=title, description=join_lines(lines), color=0x3098BD)
         embed.set_footer(text="qtlbot.log から復元")
         return embed
+
+    # ===============================
+    # /qtl_config: 通知フィルター等の設定変更（再起動不要・.env へ保存）
+    # ===============================
+    # 対象設定・変更手順・失敗時の扱いは core/runtime_settings.py を参照。
+    # 管理者のみ（Discord 側の既定権限＋コマンド内の判定の二重）。
+    qtl_config = discord.app_commands.Group(
+        name="qtl_config",
+        description="通知フィルター等の設定を確認・変更します（管理者のみ）",
+        default_permissions=discord.Permissions(administrator=True),
+        guild_only=True,
+    )
+
+    @qtl_config.command(name="list", description="再起動なしで変更できる設定と現在値を表示します")
+    async def slash_config_list(self, interaction: discord.Interaction):
+        if not _member_access_info(interaction.user)[0]:
+            await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
+            return
+        lines = [f"**{s.label}**（`{s.key}`）: {s.display(rs.get(s.key))}" for s in rs.SPECS]
+        embed = discord.Embed(
+            title="設定一覧（再起動なしで変更可能）",
+            description="\n".join(lines),
+            color=0x3098BD,
+        )
+        embed.set_footer(text="/qtl_config set で変更します（.env にも保存されます）")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @qtl_config.command(name="set", description="設定を変更します（.env に保存され、再起動は不要です）")
+    @discord.app_commands.describe(key="変更する設定", value="新しい値（on/off、数値、震度など。候補が表示されます）")
+    @discord.app_commands.choices(key=[
+        discord.app_commands.Choice(name=spec.label, value=spec.key) for spec in rs.SPECS
+    ])
+    async def slash_config_set(self, interaction: discord.Interaction, key: str, value: str):
+        if not _member_access_info(interaction.user)[0]:
+            await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        spec = rs.SPEC_BY_KEY.get(key)
+        try:
+            # .env の読み書きを伴うため別スレッドで実行（イベントループを止めない）
+            old, new = await asyncio.to_thread(rs.settings.change, key, value)
+        except rs.SettingError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        except Exception:
+            logger.error(f"/qtl_config set で予期しないエラー（{key}）:\n{traceback.format_exc()}")
+            await interaction.followup.send("❌ 設定の変更中にエラーが発生しました。ログを確認してください。", ephemeral=True)
+            return
+        logger.info(f"/qtl_config set: {key} を変更（実行者ID: {interaction.user.id}）")
+        note = "\n次に描画する地図から反映されます。" if key == "GIS_MAP_THEME" else ""
+        await interaction.followup.send(
+            f"✅ **{spec.label}**: {old} → {new}\n.env に保存しました。再起動は不要です。{note}",
+            ephemeral=True,
+        )
+
+    @slash_config_set.autocomplete("value")
+    async def _config_value_autocomplete(self, interaction: discord.Interaction, current: str):
+        spec = rs.SPEC_BY_KEY.get(getattr(interaction.namespace, "key", None))
+        hints = spec.input_hints() if spec else []
+        return [
+            discord.app_commands.Choice(name=h, value=h)
+            for h in hints if current.strip().lower() in h.lower()
+        ][:25]
 
     # ===============================
     # Web ダッシュボード

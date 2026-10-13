@@ -410,6 +410,32 @@ python3 bot.py
 - 対象外: `!status`・スラッシュコマンドの応答、管理者チャンネルへのエラー通知・ダイジェスト、強震モニタ画像（周期的に送り続けるため、古い画像の再送に意味がない）。
 - 通知に添付する画像は `BytesIO` で渡すこと（パス指定の `discord.File` は送信後に閉じられ、再送できない）。
 
+### 設定の変更（`/qtl_config`・再起動不要）
+運用中に調整したい設定を、Discord から変更できる（管理者のみ）。変更は即座に反映され、`.env` にも書き戻されるため、再起動後も保持される。
+
+```
+/qtl_config list                              # 変更できる設定と現在値の一覧
+/qtl_config set key:地震情報: 震度の下限 value:4   # 震度4未満の地震情報を通知しない
+/qtl_config set key:津波情報 value:off          # 津波情報（P2P）の通知を止める
+```
+
+| 設定（`.env` のキー） | 値の指定 |
+|:---|:---|
+| `QUAKE_MIN_SCALE`（震度の下限） | `全て` / `1`〜`4` / `5弱` / `5強` / `6弱` / `6強` / `7`（`震度4`・`40` のような書き方も可） |
+| `QUAKE_MIN_MAG`（Mの下限） | 0〜10 の数値（例: `3.5`） |
+| `QUAKE_MIN_DEPTH` / `QUAKE_MAX_DEPTH`（深さの下限/上限・km） | 0〜9999 の整数（下限 ≤ 上限） |
+| `QUAKE_ENABLE_SCALE_PROMPT` / `_DESTINATION` / `_SCALE_AND_DEST` / `_DETAIL_SCALE` / `_FOREIGN` / `_OTHER`（地震情報の種別ごと） | `on` / `off` |
+| `TSUNAMI_ENABLE`（津波情報） | `on` / `off` |
+| `ENABLE_LONG_PERIOD`（長周期地震動） | `on` / `off` |
+| `ENABLE_ADVISORY`（後発地震注意情報等） | `on` / `off` |
+| `GIS_MAP_THEME`（地図の配色。次に描画する地図から反映） | `light` / `dark` / `highlight` |
+
+- **対象は、通知のたびに値を読む設定だけ。** 起動時にタスクやチャンネルを組み立てる設定（`ENABLE_KYOSHIN`・各チャンネルID・WebSocket 設定など）は、反映に再起動が必要なため対象外。
+- **`.env` への保存に失敗した場合（権限不足・ディスク満杯など）は、設定を変更しない。** 「画面上の値」と「再起動後の値」がずれないようにするため。
+- `.env` への書き込みは、変更したキーの行だけを置き換える（他の行・コメント・順序、行末のコメントは保持）。書き込みはアトミックに行い、元のパーミッション（600 など）を引き継ぐ。書き込み前に `.env.bak`（1世代・上書き）へバックアップする（`.gitignore` 済み）。
+- `systemd` の `EnvironmentFile` や環境変数で同じキーを直接渡している場合、再起動後はそちらが優先され、`.env` への書き戻しは反映されない。
+- `!status` / `/qtl_status` の「フィルター」欄は、変更後の値を表示する。
+
 ### ステータス表示設定
 | 変数名 | 既定値 | 説明 |
 | :--- | :--- | :--- |
@@ -511,6 +537,8 @@ curl http://localhost:8080/health/full | jq
 | `/qtl_status` | スラッシュ | `QTL_STATUS_ACCESS`（既定: 管理者） | `!status` と同じ内容 |
 | `/qtl_status history:地震情報の履歴` | スラッシュ | `QTL_STATUS_HISTORY_ACCESS`（既定: 管理者） | 直近の地震情報を表示（`count` で 1〜10 件、既定 5 件）。実行者本人にのみ表示 |
 | `/qtl_status history:緊急地震速報(EEW)の履歴` | スラッシュ | `QTL_STATUS_HISTORY_ACCESS`（既定: 管理者） | 直近の EEW を表示（同一イベントは最新の報にまとめる）。実行者本人にのみ表示 |
+| `/qtl_config list` | スラッシュ | 管理者のみ | 再起動なしで変更できる設定と現在値を表示（実行者本人にのみ表示） |
+| `/qtl_config set` | スラッシュ | 管理者のみ | 設定を変更し `.env` に保存する。再起動は不要（実行者本人にのみ表示） |
 
 履歴は `qtlbot.log*` から復元する（Web ダッシュボードの `/status/quake_history`・`/status/eew_history` と同じデータ）。
 
@@ -608,6 +636,8 @@ python3 -m pytest tests/ -q
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
 | `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
+| `test_env_writer.py` | `.env` の指定キーだけの安全な書き換え（行の保持・アトミック書き込み・拒否する値） |
+| `test_runtime_settings.py` | 再起動不要の設定変更（入力解釈・保存失敗時・再起動後の読み戻し）と `/qtl_config` コマンド |
 | `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
 | `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
@@ -717,6 +747,8 @@ QTL_Bot/
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
 │   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
 │   ├── discord_send.py          Discord 送信の再送ヘルパー（一時的な失敗のみ再送）
+│   ├── runtime_settings.py      再起動不要で変更できる設定の定義・現在値・変更処理（/qtl_config）
+│   ├── env_writer.py            .env の指定キーだけを安全に書き換える
 │   ├── dependency_audit.py      --audit_deps（版ずれ確認・脆弱性照合）
 │   ├── status_history_view.py   /qtl_status 履歴オプションの表示整形
 │   ├── error_notify_handler.py  ERROR ログ → 管理者チャンネル通知のログハンドラー
