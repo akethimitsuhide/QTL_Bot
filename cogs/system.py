@@ -69,6 +69,7 @@ from core.constants import INT_MAP
 from core.command_access import ACCESS_ADMIN, is_allowed
 from core.status_history_view import format_quake_line, format_eew_line, join_lines
 from core import runtime_settings as rs
+from core import webhook_notify
 from core.dashboard_auth import DashboardAuth, MIN_RECOMMENDED_TOKEN_LENGTH
 from core.cog_utils import get_cog_attr
 from core.notification_log import load_notification_history
@@ -1010,6 +1011,9 @@ class SystemCog(commands.Cog):
             self._error_log_handler = AdminErrorLogHandler(self.bot.loop, self.notify_error)
             logger.addHandler(self._error_log_handler)
             logger.info("ERROR ログの管理者チャンネル自動通知を有効にしました")
+
+        # Webhook 通知の設定状況（URL は出さない。却下した項目があれば警告）
+        webhook_notify.log_startup_status()
 
         if not self.error_summary_task:
             self.error_summary_task = self.bot.loop.create_task(self.error_summary_worker())

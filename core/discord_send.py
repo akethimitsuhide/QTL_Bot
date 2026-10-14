@@ -27,6 +27,10 @@ BytesIO ベースの discord.File は再送前に先頭へ巻き戻す。ファ�
 （パス指定で File が自分で開いたもの）場合は安全に再送できないため、再送せず
 元の例外を返す（呼び出し側は BytesIO で渡すこと）。
 
+【Webhook への追加配信】
+通知を Discord へ送る前に、同じ Embed を Webhook（core/webhook_notify.py）へも配信する。
+Webhook の送信は別タスクで、Discord 側の成否・再送とは独立。
+
 【最終的に失敗した場合】
 最後の例外をそのまま送出する。呼び出し側の既存の try/except・失敗記録は従来どおり動く。
 """
@@ -38,6 +42,7 @@ import aiohttp
 import discord
 
 from core.config import DISCORD_SEND_RETRY_ATTEMPTS
+from core import webhook_notify
 
 logger = logging.getLogger("QTLBot")
 
@@ -90,6 +95,10 @@ async def send_with_retry(channel, *args, _attempts: int | None = None, _label: 
     # 論理的な1送信につき nonce を固定（再送で二重投稿にならないようにする）
     kwargs.setdefault("nonce", secrets.randbits(64))
     tag = f"[{_label}] " if _label else ""
+
+    # Webhook（Discord / Slack）への追加配信。別タスクで行い、Discord 側の成否とは独立
+    # （Discord が不調でも届く）。例外は内部で握りつぶすため、ここで Discord 送信は妨げない。
+    webhook_notify.dispatch_from_send(kwargs, _label)
 
     for attempt in range(1, attempts + 1):
         try:

@@ -631,6 +631,16 @@ STATUS_SHOW_UPTIME = _env_bool("STATUS_SHOW_UPTIME", True)
 DISCORD_SEND_RETRY_ATTEMPTS = max(1, min(5, _env_int("DISCORD_SEND_RETRY_ATTEMPTS", 3)))
 
 # ===============================
+# Webhook 通知（Discord / Slack）
+# ===============================
+# WEBHOOK_URLS: 追加の通知先 Webhook URL（カンマ区切りで複数可）。空なら無効。
+#   URL は秘密情報（知っていれば誰でも投稿できる）。ログには出さない。
+# WEBHOOK_EVENTS: 送る種別。all（既定）または eew,quake,tsunami,volcano,usgs,kanchi,other
+# 検証・送信は core/webhook_notify.py。
+WEBHOOK_URLS = os.getenv("WEBHOOK_URLS", "")
+WEBHOOK_EVENTS = os.getenv("WEBHOOK_EVENTS", "all")
+
+# ===============================
 # !status / /qtl_status の実行権限
 # ===============================
 # モード: admin（管理者のみ・既定）/ all（全ユーザー）/ role（指定ロール＋管理者）

@@ -55,7 +55,7 @@ _FILE_PAIRS = (
 
 _DECLARED_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 _COMMENTED_RE = re.compile(r"^\s*#+\s*([A-Z][A-Z0-9_]*)=")
-_SECRET_HINTS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "PRIVATE_KEY")
+_SECRET_HINTS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "PRIVATE_KEY", "WEBHOOK_URL")
 _MAX_COMMENT_LINES = 12
 
 

@@ -211,6 +211,8 @@ python3 bot.py
 | `FETCH_FAILURE_THRESHOLD` | 3 | API の連続失敗がこの回数に達するとバックオフに入る |
 | `FETCH_BACKOFF_SECONDS` | 60 | API 失敗時のバックオフ待機時間（秒） |
 | `DISCORD_SEND_RETRY_ATTEMPTS` | 3 | Discord への通知送信が一時的に失敗したときの総試行回数（初回を含む。1〜5、1 で再送なし）。詳細は下記「Discord 送信の再送」 |
+| `WEBHOOK_URLS` | （空） | 追加の通知先 Webhook URL（カンマ区切りで複数可。https の Discord / Slack のみ）。**秘密情報**。空なら無効。詳細は下記「Webhook 通知」 |
+| `WEBHOOK_EVENTS` | all | Webhook に送る種別。`all` または `eew,quake,tsunami,volcano,usgs,kanchi,other` のカンマ区切り |
 
 ### 震度色設定（Embed配色／GIS地図で共通）
 | 変数名 | 既定値 | 説明 |
@@ -409,6 +411,35 @@ python3 bot.py
 - 最終的に失敗した場合は、従来どおりの例外・失敗記録（配信成功率に反映）になる。
 - 対象外: `!status`・スラッシュコマンドの応答、管理者チャンネルへのエラー通知・ダイジェスト、強震モニタ画像（周期的に送り続けるため、古い画像の再送に意味がない）。
 - 通知に添付する画像は `BytesIO` で渡すこと（パス指定の `discord.File` は送信後に閉じられ、再送できない）。
+
+### Webhook 通知（Discord / Slack）
+通知を、Discord チャンネルに加えて Webhook にも送れる（複数宛先に同時送信可）。別サーバー・別ワークスペースへの転送や、Discord が不調のときの別経路として使える。
+
+```bash
+# .env
+WEBHOOK_URLS=https://discord.com/api/webhooks/xxx/yyy,https://hooks.slack.com/services/T/B/zzz
+WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞る
+```
+
+| 種別名 | 対象 |
+|:---|:---|
+| `eew` | 緊急地震速報 |
+| `quake` | 地震情報 |
+| `tsunami` | 津波 |
+| `volcano` | 火山（噴火速報・噴火警報・火山情報） |
+| `usgs` | USGS（海外の地震） |
+| `kanchi` | 地震感知情報 |
+| `other` | 長周期地震動・後発地震注意情報など気象庁のその他の情報 |
+
+- **送る内容**: Discord の Embed に近い形。宛先のホストで自動判別する。Discord には `{"embeds": [...]}` のまま、Slack（`hooks.slack.com`）には Slack が受け付ける attachment 形式に変換して送る（太字・リンクも Slack 形式へ変換）。
+- **Discord への通知とは独立**: 別タスクで送るため、Webhook の失敗・遅延が Discord への通知や EEW の音声に影響しない。逆に、Discord が不調で送信に失敗しても Webhook には届く。
+- **送らないもの**: 地図などの添付画像（Webhook 側から参照できないため）。画像を除くと中身が無い通知は送らない。
+- **テスト通知**: `--test_*` などのテスト通知も、通常の通知と同じく Webhook に送られる（タイトルに「【テスト】」が付く）。設定の動作確認に使える。
+- **再送**: 429（`Retry-After` を尊重）・5xx・ネットワークエラーは最大 3 回（2 秒 → 4 秒、上限 10 秒）。それ以外の 4xx は再送しない。最終的に失敗しても WARNING ログのみで、Bot の動作は継続する。複数の通知が続くと、再送の都合で受信側に届く順序が前後することがある（EEW は「第N報」の表記で判別できる）。
+- **宛先の指定は https の Discord / Slack の Webhook URL のみ**。他のホスト・http・認証情報付き・ポート指定付きの URL は、起動時に警告を出して無視する。
+- **URL は秘密情報**（知っていれば誰でもその宛先へ投稿できる）。ログには一切出さず、宛先は「discord#1」「slack#2」のように番号で表示する。`.env` を公開しないこと。URL が漏れた場合は、Discord / Slack 側で Webhook を削除して作り直す。
+- 起動時のログで、有効な宛先の数と種別を確認できる（例: `Webhook 通知: 有効（宛先2件: discord#1, slack#2 / 種別: all）`）。
+- Slack 向けの送信は、テスト用の HTTP サーバーでの動作確認のみで、実際の Slack ワークスペースでの確認は行っていない。初回は `--test_*` などで実際に届くことを確認すること。
 
 ### 設定の変更（`/qtl_config`・再起動不要）
 運用中に調整したい設定を、Discord から変更できる（管理者のみ）。変更は即座に反映され、`.env` にも書き戻されるため、再起動後も保持される。
@@ -637,6 +668,7 @@ python3 -m pytest tests/ -q
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
 | `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
 | `test_env_writer.py` | `.env` の指定キーだけの安全な書き換え（行の保持・アトミック書き込み・拒否する値） |
+| `test_webhook_notify.py` | Webhook 通知（URL 検証・Embed 変換・再送・複数宛先・種別フィルター・Discord 送信との独立性） |
 | `test_runtime_settings.py` | 再起動不要の設定変更（入力解釈・保存失敗時・再起動後の読み戻し）と `/qtl_config` コマンド |
 | `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
 | `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
@@ -747,6 +779,7 @@ QTL_Bot/
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
 │   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
 │   ├── discord_send.py          Discord 送信の再送ヘルパー（一時的な失敗のみ再送）
+│   ├── webhook_notify.py        Webhook 通知（Discord / Slack・複数宛先）
 │   ├── runtime_settings.py      再起動不要で変更できる設定の定義・現在値・変更処理（/qtl_config）
 │   ├── env_writer.py            .env の指定キーだけを安全に書き換える
 │   ├── dependency_audit.py      --audit_deps（版ずれ確認・脆弱性照合）
