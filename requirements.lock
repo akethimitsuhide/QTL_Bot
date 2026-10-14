@@ -1,8 +1,7 @@
 # QTL_Bot - 依存パッケージの固定版（ロックファイル）
 #
-# 本番機（Raspberry Pi）で実際に動作している版を固定したもの。
 # requirements.txt（下限指定のみ）の「開発用ツールを除く全項目」と、その依存パッケージ
-# （推移的依存）を含む。再現性のあるインストールには、こちらを使う:
+# （推移的依存）を、版を固定して並べたもの。再現性のあるインストールには、こちらを使う:
 #
 #   pip install -r requirements.lock
 #
@@ -15,10 +14,21 @@
 #   2. python3 bot.py --audit_deps で脆弱性が無いことを確認
 #   3. このファイルをコミットする
 #
+# 【更新履歴】
+#   2026-10-15  既知の脆弱性（pip-audit）が報告された次の9件を更新。更新後は報告なし。
+#               aiohttp 3.13.3→3.14.3 / pillow 11.1.0→12.3.0 / urllib3 2.3.0→2.8.0 /
+#               requests 2.32.3→2.33.1 / idna 3.10→3.15 / multidict 6.7.1→6.9.1 /
+#               python-dotenv 1.0.1→1.2.2 / yarl 1.23.0→1.25.1（aiohttp の依存）/
+#               propcache 0.4.1→0.5.4（yarl の依存）
+#               ※ 上記以外は、それまで本番機で動作していた版のまま。
+#               ※ 更新した版は、このファイルの版だけを入れた環境で pytest（GIS 描画を含む）を
+#                  通したのみで、実機（Raspberry Pi）での動作確認は別途必要。
+#   2026-10-12  本番機（Raspberry Pi）で動作していた版を固定（初版）
+#
 # 注: 行末の「; python_version >= ...」は環境マーカー。該当しないPythonでは無視される。
 
 aiohappyeyeballs==2.6.1
-aiohttp==3.13.3
+aiohttp==3.14.3
 aiosignal==1.4.0
 attrs==25.3.0
 audioop-lts==0.2.2 ; python_version >= "3.13"
@@ -27,8 +37,8 @@ charset-normalizer==3.4.2
 discord.py==2.7.1
 frozenlist==1.8.0
 googleapis-common-protos==1.75.0
-idna==3.10
-multidict==6.7.1
+idna==3.15
+multidict==6.9.1
 opentelemetry-api==1.43.0
 opentelemetry-exporter-otlp-proto-common==1.43.0
 opentelemetry-exporter-otlp-proto-http==1.43.0
@@ -39,15 +49,15 @@ opentelemetry-sdk==1.43.0
 opentelemetry-semantic-conventions==0.64b0
 opentelemetry-util-http==0.64b0
 packaging==25.0
-pillow==11.1.0
-propcache==0.4.1
+pillow==12.3.0
+propcache==0.5.4
 protobuf==7.35.1
 psutil==7.0.0
 pygame==2.6.1
-python-dotenv==1.0.1
-requests==2.32.3
+python-dotenv==1.2.2
+requests==2.33.1
 typing_extensions==4.15.0
-urllib3==2.3.0
+urllib3==2.8.0
 websockets==16.0
 wrapt==2.2.2
-yarl==1.23.0
+yarl==1.25.1

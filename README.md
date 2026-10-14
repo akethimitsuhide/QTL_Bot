@@ -514,7 +514,7 @@ WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞�
 | ファイル | 役割 |
 |:---|:---|
 | `requirements.txt` | 最低限必要な版（下限）の指定。開発用ツール（pytest・flake8 など）を含む |
-| `requirements.lock` | 本番機で動作確認した版を、推移的依存まで固定したもの（開発用ツールは含まない） |
+| `requirements.lock` | 版を推移的依存まで固定したもの（開発用ツールは含まない）。`pip-audit` で既知の脆弱性が無いことを確認した版（更新履歴はファイル冒頭） |
 
 - 本番機のセットアップは `pip install -r requirements.lock` を使う（版が変わって挙動が変わるのを防ぐ）。
 - `requirements.lock` の行末の `; python_version >= "3.13"` は環境マーカーで、該当しない Python では無視される。
