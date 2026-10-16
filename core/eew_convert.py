@@ -19,7 +19,7 @@ EewCog._convert_p2p_eew_to_wolfx() / EewCog._extract_alert_regions()
 import logging
 import re
 import traceback
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 from core.helpers import safe_int, safe_float
 
@@ -36,6 +36,37 @@ logger = logging.getLogger("QTLBot")
 # → 「震度5弱以上」）。P2P地震情報の変換（convert_p2p_eew_to_wolfx）も同じ形式で出力する。
 OPEN_UPPER_LABEL = "以上"
 OPEN_UPPER_LABELS = (OPEN_UPPER_LABEL, "over")
+
+
+def should_process_eew(seen_serial: dict, cancelled: "OrderedDict", event_id, serial: int,
+                       is_cancel: bool, cancelled_max: int = 100) -> bool:
+    """
+    EEW の受信メッセージを処理（通知）すべきかを判定する（重複・逆行の抑制）。
+
+    【2026-10-16 追加】キャンセル報は「直前の報と同じ Serial」で届くため、
+    従来の「serial > 既知の最大Serial のときだけ通知」という判定では常に重複扱いと
+    なり、キャンセル報が一切通知されなかった。実例（EventID=20261016123810）:
+    Wolfx は最終報（Serial=42）の後、同じ Serial=42 で isCancel=true を再送し、
+    P2P 地震情報（code=556）は cancelled=true・issue.serial が直前の報と同じ値で届く。
+
+    - キャンセル報: Serial に関係なく、そのEventIDで最初の1回だけ処理する
+      （同じキャンセル報の再送は抑制する）。
+    - それ以外: 従来どおり Serial が既知の最大より大きいときだけ処理する。
+
+    seen_serial : {EventID: 既知の最大Serial}（呼び出し側の取得元ごとの辞書。更新される）
+    cancelled   : 通知済みキャンセルの EventID（古い順の OrderedDict。更新される）
+    """
+    if is_cancel:
+        if event_id in cancelled:
+            return False
+        cancelled[event_id] = True
+        while len(cancelled) > cancelled_max:
+            cancelled.popitem(last=False)
+        return True
+    if serial > seen_serial.get(event_id, 0):
+        seen_serial[event_id] = serial
+        return True
+    return False
 
 
 def _norm_shindo(value) -> str | None:

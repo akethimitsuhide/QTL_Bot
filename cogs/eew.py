@@ -41,6 +41,7 @@ import json
 import asyncio
 import traceback
 import time
+from collections import OrderedDict
 from datetime import datetime
 import logging
 
@@ -64,7 +65,7 @@ from core.eew_history_log import build_eew_record, format_eew_record_log_line
 from core.eew_convert import (
     convert_p2p_eew_to_wolfx, extract_alert_regions,
     build_forecast_groups, format_forecast_section, merge_forecast_groups,
-    build_region_shindo_map, eew_warn_advisory_note,
+    build_region_shindo_map, eew_warn_advisory_note, should_process_eew,
 )
 from core.gis_render import render_eew_warn_map, render_shindo_map, warmup_overseas_cache
 from core.gis_data import ensure_gis_data_ready
@@ -115,6 +116,12 @@ class EewCog(commands.Cog, AudioClientMixin):
         # 採番が他方の処理を誤って抑制する問題を解消する。
         self.eew_max_serial_seen: dict[str, dict[str, int]] = {
             "wolfx": {}, "p2p_eew": {},
+        }
+        # 【2026-10-16】取得元ごとの「通知済みキャンセル報のEventID」。キャンセル報は
+        # 直前の報と同じSerialで届くため、Serialの大小ではなくEventIDで重複を抑制する
+        # （core.eew_convert.should_process_eew 参照）。
+        self.eew_cancelled_seen: dict[str, OrderedDict] = {
+            "wolfx": OrderedDict(), "p2p_eew": OrderedDict(),
         }
         self.recent_eews: dict = {}
         self.recent_eews_max_size = 50
@@ -244,8 +251,11 @@ class EewCog(commands.Cog, AudioClientMixin):
                     self._recv_count["wolfx"] += 1
                     logger.info(f"EEW 検知: EventID={event_id} Serial={serial} → 通知")
                     wolfx_seen = self.eew_max_serial_seen["wolfx"]
-                    if serial > wolfx_seen.get(event_id, 0):
-                        wolfx_seen[event_id] = serial
+                    is_cancel = bool(data.get("isCancel", False))
+                    if should_process_eew(wolfx_seen, self.eew_cancelled_seen["wolfx"],
+                                          event_id, serial, is_cancel):
+                        if is_cancel:
+                            logger.info(f"EEW キャンセル報を検知: EventID={event_id} Serial={serial}")
                         await self.notify_eew(data, source="wolfx")
                     else:
                         logger.debug(
@@ -286,8 +296,11 @@ class EewCog(commands.Cog, AudioClientMixin):
             self._recv_count["p2p_eew"] += 1
             logger.info(f"P2P EEW 検知: EventID={event_id} Serial={serial}")
             p2p_seen = self.eew_max_serial_seen["p2p_eew"]
-            if serial > p2p_seen.get(event_id, 0):
-                p2p_seen[event_id] = serial
+            is_cancel = bool(wolfx_data.get("isCancel", False))
+            if should_process_eew(p2p_seen, self.eew_cancelled_seen["p2p_eew"],
+                                  event_id, serial, is_cancel):
+                if is_cancel:
+                    logger.info(f"P2P EEW キャンセル報を検知: EventID={event_id} Serial={serial}")
                 await self.notify_eew(wolfx_data, source="p2p_eew")
             else:
                 logger.debug(
@@ -420,14 +433,22 @@ class EewCog(commands.Cog, AudioClientMixin):
                     title = "【テスト】" + title
 
                 embed = discord.Embed(title=title, color=0x00FF00, timestamp=datetime.now())
-                embed.description = f"**発生時刻： {origin_time}**\n先程の緊急地震速報はキャンセルされました。"
+                # P2P地震情報のキャンセル報は発生時刻を含まない（"不明"になる）ため、その場合は省く
+                origin_line = f"**発生時刻： {origin_time}**\n" if origin_time != "不明" else ""
+                embed.description = f"{origin_line}先程の緊急地震速報はキャンセルされました。"
                 if is_test:
                     embed.set_footer(text="※これはテスト通知です。")
                 await send_with_retry(channel, _label="EEW", embed=embed)
                 if not is_test:
                     record_delivery(True, "EEW")
                     record_notification("EEW", title, data.get("Hypocenter", ""))
+                if event_id == self.monitored_event_id:
                     self.monitored_event_id = None
+                    if self.eew_monitor_timeout_task:
+                        self.eew_monitor_timeout_task.cancel()
+                # キャンセル音（eewC）。play_eew_sound にキャンセル用の分岐があるが、
+                # ここで return するため従来は到達しない死んだコードだった
+                await self.play_eew_sound(data)
                 return
 
             if len(self.recent_eews) > 1:
