@@ -698,10 +698,6 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
         if latitude != -200 and longitude != -200:
             hypo_lonlat = (longitude, latitude)
 
-        if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
-            overseas = await asyncio.to_thread(render_overseas_map, hypo_lonlat)
-            return [overseas] if overseas else []
-
         region_shindo = None
         station_shindo = None
         if points:
@@ -719,6 +715,16 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
                 region_shindo = shindo_map
             else:
                 station_shindo = shindo_map
+
+        # 【2026-10-16修正】震源が国外の場合も、震度の区域・観測点を渡す。従来は震源の
+        # バツ印だけを描画していたため、カムチャツカ半島付近の地震の「各地の震度に関する
+        # 情報」で、日本で観測した震度（観測点）が地図に一切描画されなかった。
+        if hypo_lonlat and is_outside_japan_bbox(*hypo_lonlat):
+            overseas = await asyncio.to_thread(
+                render_overseas_map, hypo_lonlat,
+                region_shindo=region_shindo, station_shindo=station_shindo,
+            )
+            return [overseas] if overseas else []
 
         primary = await asyncio.to_thread(
             render_shindo_map,

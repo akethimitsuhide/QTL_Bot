@@ -247,6 +247,7 @@ _EEW_MARK_SCALE_MAX = 2.0
 _PLUM_OUTER_R = 14                        # PLUM法ドーナツの外半径（px）
 _PLUM_INNER_R = 7                         # PLUM法ドーナツの内半径（px）
 _PLUM_HALO_PAD = 4                        # ドーナツの白フチの余白（px）
+_OVERSEAS_STATION_MARKER_SIZE = 16         # 海外向け地図（広域）での観測点マーカーの一辺（px）。日本全体を含む広い範囲のため通常より小さくする
 _STATION_MARKER_SIZE = 24                 # 観測点マーカー（正方形）の一辺（px）。
                                            # 2026-09-16: 「小さくて見づらい」との
                                            # 指摘を受け、11→16→24に拡大
@@ -827,7 +828,8 @@ def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: i
     draw.text((x, y), label, fill=text_rgba, font=font, anchor="mm")
 
 
-def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, projector: _Projector) -> None:
+def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, projector: _Projector,
+                          marker_size: int = _STATION_MARKER_SIZE) -> None:
     """
     観測点ごとの震度マーカー（色付き正方形＋短い震度ラベル）を描画する。
     station_shindo: {観測点名(stations.jsonのname): 震度コード(INT_MAPのキー)}
@@ -848,7 +850,7 @@ def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, proje
             continue
         lat, lon = latlon
         xy = projector.project(lon, lat)
-        _draw_shindo_square(draw, xy, code, _STATION_MARKER_SIZE)
+        _draw_shindo_square(draw, xy, code, marker_size)
 
     if missing:
         logger.debug(f"GIS地図: stations.jsonに見つからない観測点を{missing}件スキップしました")
@@ -1182,7 +1184,8 @@ def render_shindo_map(
         # 震源が表示範囲の外、または表示範囲に陸地が無い場合は、海だけの
         # 画像にならないよう海外向け地図へ切り替える（2026-10-03追加。
         # _needs_overseas_map 参照）。震度の区域塗りつぶしは広域図の上に
-        # 残す（区域アイコン・観測点マーカーは広域図では小さすぎるため省く）。
+        # 残す（区域アイコンは広域図では小さすぎるため省く。観測点マーカーは
+        # 2026-10-16から縮小サイズで描画する。render_overseas_map 参照）。
         # 切り替え先の描画に失敗した場合は、海だけの画像を添付するより
         # 画像なしの方がよいため None を返す。
         if _needs_overseas_map(hypo_points, viewport, (_local_areas,)):
@@ -1191,6 +1194,7 @@ def render_shindo_map(
                 hypo_points[0],
                 region_shindo={name: code for name, code in (region_shindo or {}).items()
                                if name in shapes},
+                station_shindo=matched_stations or None,
             )
 
         width, height = _dimensions_for_bbox(viewport)
@@ -1645,6 +1649,7 @@ def render_overseas_map(
     hypocenter_lonlat: tuple[float, float],
     region_shindo: Optional[dict] = None,
     warn_region_names: Optional[set] = None,
+    station_shindo: Optional[dict] = None,
 ) -> Optional[bytes]:
     """
     震源が日本国外の場合向け：世界の国境データ（間引き済み・日本を除く。
@@ -1675,6 +1680,13 @@ def render_overseas_map(
         render_shindo_map が自動で切り替えて渡す）。
     warn_region_names : （2026-10-03追加）EEW警報の発表地域（render_eew_warn_map
         と同じ府県予報区名の集合）。警戒色で塗りつぶす。
+
+    station_shindo    : （2026-10-16追加）{観測点名(stations.jsonのname): 震度コード}。
+        観測点ごとの震度マーカーを縮小サイズ（_OVERSEAS_STATION_MARKER_SIZE）で描画する。
+        従来は震源が国外・遠方のとき、各地の震度に関する情報の観測点が一切描画されず、
+        バツ印だけの地図になっていた（カムチャツカ半島付近の地震の「各地の震度に関する
+        情報」で発覚）。表示範囲は日本全体＋震源で、観測点は日本国内にあるため
+        表示範囲の計算には影響しない。
 
     GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
     未取得の場合は None を返す。
@@ -1738,7 +1750,12 @@ def render_overseas_map(
                     if shape is not None:
                         _fill_area(draw, shape, projector, warn_fill, warn_border)
 
-            # 4. 震源のバツ印
+            # 4. 観測点ごとの震度マーカー（震源のバツ印より下に描く）
+            if station_shindo:
+                _draw_station_markers(draw, station_shindo, projector,
+                                      marker_size=_OVERSEAS_STATION_MARKER_SIZE)
+
+            # 5. 震源のバツ印
             warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
             _draw_x_mark(draw, projector.project(draw_lon, lat), warn_rgb)
 

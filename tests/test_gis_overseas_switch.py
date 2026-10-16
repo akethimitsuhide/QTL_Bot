@@ -119,3 +119,21 @@ def test_normal_domestic_map_is_unchanged_in_mode():
 def test_overseas_map_region_fill_is_optional_and_safe_for_unknown_names():
     assert g.render_overseas_map((121.7, 23.8)) is not None
     assert g.render_overseas_map((121.7, 23.8), region_shindo={"存在しない区域": 20}, warn_region_names={"存在しない"}) is not None
+
+
+# ---------- 国外・遠方の震源でも観測点を描画する（2026-10-16追加） ----------
+@needs_gis
+def test_overseas_map_draws_station_markers(monkeypatch):
+    """カムチャツカ半島付近の「各地の震度に関する情報」で観測点が描画されなかった不具合の回帰テスト。"""
+    shapes = g._local_areas.get()
+    stations = {}
+    for name, sh in shapes.items():
+        lon, lat = sh.rings[0][len(sh.rings[0]) // 2]
+        if lat > 40:
+            stations[name] = (lat, lon)
+    monkeypatch.setattr(g, "_stations", stations)
+    hypo = (158.1, 50.0)
+    with_st = g.render_overseas_map(hypo, station_shindo={n: 10 for n in stations})
+    without = g.render_overseas_map(hypo)
+    assert with_st and without
+    assert with_st != without
