@@ -28,7 +28,7 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
 
 - **接続の一元管理**: `core/p2p_ws_hub.py` の `P2PWebSocketHub` が WebSocket 接続を1本だけ保持し、code ごとに各 Cog へ配信する（551→地震情報、552→津波、556→EEW、9611→地震感知情報）。P2P の接続数上限（IP あたり2本）に対応するため。
 - **切り替え条件**（どちらか早い方）: 連続接続失敗が `P2P_FAILOVER_THRESHOLD`（既定5）回に達する、または接続できていない状態が `P2P_FAILOVER_DISCONNECT_SECONDS`（既定10）秒続く。
-- **取得元**（`QUAKE_FAILOVER_SOURCES`、既定 `jma_json,jma_xml,quake_one`。先頭から順に試す）: 気象庁HPのJSON、気象庁防災情報XML、Quake.One（http のみの第三者配信のため最後に置き、入力を検証する。震度速報・震源に関する情報の段階は無く、数分遅れる）。取得した電文は P2P の JMAQuake（code=551）互換形式に変換し、通常と同じ通知処理を通す（フッターに「P2P地震情報の障害のため〇〇から取得」と表示）。
+- **取得元**（`QUAKE_FAILOVER_SOURCES`、既定 `quake_one,jma_json`。先頭から順に試す）: Quake.One（http のみの第三者配信のため入力を検証する。震度速報・震源に関する情報の段階は無く最終形のみ届く）、気象庁HPのJSON。気象庁防災情報XML（`jma_xml`）は既定の対象外で、指定すれば使える。取得した電文は P2P の JMAQuake（code=551）互換形式に変換し、通常と同じ通知処理を通す（フッターに「P2P地震情報の障害のため〇〇から取得」と表示）。
 - **復旧**: WebSocket が `P2P_FAILOVER_RECOVERY_SECONDS`（既定60）秒以上連続して接続できたらフォールバックを停止する。WebSocket の再接続はフォールバック中も続ける。
 - **重複防止**（`QuakeContentDedupe`）: 震源要素（発生時刻±3分・震央地名・M・深さ）と震度分布の内容指紋で照合し、取得元をまたいでも同じ内容は通知しない（保持は最大200件・6時間）。
 - **起動時**: 各取得元の現在の一覧を既知として記録し、通知しない。発表が `P2P_FAILOVER_CATCHUP_MINUTES`（既定30）分より古い情報も通知しない。
@@ -271,7 +271,7 @@ python3 bot.py
 | `QUAKE_FAILOVER_POLL_SECONDS` | 10 | フォールバック中の取得間隔（秒、最小5） |
 | `QUAKE_ONE_POLL_SECONDS` | 6 | Quake.One の `list.json` の取得間隔（秒）。既定6秒＝10回/分。6秒未満（10回/分を超える頻度）は指定できず6に切り上げる。詳細の取得は数えない |
 | `P2P_FAILOVER_CATCHUP_MINUTES` | 30 | フォールバックが通知対象にする情報の新しさ（分、最小1）。発表がこれより古い情報は通知済みとみなして通知しない |
-| `QUAKE_FAILOVER_SOURCES` | jma_json,jma_xml,quake_one | 取得元の優先順（カンマ区切り。`jma_json`＝気象庁HP JSON、`jma_xml`＝気象庁XML、`quake_one`＝Quake.One） |
+| `QUAKE_FAILOVER_SOURCES` | quake_one,jma_json | 取得元の優先順（カンマ区切り。`quake_one`＝Quake.One、`jma_json`＝気象庁HP JSON、`jma_xml`＝気象庁XML〔既定の対象外〕） |
 
 ### P2P 地震感知情報設定
 | 変数名 | 既定値 | 説明 |
@@ -625,7 +625,7 @@ python3 bot.py --test_all tests/fixtures/
 |:---|:---|:---|
 | `eew` | `EewCog.notify_eew` | Wolfx 形式（変換済みのフラット形式） |
 | `eew_p2p` | `EewCog.notify_eew`（`convert_p2p_eew_to_wolfx` で変換後） | P2P の生EEW（code=556） |
-| `quake` | `QuakeInfoCog.notify_quake` | P2P 地震情報（code=551） |
+| `quake` | `QuakeInfoCog.notify_quake` | P2P 地震情報（code=551）／気象庁HP JSON の地震情報（震度速報・震源・各地の震度等）／Quake.One の `info.json`（同じフォルダに `smallScalePoints.json` があれば細分区域別の震度も読む）。後ろ2つは代替取得と同じ変換を通す |
 | `tsunami` | `TsunamiCog.notify_tsunami` | P2P 津波情報（code=552） |
 | `tsunami_forecast` | `TsunamiCog.notify_tsunami_forecast` | 気象庁 VTSE41（津波予報・警報） |
 | `tsunami_observation_coastal` | `TsunamiCog.notify_tsunami_observation_coastal` | 気象庁 VTSE51（津波観測） |
@@ -667,6 +667,7 @@ python3 -m pytest tests/ -q
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
+| `test_quake_test_input.py` | `--test_quake` の気象庁JSON／Quake.One入力・観測点名の「＊」照合・代替取得の既定の取得元 |
 | `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
 | `test_env_writer.py` | `.env` の指定キーだけの安全な書き換え（行の保持・アトミック書き込み・拒否する値） |
 | `test_webhook_notify.py` | Webhook 通知（URL 検証・Embed 変換・再送・複数宛先・種別フィルター・Discord 送信との独立性） |
