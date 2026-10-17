@@ -828,6 +828,26 @@ def _draw_shindo_square(draw: ImageDraw.ImageDraw, xy: tuple, code: int, size: i
     draw.text((x, y), label, fill=text_rgba, font=font, anchor="mm")
 
 
+def _station_latlon(stations: dict, name: str):
+    """
+    観測点名から (lat, lon) を返す。見つからなければ None。
+
+    【2026-10-17追加】気象庁HP JSON は気象庁以外の観測点の名前に「＊」を付けて
+    返す（例: "函館市新浜町＊"）が、P2P地震情報は付けない（"函館市新浜町"）。
+    取得元による表記差で観測点が描画されないことを避けるため、「＊」の有無を
+    無視して照合する（完全一致を優先）。
+    """
+    latlon = stations.get(name)
+    if latlon is not None:
+        return latlon
+    base = name.rstrip("＊*").strip()
+    for key in (base, base + "＊"):
+        latlon = stations.get(key)
+        if latlon is not None:
+            return latlon
+    return None
+
+
 def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, projector: _Projector,
                           marker_size: int = _STATION_MARKER_SIZE) -> None:
     """
@@ -844,7 +864,7 @@ def _draw_station_markers(draw: ImageDraw.ImageDraw, station_shindo: dict, proje
     stations = _get_stations()
     missing = 0
     for name, code in sorted(station_shindo.items(), key=lambda item: item[1]):
-        latlon = stations.get(name)
+        latlon = _station_latlon(stations, name)
         if latlon is None:
             missing += 1
             continue
@@ -1148,7 +1168,7 @@ def render_shindo_map(
         matched_stations = {}
         if station_shindo:
             for name, code in station_shindo.items():
-                if name in stations:
+                if _station_latlon(stations, name) is not None:
                     matched_stations[name] = code
 
         hypo_points = _hypocenter_point(hypocenter_lonlat)

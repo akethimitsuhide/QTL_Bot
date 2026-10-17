@@ -312,6 +312,68 @@ def _convert_raw_p2p_eew_for_test(data: dict) -> dict:
     return converted
 
 
+def _is_jma_quake_json(data) -> bool:
+    """気象庁HP JSON（bosai/quake/data）の地震情報（震度速報・震源・各地の震度等）か。"""
+    from core.quake_failover import QUAKE_INFO_TITLES
+    if not isinstance(data, dict):
+        return False
+    body = data.get("Body")
+    if not (isinstance(data.get("Control"), dict) and isinstance(data.get("Head"), dict)
+            and isinstance(body, dict) and isinstance(body.get("Earthquake"), dict)):
+        return False
+    titles = {str((data.get("Head") or {}).get("Title", "")),
+              str((data.get("Control") or {}).get("Title", ""))}
+    return bool(titles & QUAKE_INFO_TITLES)
+
+
+def _is_quake_one_info(data) -> bool:
+    """Quake.One の :EventID/info.json か（EventID・Hypocenter(dict)・OriginDateTime を持つ）。"""
+    return (isinstance(data, dict) and "EventID" in data and "OriginDateTime" in data
+            and isinstance(data.get("Hypocenter"), dict))
+
+
+def convert_quake_test_data(data: dict, json_path: str = "") -> dict:
+    """
+    【2026-10-17追加】--test_quake / --test_auto に渡されたJSONを、notify_quake が
+    受け取るP2P形式（code=551）の dict にそろえる。
+
+      - P2P地震情報（code=551）: そのまま
+      - 気象庁HP JSON（代替取得の jma_json と同じ変換）
+      - Quake.One の info.json（代替取得の quake_one と同じ変換。同じフォルダに
+        smallScalePoints.json があれば、細分区域別の震度として一緒に読む）
+    """
+    from core.quake_failover import jma_quake_to_p2p, quake_one_to_p2p
+
+    if _is_jma_quake_json(data):
+        result = jma_quake_to_p2p(
+            data,
+            list_title=str((data.get("Control") or {}).get("Title", "")),
+            item_key=os.path.basename(json_path) or "test",
+        )
+        if result is None:
+            raise ValueError("気象庁JSONを地震情報に変換できませんでした（取消報・内容なし）")
+        print("[TEST] 気象庁HP JSON形式として読み込み、P2P形式へ変換しました")
+        return result
+    if _is_quake_one_info(data):
+        small = None
+        small_path = os.path.join(os.path.dirname(os.path.abspath(json_path)), "smallScalePoints.json")
+        if json_path and os.path.isfile(small_path):
+            try:
+                with open(small_path, "r", encoding="utf-8") as f:
+                    small = json.load(f)
+                print(f"[TEST] 同じフォルダの smallScalePoints.json も読み込みました: {small_path}")
+            except Exception as e:
+                print(f"[TEST] 注意: smallScalePoints.json を読み込めませんでした（{e}）。震度の区域なしで続行します")
+        else:
+            print("[TEST] 注意: 同じフォルダに smallScalePoints.json が無いため、震度の区域なしで通知します")
+        result = quake_one_to_p2p(data, small, str(data.get("EventID", "")))
+        if result is None:
+            raise ValueError("Quake.One の info.json を地震情報に変換できませんでした")
+        print("[TEST] Quake.One形式として読み込み、P2P形式へ変換しました")
+        return result
+    return data
+
+
 TEST_TARGETS = {
     "eew": {
         "cog_name": "EewCog",
@@ -344,6 +406,11 @@ TEST_TARGETS = {
         # 取り違えている可能性があります」と誤警告が出ていた。notify_quake が実際に読む
         # のは issue（type）・earthquake（hypocenter/maxScale等）なので、それで検証する。
         "expected_fields": ["issue", "earthquake"],
+        # 【2026-10-17追加】気象庁HP JSON・Quake.One(info.json) も受け付ける
+        # （変換後のP2P形式に対して expected_fields を検証する）
+        "data_converter": convert_quake_test_data,
+        "data_converter_needs_path": True,
+        "convert_before_validate": True,
     },
     "tsunami": {
         "cog_name": "TsunamiCog",
@@ -564,6 +631,10 @@ def sniff_test_target(data) -> list[str]:
     if "EventID" in data and "MaxIntensity" in data:
         matches.append("eew")
 
+    # ── Quake.One の info.json（【2026-10-17追加】地震情報として --test_quake と同じ扱い）──
+    if _is_quake_one_info(data):
+        matches.append("quake")
+
     # ── issue オブジェクトのネスト構造まで見て、EEW（P2P生形式）・
     #    地震情報・津波を区別する ──
     # 【2026-08-30 追加の経緯】以前はトップレベルの "issue"+"earthquake"
@@ -727,6 +798,11 @@ def sniff_test_target(data) -> list[str]:
                 # 確定させない）。
                 matches.append("nankai_trough")
                 matches.append("other_quake_advisory_detail")
+        elif _is_jma_quake_json(data) and not tsunami_body:
+            # 【2026-10-17追加】気象庁HP JSONの地震情報（震度速報・震源・各地の震度等）。
+            # Body.Earthquake を持つ他の形式（長周期地震動・震源要素更新）とは
+            # Head.Title（QUAKE_INFO_TITLES）で区別する。
+            matches.append("quake")
         elif isinstance(body.get("Earthquake"), (dict, list)) and not tsunami_body:
             if "顕著な地震の震源要素更新" in title_text:
                 # 意図された重複配信（上記と同様の理由で両方提示）
@@ -874,7 +950,9 @@ async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path
     except (FileNotFoundError, ValueError):
         return False
 
-    validate_expected_fields(cog_key, data)
+    convert_first = target.get("convert_before_validate", False)
+    if not convert_first:
+        validate_expected_fields(cog_key, data)
 
     # 【2026-08-30 追加】data_converter: 本番コードでは生データを
     # そのまま notify_* に渡すのではなく、事前に変換関数を通す
@@ -887,11 +965,16 @@ async def _invoke_test_target(cog_key: str, target: dict, cog, method, json_path
     data_converter = target.get("data_converter")
     if data_converter is not None:
         try:
-            data = data_converter(data)
+            if target.get("data_converter_needs_path"):
+                data = data_converter(data, json_path)
+            else:
+                data = data_converter(data)
         except Exception as e:
             print(f"[TEST] エラー: 入力データの変換に失敗しました（{cog_key}）: {type(e).__name__}: {e}")
             logger.error(f"CLIテスト データ変換エラー（{cog_key}）: {e}", exc_info=True)
             return False
+        if convert_first:
+            validate_expected_fields(cog_key, data)
 
     data_kwarg = target.get("data_kwarg", "data")
     supports_is_test = target.get("supports_is_test", True)

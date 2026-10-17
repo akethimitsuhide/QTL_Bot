@@ -601,11 +601,13 @@ QUAKE_ONE_POLL_SECONDS        = max(6.0, _env_float("QUAKE_ONE_POLL_SECONDS", 6.
 # 重複照合の保持時間6時間より短くすること）。
 P2P_FAILOVER_CATCHUP_MINUTES  = max(1, _env_int("P2P_FAILOVER_CATCHUP_MINUTES", 30))
 # 取得元の優先順（カンマ区切り）。先頭から順に試し、最初に応答した
-# 取得元の結果を使う。指定できる値: jma_json（気象庁HP JSON）, jma_xml（気象庁XML）,
-# quake_one（Quake.One Static API。2026-10-02〜。http のみの第三者配信のため既定では最後）
+# 取得元の結果を使う。指定できる値: quake_one（Quake.One Static API）,
+# jma_json（気象庁HP JSON）, jma_xml（気象庁XML。2026-10-17から既定の対象外）
+# 【2026-10-17変更】既定を quake_one,jma_json に変更（Quake.One を優先。一覧が小さく
+# 気象庁への取得負荷も増えない。jma_xml は既定から除外。必要なら明示的に指定できる）
 QUAKE_FAILOVER_SOURCES = [
     s.strip().lower()
-    for s in _getenv_nonempty("QUAKE_FAILOVER_SOURCES", "jma_json,jma_xml,quake_one").split(",")
+    for s in _getenv_nonempty("QUAKE_FAILOVER_SOURCES", "quake_one,jma_json").split(",")
     if s.strip()
 ]
 
