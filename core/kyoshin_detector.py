@@ -116,20 +116,27 @@ class DetectorConfig:
     blacklist_shindo_threshold_island: float = 4.5  # 離島は震度5弱以上
     blacklist_flat_diff: float = 0.3                # 「ほぼ変化なし」とみなす上昇幅の上限
 
-    # フェーズ境界（実震度値）。ingen084氏の記事の基準にそのまま準拠。
+    # フェーズ境界（実震度値）。
+    # 【2026-10-17変更】5段階（Weaker/Weak/Medium/Strong/Stronger）から次の4段階へ変更:
+    #   Weak     : 弱い揺れ        （震度0以下相当）
+    #   Medium   : 揺れ            （震度1以上4以下相当）
+    #   Strong   : 強い揺れ        （震度5弱以上5強以下相当）
+    #   Stronger : 非常に強い揺れ  （震度6弱以上相当）
+    # 境界は計測震度の階級の区切り（0.5 / 4.5 / 5.5）。ここは内部の判定のみで、
+    # 通知・ログには震度階級への換算結果を出さない（定性的なフェーズ名のみ）。
     phase_bounds: dict = field(default_factory=lambda: {
-        "Weaker":   -1.5,  # 実震度-1.5以上-1.0未満
-        "Weak":     -1.0,  # 実震度-1.0以上1未満
-        "Medium":    1.0,  # 実震度1以上3未満
-        "Strong":    3.0,  # 実震度3以上5弱未満
-        "Stronger":  4.5,  # 実震度5弱以上
+        "Weak":      -3.0,  # 実震度0.5未満（下限は変換範囲の最小値）
+        "Medium":     0.5,  # 実震度0.5以上4.5未満
+        "Strong":     4.5,  # 実震度4.5以上5.5未満
+        "Stronger":   5.5,  # 実震度5.5以上
     })
 
 
 def _phase_from_shindo(shindo: float, config: DetectorConfig) -> str:
     """実震度値（10倍していない値。例: 震度3なら3.0）からフェーズ名を判定する。"""
-    phase = "Weaker"
-    for name, bound in sorted(config.phase_bounds.items(), key=lambda kv: kv[1]):
+    ordered = sorted(config.phase_bounds.items(), key=lambda kv: kv[1])
+    phase = ordered[0][0]   # 最弱のフェーズ（どの境界にも届かない値もここに入る）
+    for name, bound in ordered:
         if shindo >= bound:
             phase = name
     return phase
@@ -183,7 +190,7 @@ class SeismicEvent:
     created_at: float
     member_station_ids: set[str] = field(default_factory=set)
     max_shindo: float = -999.0
-    phase: str = "Weaker"
+    phase: str = "Weak"
     last_updated_at: float = 0.0
 
     # イベントの生死を決めるたった1つの値。イベントに属する

@@ -69,7 +69,7 @@ www.lmoni.bosai.go.jp/img_svr に変更した）
 最新時刻(latest_time)を取得し、その時刻をもとに画像URLを構築する
 （従来の「現在時刻から遡ってリトライ探索する」方式は、latest.json取得に
 失敗した場合のフォールバックとしてのみ使用する）。
-https://smi.lmoniexp.bosai.go.jp/webservice/server/pros/latest.json
+https://www.lmoni.bosai.go.jp/img_svr/webservice/server/pros/latest.json
 
 【Discord通知の内容について】
 - 検知した揺れ検知イベントの通知には、jma_s系統・abrspmx_s(LMoni)系統の
@@ -141,26 +141,33 @@ JMA_S_BASE = "https://www.lmoni.bosai.go.jp/img_svr/data/map_img/RealTimeImg/jma
 #   {"request_time": "2026/07/20 07:51:22", "latest_time": "2026/07/20 07:51:21",
 #    "result": {"status": "success", "message": ""}, "security": {...}}
 # latest_time は日本時間(JST)で "YYYY/MM/DD HH:MM:SS" 形式。
-KYOSHIN_LATEST_TIME_API = "https://smi.lmoniexp.bosai.go.jp/webservice/server/pros/latest.json"
+# 【2026-10-17修正】配信元を画像（JMA_S_BASE）と同じ www.lmoni.bosai.go.jp/img_svr に
+# そろえた。従来は旧ホスト smi.lmoniexp.bosai.go.jp のままで、取得に失敗し続けて
+# 「画像の時刻が不明」になり、現在時刻から遡る探索方式にフォールバックしていた。
+KYOSHIN_LATEST_TIME_API = "https://www.lmoni.bosai.go.jp/img_svr/webservice/server/pros/latest.json"
 
 # NIEDの画像URLはJST基準で命名されているため、サーバーのローカルタイムゾーン
 # 設定（例: ラズパイがUTCのまま等）に依存させず、常に明示的にJSTで計算する。
 JST = ZoneInfo("Asia/Tokyo")
 
 # フェーズの強さの序列（KYOSHIN_MIN_NOTIFY_PHASE との比較に使用）
-PHASE_ORDER = ["Weaker", "Weak", "Medium", "Strong", "Stronger"]
+# 【2026-10-17変更】5段階→4段階（弱い揺れ／揺れ／強い揺れ／非常に強い揺れ）。
+# 旧設定の "Weaker"（最弱）は "Weak" と同じ扱いにする（_phase_index 参照）。
+PHASE_ORDER = ["Weak", "Medium", "Strong", "Stronger"]
 
-# 定性的なフェーズ名の日本語表示（震度の具体的数値は一切出さない）
+# 定性的なフェーズ名の日本語表示。通知・ログには震度階級への換算結果や震度の
+# 数値は一切出さない（防災科研の利用規約への配慮）。
 PHASE_LABEL_JA = {
-    "Weaker":   "微弱な揺れの可能性",
-    "Weak":     "弱い揺れの可能性",
-    "Medium":   "揺れを検知",
-    "Strong":   "強い揺れを検知",
-    "Stronger": "非常に強い揺れを検知",
+    "Weak":     "弱い揺れ",
+    "Medium":   "揺れ",
+    "Strong":   "強い揺れ",
+    "Stronger": "非常に強い揺れ",
 }
 
 
 def _phase_index(phase: str) -> int:
+    if phase == "Weaker":   # 旧設定（5段階時代の最弱フェーズ）との互換
+        return 0
     try:
         return PHASE_ORDER.index(phase)
     except ValueError:
@@ -588,6 +595,23 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         except Exception as e:
             logger.warning(f"KyoshinMonitorCog: デバッグ画像の保存に失敗しました: {e}")
 
+    def _warn_latest_failure(self, reason: str) -> None:
+        """
+        latest.json の取得失敗を警告する（5分に1回まで）。
+
+        【2026-10-17追加】従来は DEBUG ログのみだったため、配信元ホストの変更で
+        取得が失敗し続けても（画像の時刻が不明のまま、現在時刻から遡る探索方式に
+        フォールバックし続けても）気づけなかった。
+        """
+        now = time.monotonic()
+        last = getattr(self, "_latest_fail_logged_at", None)
+        if last is None or now - last >= 300:
+            self._latest_fail_logged_at = now
+            logger.warning(
+                f"KyoshinMonitorCog: latest.json の取得に失敗しました（{reason}）。"
+                f"画像の時刻が不明なまま、現在時刻から遡る探索方式で画像を取得します"
+            )
+
     async def _fetch_latest_image_time(self) -> datetime | None:
         """
         latest.json から実際に配信されている最新画像の時刻(latest_time)を取得する。
@@ -600,14 +624,13 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
                 KYOSHIN_LATEST_TIME_API, timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
                 if resp.status != 200:
-                    logger.debug(
-                        f"KyoshinMonitorCog: latest.json取得失敗 (status={resp.status})"
-                    )
+                    self._warn_latest_failure(f"status={resp.status}")
                     return None
                 data = await resp.json(content_type=None)
         except Exception as e:
-            logger.debug(f"KyoshinMonitorCog: latest.json取得エラー: {e}")
+            self._warn_latest_failure(f"{type(e).__name__}: {e}")
             return None
+        self._latest_fail_logged_at = None   # 復旧したら次の失敗でまた警告できるようにする
 
         try:
             if data.get("result", {}).get("status") != "success":
@@ -716,8 +739,11 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         満たさない場合も検知自体は継続する（通知だけ抑制する）。
         """
         member_count = len(event.member_station_ids)
+        # 「弱い揺れ」は SHINDO0 の件数、「揺れ」以上は SHINDO1 の件数を要求する
+        # （変数名は旧称。2026-10-17にフェーズ境界の変更とともにフェーズで判定）
         min_stations = (
-            KYOSHIN_MIN_STATIONS_SHINDO1 if event.max_shindo >= 1.0 else KYOSHIN_MIN_STATIONS_SHINDO0
+            KYOSHIN_MIN_STATIONS_SHINDO1 if _phase_index(event.phase) >= _phase_index("Medium")
+            else KYOSHIN_MIN_STATIONS_SHINDO0
         )
         if member_count < min_stations:
             # 【2026-10-03修正】防災科研の利用規約に配慮し、実測震度の数値はログに出力しない
@@ -844,7 +870,7 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         elif event is not None:
             title = "強震モニタ（画像解析検知）"
             description = (
-                f"{PHASE_LABEL_JA.get(event.phase, '揺れを検知')}\n{level_str}\n"
+                f"{PHASE_LABEL_JA.get(event.phase, '揺れ')}を検知\n{level_str}\n"
                 f"※気象庁公式の情報ではありません。強震モニタ画像の解析による参考情報です。"
             )
             footer = "防災科研 強震モニタ (jma_s / abrspmx_s) の画像解析による自動検知"
@@ -893,7 +919,8 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
                 f"(イベント生成→通知={now_loop - event.created_at:.1f}秒, "
                 # 【2026-10-03修正】防災科研の利用規約に配慮し、強震モニタ由来の
                 # 実測震度の数値はログに出力しない。
-                f"検出観測点={len(event.member_station_ids)}件, フェーズ={event.phase}, "
+                f"検出観測点={len(event.member_station_ids)}件, "
+                f"揺れの強さ={PHASE_LABEL_JA.get(event.phase, event.phase)}, "
                 f"解析画像の古さ={image_age})"
             )
 

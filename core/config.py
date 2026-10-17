@@ -521,19 +521,18 @@ KYOSHIN_NEIGHBOR_TRIGGER_COUNT = _env_int("KYOSHIN_NEIGHBOR_TRIGGER_COUNT", 3)
 KYOSHIN_EVENT_TIMEOUT_SEC = float(os.getenv("KYOSHIN_EVENT_TIMEOUT_SEC", "45.0"))
 
 # 通知を送信する最小フェーズ（定性的な強さの下限）。
-# Weaker < Weak < Medium < Strong < Stronger の順に強い。
-# 例えば "Medium" を指定すると、Weaker/Weak 相当のイベントは検知はするが
+# 【2026-10-17変更】4段階: Weak（弱い揺れ）< Medium（揺れ）< Strong（強い揺れ）
+# < Stronger（非常に強い揺れ）。旧設定の "Weaker" は "Weak" と同じ扱い。
+# 例えば "Medium" を指定すると、Weak 相当のイベントは検知はするが
 # Discord 通知は送らない（誤検知抑制・通知過多防止のための調整用）。
-# ingen084氏の記事の基準に準拠し、Bot側も最弱フェーズから通知する
-# デフォルトとする。
-KYOSHIN_MIN_NOTIFY_PHASE     = os.getenv("KYOSHIN_MIN_NOTIFY_PHASE", "Weaker")
+KYOSHIN_MIN_NOTIFY_PHASE     = os.getenv("KYOSHIN_MIN_NOTIFY_PHASE", "Weak")
 
 # 通知を送るために必要な最小の検出観測点（グリッドセル）数を、
 # 震度帯によって切り替える（震度が低いほど誤検知の可能性が高いため、
 # より多くの観測点での同時検出を要求する）。
-# 実震度(event.max_shindo)が1.0未満（震度0相当）の場合はこちら。
+# 【2026-10-17】フェーズが「弱い揺れ」（Weak）の場合はこちら。
 KYOSHIN_MIN_STATIONS_SHINDO0 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO0", 4)
-# 実震度が1.0以上（震度1相当以上）の場合はこちら。
+# フェーズが「揺れ」（Medium）以上の場合はこちら。
 KYOSHIN_MIN_STATIONS_SHINDO1 = _env_int("KYOSHIN_MIN_STATIONS_SHINDO1", 2)
 
 # デバッグ用: アクティブセルが1件以上あったフレームの元画像をローカルに
