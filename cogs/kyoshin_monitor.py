@@ -249,6 +249,9 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         # 振動レベル（kwatch-24h.net）の最新値と受信時刻（monotonic）
         self._vib_level: int | None = None
         self._vib_at: float | None = None
+        # 【2026-10-17】振動レベル音を最後に鳴らした振動レベルの受信時刻（_vib_at と同じ値）。
+        # 振動レベルの受信1回につき音は1回までにするために使う。
+        self._vib_sound_at: float | None = None
         self._vib_detecting_prev = False
         # 最新フレーム（jma_s）内の最大実震度。通知色に使う（揺れ候補が無ければ None）
         self._latest_max_shindo: float | None = None
@@ -845,7 +848,7 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         # 振動レベル音。Discord送信より先に鳴らす（送信待ちで音を遅らせないため）。
         # EEW通知時は常に、検知通知時は KYOSHIN_DETECT_VIBRATION_SOUND が有効なとき鳴らす
         if vib_level is not None and (eew or KYOSHIN_DETECT_VIBRATION_SOUND):
-            await self._play_vibration_sound(vib_level)
+            await self._play_vibration_sound_once_per_sample(vib_level)
 
         if not KYOSHIN_RECV_VIBRATION_ENABLE:
             level_str = ""
@@ -924,14 +927,28 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
                 f"解析画像の古さ={image_age})"
             )
 
+    async def _play_vibration_sound_once_per_sample(self, vib_level: int) -> None:
+        """
+        振動レベルの受信1回につき、振動レベル音を1回だけ鳴らす。
+
+        【2026-10-17追加】通知ループは「有効な受信のうち最短の間隔」（強震モニタ画像が
+        有効なら1秒）で回るため、振動レベル音をそのまま毎回鳴らすと、振動レベルの
+        受信間隔（KYOSHIN_RECV_VIBRATION_INTERVAL_SEC。既定2秒）より短い間隔で
+        同じ値の音を鳴らしてしまう。同じ受信（_vib_at が同じ）では鳴らさず、
+        振動レベルの受信間隔で鳴らす。
+        """
+        if self._vib_at is None or self._vib_at == self._vib_sound_at:
+            return
+        self._vib_sound_at = self._vib_at
+        await self._play_vibration_sound(vib_level)
+
     async def _play_vibration_sound(self, vib_level: int) -> None:
         """
         振動レベルに応じた効果音（lv100/lv1000/lv2000）を鳴らす。
 
-        通知ループは1秒間隔で繰り返し呼ばれるため、そのまま毎回キューへ
-        積むと再生が実時間より遅れて溜まっていく（MP3の再生時間の方が
-        長い）。共通AudioCogのMP3キューに未再生の音が残っている間は
-        積み増さず、EEWの効果音（high_alert等）を待たせないようにもする。
+        共通AudioCogのMP3キューに未再生の音が残っている間は積み増さず
+        （MP3の再生時間の方が長く、そのまま積むと再生が実時間より遅れて
+        溜まっていくため）、EEWの効果音（high_alert等）を待たせないようにもする。
         """
         key = VIBRATION_TIER_MP3.get(vibration_tier(vib_level))
         if key is None:

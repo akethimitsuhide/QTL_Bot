@@ -331,7 +331,7 @@ python3 bot.py
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 | `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | 画像のデコード＋観測点サンプリングの所要時間がこの秒数を超えたらWARNINGログを出す（Raspberry Pi等でのCPU負荷の把握用） |
 | `KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC` | 300 | 画像デコード失敗（想定内の一時的事象）のログをこの秒数ごとに件数集約して1回だけWARNINGに出す（詳細は毎回DEBUGに出る） |
-| `KYOSHIN_DETECT_VIBRATION_SOUND` | true | 強震モニタの揺れ検知の通知時に、EEW発表時の通知と同じ振動レベル音（`lv100`/`lv1000`/`lv2000`）を鳴らすか（EEW発表時の通知では常に鳴らす）。判定基準は`core.kyoshin_shared.vibration_tier`で共通化している。既に音声再生待ちがある間は積み増さない |
+| `KYOSHIN_DETECT_VIBRATION_SOUND` | true | 強震モニタの揺れ検知の通知時に、EEW発表時の通知と同じ振動レベル音（`lv100`/`lv1000`/`lv2000`）を鳴らすか（EEW発表時の通知では常に鳴らす）。判定基準は`core.kyoshin_shared.vibration_tier`で共通化している。既に音声再生待ちがある間は積み増さない。音は振動レベルの受信1回につき1回（`KYOSHIN_RECV_VIBRATION_INTERVAL_SEC` の間隔）で、通知ループの間隔には従わない |
 
 ### 強震モニタ 誤検知対策の調整値（`.env.kyoshin`）
 通常は変更不要。調整したい場合のみ `cp .env.kyoshin.example .env.kyoshin` して編集する。

@@ -57,3 +57,40 @@ def test_latest_failure_warning_is_rate_limited(caplog):
         cog._warn_latest_failure("a")
         cog._warn_latest_failure("b")
     assert sum("latest.json" in r.message for r in caplog.records) == 1
+
+
+# ---------- 振動レベル音は振動レベルの受信1回につき1回（2026-10-17） ----------
+def _cog_for_sound():
+    cog = km.KyoshinMonitorCog.__new__(km.KyoshinMonitorCog)
+    cog._vib_at = None
+    cog._vib_sound_at = None
+    played = []
+
+    async def fake_play(level):
+        played.append(level)
+
+    cog._play_vibration_sound = fake_play
+    return cog, played
+
+
+def test_vibration_sound_once_per_received_sample():
+    cog, played = _cog_for_sound()
+
+    async def run():
+        # 1回目の受信 → 通知ループが1秒間隔で2回呼んでも音は1回
+        cog._vib_at = 100.0
+        await cog._play_vibration_sound_once_per_sample(150)
+        await cog._play_vibration_sound_once_per_sample(150)
+        # 2秒後の次の受信 → もう1回
+        cog._vib_at = 102.0
+        await cog._play_vibration_sound_once_per_sample(900)
+        await cog._play_vibration_sound_once_per_sample(900)
+
+    asyncio.run(run())
+    assert played == [150, 900]
+
+
+def test_vibration_sound_not_played_without_sample():
+    cog, played = _cog_for_sound()
+    asyncio.run(cog._play_vibration_sound_once_per_sample(150))
+    assert played == []
