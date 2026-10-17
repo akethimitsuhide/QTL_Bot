@@ -324,9 +324,9 @@ python3 bot.py
 | `KYOSHIN_NOTIFY_ON_EEW` | true | EEW発表時（第一報〜最終報・キャンセル報、最長300秒）に通知するか。通知中は検知による通知を中断する（検知は継続） |
 | `KYOSHIN_NOTIFY_ON_DETECT` | true | 揺れ検知時（画像解析・振動レベル）に通知するか。検知が終わるまで通知を続ける |
 | `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
-| `KYOSHIN_MIN_NOTIFY_PHASE` | Weaker | 通知を送信する最小フェーズ（Weaker < Weak < Medium < Strong < Stronger） |
-| `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 実震度が震度0相当（1.0未満）の場合に通知に必要な最小検出観測点数 |
-| `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 実震度が震度1相当以上（1.0以上）の場合に通知に必要な最小検出観測点数 |
+| `KYOSHIN_MIN_NOTIFY_PHASE` | Weak | 通知を送信する最小フェーズ（Weak＝弱い揺れ < Medium＝揺れ < Strong＝強い揺れ < Stronger＝非常に強い揺れ。旧設定の `Weaker` は `Weak` と同じ扱い） |
+| `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 揺れの強さが「弱い揺れ」（Weak）の場合に通知に必要な最小検出観測点数 |
+| `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 揺れの強さが「揺れ」（Medium）以上の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 | `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | 画像のデコード＋観測点サンプリングの所要時間がこの秒数を超えたらWARNINGログを出す（Raspberry Pi等でのCPU負荷の把握用） |
@@ -667,6 +667,7 @@ python3 -m pytest tests/ -q
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
 | `test_quake_failover.py` | P2P 障害時の代替取得 |
+| `test_kyoshin_phase.py` | 強震モニタ検知の揺れの強さ（4段階）・`latest.json` の配信元 |
 | `test_quake_test_input.py` | `--test_quake` の気象庁JSON／Quake.One入力・観測点名の「＊」照合・代替取得の既定の取得元 |
 | `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
 | `test_env_writer.py` | `.env` の指定キーだけの安全な書き換え（行の保持・アトミック書き込み・拒否する値） |
