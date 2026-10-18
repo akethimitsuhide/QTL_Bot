@@ -30,6 +30,8 @@ Cog名は固定文字列 "EewCog" 等を使うため、Cogクラス名を変更�
 この Cog 内の参照も合わせて更新すること。
 """
 import os
+import gzip
+import json
 import time
 import socket
 import logging
@@ -560,7 +562,39 @@ let currentType = 'quake';
 let allRecords = [];
 let markers = [];
 
-const map = L.map('map').setView([36.5, 138.0], 5);  // 日本全体が収まる初期表示
+// 【2026-10-19 日付変更線（経度±180度）での地図切れの修正】
+// 背景地図（国境・区域のGeoJSON）は経度-180〜180度の1枚だけで、Leafletの
+// タイルレイヤーと違い自動では東西にコピーされない。そのため、日本から見て
+// 太平洋の向こう側（フィジー・トンガ・アリューシャン・アラスカ・南北アメリカ等）
+// の地震を表示すると、①陸地が180度で途切れる（ロシア東端・フィジー等の180度を
+// またぐ国は東西に分割されている）②震源マーカーが地図の反対端（経度-170度付近
+// なら西の端）に飛ぶ、という状態になっていた。
+// 対策: 経度を「日本を中心に太平洋側へ連続させた座標系」（WRAP_WEST〜WRAP_WEST+360度）
+// に揃え、陸地は+360度シフトしたコピーも重ねて描画する（core/gis_render.py の
+// _pick_lon_shift と同じ考え方）。表示範囲もこの座標系に制限する。
+// 描画負荷対策として、ベクターはCanvasレンダラーで描画する（SVGよりDOMが軽い）。
+const WRAP_WEST = -30;   // 座標系の西端（大西洋上。欧州・アフリカ西岸を分断しない）
+function normLon(lon) {
+  lon = Number(lon);
+  while (lon < WRAP_WEST) lon += 360;
+  while (lon >= WRAP_WEST + 360) lon -= 360;
+  return lon;
+}
+function shiftCoords(c, dx) {
+  return typeof c[0] === 'number' ? [c[0] + dx, c[1]] : c.map(function (x) { return shiftCoords(x, dx); });
+}
+function shiftFeatures(features, dx) {
+  return features.map(function (f) {
+    return { type: 'Feature', properties: {}, geometry: { type: f.geometry.type, coordinates: shiftCoords(f.geometry.coordinates, dx) } };
+  });
+}
+
+const map = L.map('map', {
+  preferCanvas: true,
+  minZoom: 2,
+  maxBounds: [[-85, WRAP_WEST], [85, WRAP_WEST + 360]],
+  maxBoundsViscosity: 1.0,
+}).setView([36.5, 138.0], 5);  // 日本全体が収まる初期表示
 
 // 【2026-09-26 地理院タイルの使用を廃止】
 // 従来は国土地理院タイル（Leafletのタイルレイヤー）を背景地図に使って
@@ -579,17 +613,19 @@ const map = L.map('map').setView([36.5, 138.0], 5);  // 日本全体が収まる
 map.createPane('landFillPane');
 map.getPane('landFillPane').style.zIndex = 350;
 
-function loadBaseMapLayer(url, styleOverrides) {
+function loadBaseMapLayer(url, styleOverrides, wrapCopy) {
   fetch(url)
     .then(r => { if (!r.ok) throw new Error('not available'); return r.json(); })
     .then(features => {
-      L.geoJSON(features, {
-        pane: 'landFillPane',
-        style: Object.assign({
-          color: '#9a9a9a', weight: 1,
-          fillColor: '#eee8dc', fillOpacity: 1, interactive: false,
-        }, styleOverrides || {}),
-      }).addTo(map);
+      const style = Object.assign({
+        color: '#9a9a9a', weight: 1,
+        fillColor: '#eee8dc', fillOpacity: 1, interactive: false,
+      }, styleOverrides || {});
+      L.geoJSON(features, { pane: 'landFillPane', style: style }).addTo(map);
+      // 日付変更線をまたいだ先（東経180度〜）にも陸地を描くための+360度コピー
+      if (wrapCopy) {
+        L.geoJSON(shiftFeatures(features, 360), { pane: 'landFillPane', style: style }).addTo(map);
+      }
     })
     .catch(() => { /* データ未取得時は#mapのbackground（海色）のみの地図になる（致命的ではない） */ });
 }
@@ -599,7 +635,7 @@ function loadBaseMapLayer(url, styleOverrides) {
 // 上書きする。core/gis_render.py の render_overseas_map と同じレイヤー
 // 順）。GIS_MAP_ENABLE=false・GeoJSON未取得の場合はいずれも404が返り、
 // その場合は#mapのbackground（海色）だけの地図になる。
-loadBaseMapLayer('/status/gis_countries');
+loadBaseMapLayer('/status/gis_countries', null, true);  // 世界の国境のみ+360度コピーも描く（日本の区域は不要）
 loadBaseMapLayer('/status/gis_local_areas', { color: '#6e6e6e' });
 
 function escapeHtml(s) {
@@ -655,7 +691,7 @@ function renderMarkers(records) {
   for (const r of sorted) {
     if (r.latitude == null || r.longitude == null) continue;
     const color = scaleColor(r.max_scale);
-    const marker = L.circleMarker([r.latitude, r.longitude], {
+    const marker = L.circleMarker([r.latitude, normLon(r.longitude)], {
       radius: magnitudeRadius(r.magnitude), color: color, fillColor: color, fillOpacity: 0.75, weight: 1,
     }).addTo(map);
     let popup = '<b>' + escapeHtml(r.hypocenter_name) + '</b><br>' +
@@ -669,7 +705,7 @@ function renderMarkers(records) {
     }
     marker.bindPopup(popup);
     markers.push(marker);
-    pts.push([r.latitude, r.longitude]);
+    pts.push([r.latitude, normLon(r.longitude)]);
   }
   if (pts.length > 0) {
     map.fitBounds(pts, { maxZoom: 9, padding: [20, 20] });
@@ -713,7 +749,7 @@ function renderTable(records) {
       const lat = parseFloat(row.dataset.lat);
       const lon = parseFloat(row.dataset.lon);
       if (!isNaN(lat) && !isNaN(lon)) {
-        map.setView([lat, lon], 9);
+        map.setView([lat, normLon(lon)], 9);
       }
     });
   }
@@ -868,6 +904,54 @@ def _status_default_permissions(func):
 async def _status_prefix_check(ctx) -> bool:
     """!status 用チェック。False を返すと commands.CheckFailure になる。"""
     return _can_use_status(ctx.author)
+
+
+# ===============================
+# ダッシュボードの地図データ配信用キャッシュ（2026-10-19追加）
+# ===============================
+# /status/gis_local_areas（約0.9MB）・/status/gis_countries（約0.7MB）は、
+# 従来はページを開くたびに ①GeoJSONのディスク読み込み・JSONパース ②全頂点の
+# JSON再シリアライズ ③無圧縮での送信 を行っていた。内容はBot稼働中に変わらない
+# （GISデータの更新は再起動時）ため、描画に不要な属性を除いて座標を丸め、
+# JSON化・gzip圧縮した結果をプロセス内に1回だけ作って使い回す。
+# 空（未取得）の結果はキャッシュしない（取得完了後に使えるようにするため）。
+_GIS_PAYLOAD_COORD_DECIMALS = 4   # 約11m。地図表示には十分
+_gis_payload_cache: dict = {}
+
+
+def _round_coords(c, nd: int):
+    if c and isinstance(c[0], (int, float)):
+        return [round(c[0], nd), round(c[1], nd)]
+    return [_round_coords(x, nd) for x in c]
+
+
+def _build_gis_payload(features: list) -> tuple[bytes, bytes]:
+    """features（GeoJSON）から、Leaflet描画に必要な geometry のみを残した (JSON, gzip済みJSON) を作る。"""
+    slim = [
+        {
+            "type": "Feature",
+            "properties": {},
+            "geometry": {
+                "type": f["geometry"]["type"],
+                "coordinates": _round_coords(f["geometry"]["coordinates"], _GIS_PAYLOAD_COORD_DECIMALS),
+            },
+        }
+        for f in features
+        if f.get("geometry") and f["geometry"].get("coordinates")
+    ]
+    raw = json.dumps(slim, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return raw, gzip.compress(raw, compresslevel=6)
+
+
+def _gis_payload_response(request, payload):
+    """キャッシュ済みの (JSON, gzip済みJSON) を、クライアントの対応に応じて返す。"""
+    from aiohttp import web
+    raw, gz = payload
+    headers = {"Cache-Control": "private, max-age=3600", "Vary": "Accept-Encoding"}
+    if "gzip" in request.headers.get("Accept-Encoding", ""):
+        headers["Content-Encoding"] = "gzip"
+        return web.Response(body=gz, content_type="application/json", headers=headers)
+    return web.Response(body=raw, content_type="application/json", headers=headers)
 
 
 class SystemCog(commands.Cog):
@@ -2201,13 +2285,18 @@ class SystemCog(commands.Cog):
             if not GIS_MAP_ENABLE:
                 return web.json_response({"error": "GIS_MAP_ENABLE is false"}, status=404)
             try:
-                features = gis_data.load_local_areas()
+                payload = _gis_payload_cache.get("local_areas")
+                if payload is None:
+                    features = gis_data.load_local_areas()
+                    if features:
+                        payload = _build_gis_payload(features)
+                        _gis_payload_cache["local_areas"] = payload
             except Exception as e:
                 logger.error(f"/status/gis_local_areas エラー: {e}")
                 return web.json_response({"error": str(e)}, status=500)
-            if not features:
+            if not payload:
                 return web.json_response({"error": "local_areas.geojson not cached yet"}, status=404)
-            return web.json_response(features)
+            return _gis_payload_response(request, payload)
 
         async def gis_countries_handler(request):
             """
@@ -2239,14 +2328,23 @@ class SystemCog(commands.Cog):
             if not GIS_MAP_ENABLE:
                 return web.json_response({"error": "GIS_MAP_ENABLE is false"}, status=404)
             try:
-                loop = asyncio.get_running_loop()
-                features = await loop.run_in_executor(None, gis_data.load_countries_simplified)
+                payload = _gis_payload_cache.get("countries")
+                if payload is None:
+                    loop = asyncio.get_running_loop()
+
+                    def _load_and_build():
+                        feats = gis_data.load_countries_simplified()
+                        return _build_gis_payload(feats) if feats else None
+
+                    payload = await loop.run_in_executor(None, _load_and_build)
+                    if payload:
+                        _gis_payload_cache["countries"] = payload
             except Exception as e:
                 logger.error(f"/status/gis_countries エラー: {e}")
                 return web.json_response({"error": str(e)}, status=500)
-            if not features:
+            if not payload:
                 return web.json_response({"error": "countries.geojson not cached yet"}, status=404)
-            return web.json_response(features)
+            return _gis_payload_response(request, payload)
 
         async def dashboard_handler(request):
             """
