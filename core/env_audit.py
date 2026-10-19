@@ -43,7 +43,7 @@ import glob
 # 「実行時に読み込むファイル」、こちらは「ドキュメントとして
 # チェックするファイル」なので、リポジトリのファイル名が対応関係に
 # あるだけで、コード上で自動的には連動しない）。
-_ENV_EXAMPLE_FILES = (".env.example", ".env.kyoshin.example")
+_ENV_EXAMPLE_FILES = (".env.example", ".env.kyoshin.example", ".env.yomiage.example")
 
 # コード側の走査対象（bot.py と cogs/*.py, core/*.py の全 .py ファイル）
 _CODE_GLOB_PATTERNS = ("bot.py", "cogs/*.py", "core/*.py")

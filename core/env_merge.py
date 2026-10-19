@@ -11,8 +11,9 @@ core/env_merge.py
 （cp と git merge の中間のような動き）。
 
 【動作】
-- .env.example → .env、.env.kyoshin.example → .env.kyoshin の順に処理する
-  （.env.kyoshin が無い場合は、通常運用では不要なファイルのためスキップする）。
+- .env.example → .env、.env.kyoshin.example → .env.kyoshin、.env.yomiage.example →
+  .env.yomiage の順に処理する（.env.kyoshin・.env.yomiage が無い場合は、通常運用では
+  不要なファイルのためスキップする）。
 - .env.example で `KEY=値` の形で宣言されている項目のうち、対象ファイルに
   `KEY=` も `# KEY=`（コメントアウト）も無いものを「不足」とみなす。
   コメントアウトされた行は不足に含めない（.env.example 側のコメントアウト項目は
@@ -51,6 +52,7 @@ from datetime import datetime
 _FILE_PAIRS = (
     (".env.example", ".env"),
     (".env.kyoshin.example", ".env.kyoshin"),
+    (".env.yomiage.example", ".env.yomiage"),
 )
 
 _DECLARED_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")

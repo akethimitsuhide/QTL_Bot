@@ -287,6 +287,14 @@ QUAKE_INTENSITY_COLLAPSE_THRESHOLD = _env_int("QUAKE_INTENSITY_COLLAPSE_THRESHOL
 # → 「北海道,東北,関東」）。
 EEW_REGION_COLLAPSE_THRESHOLD = _env_int("EEW_REGION_COLLAPSE_THRESHOLD", 10)
 
+# EEW 読み上げテンプレート（.env.yomiage。書式・タグは core/yomiage.py 参照）。
+# 未設定・空の場合は core.yomiage.EEW_DEFAULTS（従来と同じ文言）を使う。
+YOMI_EEW_FIRST_WARN = _getenv_nonempty("YOMI_EEW_FIRST_WARN", "")
+YOMI_EEW_FIRST_FORECAST = _getenv_nonempty("YOMI_EEW_FIRST_FORECAST", "")
+YOMI_EEW_UPDATE_WARN = _getenv_nonempty("YOMI_EEW_UPDATE_WARN", "")
+YOMI_EEW_UPDATE_INTENSITY = _getenv_nonempty("YOMI_EEW_UPDATE_INTENSITY", "")
+YOMI_EEW_UPDATE_HYPO = _getenv_nonempty("YOMI_EEW_UPDATE_HYPO", "")
+
 # ===============================
 # 津波・その他通知フィルター
 # ===============================

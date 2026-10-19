@@ -52,8 +52,11 @@ from core.config import (
     WOLFX_WSS,
     ENABLE_KYOSHIN,
     EEW_REGION_COLLAPSE_THRESHOLD,
+    YOMI_EEW_FIRST_WARN, YOMI_EEW_FIRST_FORECAST, YOMI_EEW_UPDATE_WARN,
+    YOMI_EEW_UPDATE_INTENSITY, YOMI_EEW_UPDATE_HYPO,
 )
 from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP, collapse_regions_if_needed
+from core.yomiage import EEW_DEFAULTS, EEW_TAGS, TemplateSet, build_eew_values
 from core.helpers import (
     safe_int, safe_float, safe_bool, truncate_embed_description,
     shindo_code_from_max_label,
@@ -77,6 +80,21 @@ logger = logging.getLogger("QTLBot")
 # EEW第一報からの強震モニタ通知の最長時間（秒）。最終報・キャンセル報が届かなくても解除する
 EEW_MONITOR_MAX_SEC = 300
 
+
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    EEW_DEFAULTS, EEW_TAGS,
+    {
+        "EEW_FIRST_WARN": YOMI_EEW_FIRST_WARN,
+        "EEW_FIRST_FORECAST": YOMI_EEW_FIRST_FORECAST,
+        "EEW_UPDATE_WARN": YOMI_EEW_UPDATE_WARN,
+        "EEW_UPDATE_INTENSITY": YOMI_EEW_UPDATE_INTENSITY,
+        "EEW_UPDATE_HYPO": YOMI_EEW_UPDATE_HYPO,
+    },
+    warn=logger.warning,
+)
 
 class EewCog(commands.Cog, AudioClientMixin):
     """緊急地震速報（EEW）を扱う Cog。"""
@@ -714,7 +732,6 @@ class EewCog(commands.Cog, AudioClientMixin):
         event_id = data.get("EventID")
         serial = int(data.get("Serial", 1))
         is_warn = data.get("isWarn", False)
-        is_plum = data.get("isAssumption", False)
         hypo = data.get("Hypocenter", "不明")
         max_int_str = data.get("MaxIntensity", "")
 
@@ -731,7 +748,7 @@ class EewCog(commands.Cog, AudioClientMixin):
         warn_area_display = collapse_regions_if_needed(
             current_warn_areas, EEW_REGION_COLLAPSE_THRESHOLD
         )
-        warn_area_text = "、".join(warn_area_display) + "では" if warn_area_display else ""
+        values = build_eew_values(data, list(warn_area_display))
 
         text = ""
         priority = 3
@@ -739,12 +756,10 @@ class EewCog(commands.Cog, AudioClientMixin):
         if serial == 1 or prev_data is None:
             if is_warn:
                 priority = 1
-                text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。{hypo}で地震。推定最大震度{max_int_str}。"
+                text = _YOMI.render("EEW_FIRST_WARN", values)
             else:
                 priority = 3
-                text = f"{hypo}で地震。推定最大震度{max_int_str}。"
-                if is_plum:
-                    text += "（PLUM法）"
+                text = _YOMI.render("EEW_FIRST_FORECAST", values)
 
         else:
             prev_max_int = prev_data.get("MaxIntensity", "")
@@ -753,15 +768,15 @@ class EewCog(commands.Cog, AudioClientMixin):
 
             if is_warn and area_increased:
                 priority = 1
-                text = f"緊急地震速報。{warn_area_text}強い揺れに警戒してください。"
+                text = _YOMI.render("EEW_UPDATE_WARN", values)
 
             elif intensity_changed:
                 priority = 2
-                text = f"推定最大震度{max_int_str}"
+                text = _YOMI.render("EEW_UPDATE_INTENSITY", values)
 
             elif hypo != prev_hypo:
                 priority = 3
-                text = f"{hypo}で地震。推定最大震度{max_int_str}。"
+                text = _YOMI.render("EEW_UPDATE_HYPO", values)
 
         if text:
             await self.speak_local(text, priority)

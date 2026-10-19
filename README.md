@@ -130,7 +130,7 @@ cp .env.example .env
 python3 bot.py --merge_env          # .env.example にあって .env に無い項目を1つずつ確認しながら追加
 python3 bot.py --merge_env --yes    # 確認せず、不足項目をすべて既定値で追加
 ```
-追加は末尾への追記のみで、既存の値は変更しない（書き込み前に `<ファイル名>.bak.<タイムスタンプ>` へバックアップ。コメントアウトされた項目は不足に含めない）。`.env.kyoshin.example` → `.env.kyoshin` も同様に処理する（`.env.kyoshin` が無ければスキップ）。
+追加は末尾への追記のみで、既存の値は変更しない（書き込み前に `<ファイル名>.bak.<タイムスタンプ>` へバックアップ。コメントアウトされた項目は不足に含めない）。`.env.kyoshin.example` → `.env.kyoshin`、`.env.yomiage.example` → `.env.yomiage` も同様に処理する（無ければスキップ）。
 
 `.env` と `.env.example` の整合性（変数名の書き忘れ・消し忘れ）は `python3 bot.py --check_env` で確認できる（既定値の一致までは検証しない）。
 
@@ -151,8 +151,9 @@ python3 bot.py
 |:---|:---|:---|
 | `.env`（`.env.example` をコピー） | トークン・チャンネルID・通知フィルター等の本体設定 | 必須 |
 | `.env.kyoshin`（`.env.kyoshin.example` をコピー） | 強震モニタの誤検知対策の調整値（上級者向け） | 任意（無くても既定値で動作） |
+| `.env.yomiage`（`.env.yomiage.example` をコピー） | 読み上げ文のテンプレート（現在は EEW のみ） | 任意（無くても従来の文言で動作） |
 
-`.env` の読み込み後、`.env.kyoshin` があれば追加で読み込む（`core/env_loader.py`。同じ変数は `.env` が優先）。以下の「既定値」は `core/config.py` の値。
+`.env` の読み込み後、`.env.kyoshin`・`.env.yomiage` があれば追加で読み込む（`core/env_loader.py`。同じ変数は `.env` が優先）。以下の「既定値」は `core/config.py` の値。
 
 ### Discord 設定
 | 変数名 | 必須 | 既定値 | 説明 |
@@ -363,6 +364,25 @@ python3 bot.py
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
 
 `TTS_ENGINE=scratchtts` では、取得した音声を ffmpeg で約3セミトーンピッチアップして再生する（`ffmpeg` が必要）。`--starter` で選ばなかった方のエンジンの設定行は `.env` 内でコメントアウトされる。
+
+### 読み上げテンプレート（`.env.yomiage`）
+通常は変更不要。読み上げる文章を変えたい場合のみ `cp .env.yomiage.example .env.yomiage` して編集し、Bot を再起動する。未設定・空の項目は従来と同じ文言を使う。現在対応しているのは EEW のみ（地震情報・津波・火山などは順次追加予定）。
+
+書式は Zero Quake の読み上げテンプレートと同じ考え方で、`{タグ}` を値に置き換え、`[ ... ]` は中のタグが1つでも空なら丸ごと省略する（入れ子不可。`{ } [ ]` は書式用の記号のため文章には使えない）。
+
+例: `緊急地震速報。[{警報地域}では]強い揺れに警戒してください。` → 警報地域がある時だけ「○○では」が付く。
+
+| 変数名 | 使われる場面 |
+| :--- | :--- |
+| `YOMI_EEW_FIRST_WARN` | 第1報（警報） |
+| `YOMI_EEW_FIRST_FORECAST` | 第1報（予報。PLUM法を含む） |
+| `YOMI_EEW_UPDATE_WARN` | 続報: 警報の対象地域が増えた時 |
+| `YOMI_EEW_UPDATE_INTENSITY` | 続報: 予想最大震度が変わった時 |
+| `YOMI_EEW_UPDATE_HYPO` | 続報: 震源（震央地名）が変わった時 |
+
+使えるタグ: `{震源}` `{最大震度}` `{マグニチュード}` `{深さ}`（kmの数値のみ） `{警報地域}`（「、」連結） `{報数}` `{種別}`（警報／予報） `{最終報}` `{訓練}` `{PLUM法}`。マグニチュード・深さは PLUM法・不明の時は空になる。
+
+未知のタグや `{ }` `[ ]` の対応ミスがある項目は、警告ログ（「読み上げテンプレート」）を出してその項目だけ従来の文言に戻る（Bot は止まらない）。展開処理は `core/yomiage.py`（純関数）。
 
 ### ログ設定
 | 変数名 | 既定値 | 説明 |
@@ -662,6 +682,7 @@ python3 -m pytest tests/ -q
 | `test_eew_forecast_label.py` | EEW 予想震度の見出し |
 | `test_eew_region_resolve.py` | EEW の未知の地域名の解決・GIS 区域名の読み替え |
 | `test_env_merge.py` | `--merge_env` |
+| `test_yomiage.py`・`test_eew_yomiage_integration.py` | 読み上げテンプレートの展開・検証・EEW読み上げが従来と同じ文言になること |
 | `test_gis_overseas_switch.py` | 遠地地震向け地図への自動切り替え |
 | `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
@@ -752,7 +773,7 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 QTL_Bot/
 ├── bot.py                    エントリーポイント（Cog 登録・起動）
 ├── requirements.txt
-├── .env.example / .env.kyoshin.example
+├── .env.example / .env.kyoshin.example / .env.yomiage.example
 ├── region_map.json           EEWの警報地域名 → 表示用地域名
 ├── prefecture_map.json       区域名 → 都道府県名（震度速報の読み上げ等）
 ├── pref_region_map.json      府県予報区名 → 地方予報区名（EEWの集約表示）
@@ -773,7 +794,7 @@ QTL_Bot/
 ├── core/
 │   ├── config.py             環境変数の読み込み・定数
 │   ├── constants.py          震度色・各種ラベル
-│   ├── env_loader.py         .env と .env.kyoshin の読み込み
+│   ├── env_loader.py         .env と .env.kyoshin・.env.yomiage の読み込み
 │   ├── env_starter.py        --starter（対話式セットアップ）
 │   ├── env_merge.py          --merge_env
 │   ├── env_audit.py          --check_env
@@ -802,6 +823,7 @@ QTL_Bot/
 │   ├── startup_guard.py      起動時の「既存情報」判定の補助
 │   ├── eew_convert.py        P2P EEW → Wolfx 形式の変換、予想震度の整形（純関数）
 │   ├── tsunami_speech.py     津波の読み上げ文・状態変化の分類・二重読み上げ防止（純関数）
+│   ├── yomiage.py            読み上げテンプレート（.env.yomiage）の展開・検証（純関数。現在は EEW のみ）
 │   ├── jishin_kanchi_convert.py  地震感知情報の信頼度変換（純関数）
 │   ├── epsp_area.py          地域コード → 地域名
 │   ├── gis_data.py           GIS データの取得・キャッシュ・簡略化国境の生成

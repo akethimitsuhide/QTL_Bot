@@ -46,6 +46,7 @@ logger = logging.getLogger("QTLBot")
 # 該当ファイルを用意すればよい。
 _CATEGORY_FILES = (
     ("kyoshin", "強震モニタ（Kyoshin）のアルゴリズム調整値。.env.kyoshin.example 参照"),
+    ("yomiage", "読み上げ文のテンプレート。.env.yomiage.example 参照"),
 )
 
 

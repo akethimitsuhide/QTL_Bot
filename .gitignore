@@ -14,6 +14,7 @@
 .env
 !.env.example
 !.env.kyoshin.example
+!.env.yomiage.example
 
 
 # ------------------------------------------------------------
@@ -90,7 +91,9 @@ Desktop.ini
 *.swp
 *.swo
 .env.kyoshin
+.env.yomiage
 
 # --merge_env（core/env_merge.py）や手動で作る .env のバックアップ（トークン等を含む）
 .env.bak*
 .env.kyoshin.bak*
+.env.yomiage.bak*
