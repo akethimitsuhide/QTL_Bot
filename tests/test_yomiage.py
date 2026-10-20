@@ -6,7 +6,8 @@ from dotenv import dotenv_values
 
 from core import yomiage
 from core.yomiage import (
-    EEW_DEFAULTS, EEW_TAGS, TemplateSet, build_eew_values, render, validate_template,
+    EEW_DEFAULTS, EEW_TAGS, QUAKE_DEFAULTS, QUAKE_TAGS, TemplateSet, build_eew_values, render,
+    validate_template,
 )
 
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +81,8 @@ def test_validate_rejects_bad_templates(template, fragment):
 def test_validate_accepts_defaults():
     for t in EEW_DEFAULTS.values():
         assert validate_template(t, EEW_TAGS) is None
+    for t in QUAKE_DEFAULTS.values():
+        assert validate_template(t, QUAKE_TAGS) is None
 
 
 # ---- TemplateSet ----
@@ -122,7 +125,7 @@ def test_build_eew_values_plum_and_unknown_numbers():
 # ---- .env.yomiage.example との整合 ----
 def test_example_file_matches_builtin_defaults():
     values = dotenv_values(os.path.join(_BASE, ".env.yomiage.example"))
-    assert {k[len("YOMI_"):]: v for k, v in values.items()} == EEW_DEFAULTS
+    assert {k[len("YOMI_"):]: v for k, v in values.items()} == {**EEW_DEFAULTS, **QUAKE_DEFAULTS}
 
 
 def test_yomiage_file_is_loaded_but_env_wins(tmp_path, monkeypatch):
@@ -150,3 +153,47 @@ def test_module_has_no_discord_or_config_dependency():
         elif isinstance(node, ast.ImportFrom):
             imported.add((node.module or "").split(".")[0])
     assert imported <= {"__future__", "re", "typing"}
+
+
+# ---- 地震情報（導入前の cogs/quake.py の文言を再現して一致を確認） ----
+def _old_quake(key, v):
+    title, name, mag_str, depth_str = v["情報名"], v["震源"], v["マグニチュード"], v["深さ"]
+    max_scale_str = v["最大震度"]
+    time_str = v["発生時刻"] + "、" if v["発生時刻"] else ""
+    tsunami_speak = " " + v["津波"] if v["津波"] else ""
+    if key == "QUAKE_SCALE_PROMPT":
+        return (f"{title}。{time_str}最大震度{max_scale_str}を、{v['観測都道府県']}で観測しました。"
+                f"震源地・規模は調査中です。今後の情報に注意してください。")
+    if key == "QUAKE_DESTINATION":
+        return (f"{title}。{time_str}地震がありました。 震源地は {name}。 深さは {depth_str}。"
+                f" マグニチュードは {mag_str}。{tsunami_speak}")
+    if key == "QUAKE_SCALE_DEST_STRONG":
+        return (f"{title}。{time_str}最大震度{max_scale_str}を観測する地震がありました。"
+                f" 震源地は {name}。 震源の深さは {depth_str}。 マグニチュードは {mag_str} と推定されます。"
+                f"この地震で、最大震度{max_scale_str}を、{v['最大震度観測地点']}で観測しました。{tsunami_speak}")
+    if key == "QUAKE_SCALE_DEST":
+        return (f"{title}。{time_str}最大震度{max_scale_str}を観測する地震がありました。{tsunami_speak}"
+                f" 震源地は {name}。 震源の深さは {depth_str}。 マグニチュードは {mag_str} と推定されます。")
+    if key == "QUAKE_FOREIGN":
+        return (f"{title}。{time_str}{v['遠地地震文']} 震源地は {name}。"
+                f" マグニチュードは {mag_str}。{tsunami_speak}")
+    if key == "QUAKE_OTHER":
+        return f"{title}。{tsunami_speak} 震源地 {name}。 最大震度 {max_scale_str}。 {mag_str}。"
+    raise AssertionError(key)
+
+
+_QUAKE_SAMPLES = [
+    {"情報名": "各地の震度に関する情報", "発生時刻": "8時20分頃", "震源": "能登半島沖", "最大震度": "5弱",
+     "深さ": "約10km", "マグニチュード": "M6.1", "津波": "この地震による津波の心配はありません。",
+     "観測都道府県": "石川県、富山県", "最大震度観測地点": "石川県志賀町、石川県輪島市", "遠地地震文": "海外で規模の大きな地震がありました。"},
+    {"情報名": "【テスト】震度速報", "発生時刻": "", "震源": "調査中", "最大震度": "2",
+     "深さ": "調査中", "マグニチュード": "調査中", "津波": "",
+     "観測都道府県": "調査中", "最大震度観測地点": "調査中", "遠地地震文": "遠地地震がありました。"},
+]
+
+
+@pytest.mark.parametrize("key", list(QUAKE_DEFAULTS))
+@pytest.mark.parametrize("values", _QUAKE_SAMPLES)
+def test_quake_default_templates_match_previous_wording(key, values):
+    ts = TemplateSet(QUAKE_DEFAULTS, QUAKE_TAGS, {})
+    assert ts.render(key, values) == _old_quake(key, values)

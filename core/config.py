@@ -295,6 +295,14 @@ YOMI_EEW_UPDATE_WARN = _getenv_nonempty("YOMI_EEW_UPDATE_WARN", "")
 YOMI_EEW_UPDATE_INTENSITY = _getenv_nonempty("YOMI_EEW_UPDATE_INTENSITY", "")
 YOMI_EEW_UPDATE_HYPO = _getenv_nonempty("YOMI_EEW_UPDATE_HYPO", "")
 
+# 地震情報 読み上げテンプレート（同上）
+YOMI_QUAKE_SCALE_PROMPT = _getenv_nonempty("YOMI_QUAKE_SCALE_PROMPT", "")
+YOMI_QUAKE_DESTINATION = _getenv_nonempty("YOMI_QUAKE_DESTINATION", "")
+YOMI_QUAKE_SCALE_DEST_STRONG = _getenv_nonempty("YOMI_QUAKE_SCALE_DEST_STRONG", "")
+YOMI_QUAKE_SCALE_DEST = _getenv_nonempty("YOMI_QUAKE_SCALE_DEST", "")
+YOMI_QUAKE_FOREIGN = _getenv_nonempty("YOMI_QUAKE_FOREIGN", "")
+YOMI_QUAKE_OTHER = _getenv_nonempty("YOMI_QUAKE_OTHER", "")
+
 # ===============================
 # 津波・その他通知フィルター
 # ===============================

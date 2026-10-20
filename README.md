@@ -151,7 +151,7 @@ python3 bot.py
 |:---|:---|:---|
 | `.env`（`.env.example` をコピー） | トークン・チャンネルID・通知フィルター等の本体設定 | 必須 |
 | `.env.kyoshin`（`.env.kyoshin.example` をコピー） | 強震モニタの誤検知対策の調整値（上級者向け） | 任意（無くても既定値で動作） |
-| `.env.yomiage`（`.env.yomiage.example` をコピー） | 読み上げ文のテンプレート（現在は EEW のみ） | 任意（無くても従来の文言で動作） |
+| `.env.yomiage`（`.env.yomiage.example` をコピー） | 読み上げ文のテンプレート（EEW・地震情報） | 任意（無くても従来の文言で動作） |
 
 `.env` の読み込み後、`.env.kyoshin`・`.env.yomiage` があれば追加で読み込む（`core/env_loader.py`。同じ変数は `.env` が優先）。以下の「既定値」は `core/config.py` の値。
 
@@ -366,7 +366,7 @@ python3 bot.py
 `TTS_ENGINE=scratchtts` では、取得した音声を ffmpeg で約3セミトーンピッチアップして再生する（`ffmpeg` が必要）。`--starter` で選ばなかった方のエンジンの設定行は `.env` 内でコメントアウトされる。
 
 ### 読み上げテンプレート（`.env.yomiage`）
-通常は変更不要。読み上げる文章を変えたい場合のみ `cp .env.yomiage.example .env.yomiage` して編集し、Bot を再起動する。未設定・空の項目は従来と同じ文言を使う。現在対応しているのは EEW のみ（地震情報・津波・火山などは順次追加予定）。
+通常は変更不要。読み上げる文章を変えたい場合のみ `cp .env.yomiage.example .env.yomiage` して編集し、Bot を再起動する。未設定・空の項目は従来と同じ文言を使う。現在対応しているのは EEW と地震情報（津波・火山などは順次追加予定）。
 
 書式は Zero Quake の読み上げテンプレートと同じ考え方で、`{タグ}` を値に置き換え、`[ ... ]` は中のタグが1つでも空なら丸ごと省略する（入れ子不可。`{ } [ ]` は書式用の記号のため文章には使えない）。
 
@@ -379,8 +379,16 @@ python3 bot.py
 | `YOMI_EEW_UPDATE_WARN` | 続報: 警報の対象地域が増えた時 |
 | `YOMI_EEW_UPDATE_INTENSITY` | 続報: 予想最大震度が変わった時 |
 | `YOMI_EEW_UPDATE_HYPO` | 続報: 震源（震央地名）が変わった時 |
+| `YOMI_QUAKE_SCALE_PROMPT` | 地震情報: 震度速報 |
+| `YOMI_QUAKE_DESTINATION` | 地震情報: 震源に関する情報 |
+| `YOMI_QUAKE_SCALE_DEST_STRONG` | 地震情報: 震度・震源に関する情報／各地の震度に関する情報（最大震度3以上） |
+| `YOMI_QUAKE_SCALE_DEST` | 同上（最大震度2以下） |
+| `YOMI_QUAKE_FOREIGN` | 地震情報: 遠地地震に関する情報 |
+| `YOMI_QUAKE_OTHER` | 地震情報: その他の情報 |
 
-使えるタグ: `{震源}` `{最大震度}` `{マグニチュード}` `{深さ}`（kmの数値のみ） `{警報地域}`（「、」連結） `{報数}` `{種別}`（警報／予報） `{最終報}` `{訓練}` `{PLUM法}`。マグニチュード・深さは PLUM法・不明の時は空になる。
+使えるタグ（EEW）: `{震源}` `{最大震度}` `{マグニチュード}` `{深さ}`（kmの数値のみ） `{警報地域}`（「、」連結） `{報数}` `{種別}`（警報／予報） `{最終報}` `{訓練}` `{PLUM法}`。マグニチュード・深さは PLUM法・不明の時は空になる。
+
+使えるタグ（地震情報）: `{情報名}` `{発生時刻}`（「8時20分頃」。不明なら空） `{震源}` `{最大震度}` `{深さ}`（「約10km」など単位込み） `{マグニチュード}`（「M6.1」など M込み） `{津波}`（津波の案内文。無ければ空。通常は `[ {津波}]` の形で使う） `{観測都道府県}`（震度速報） `{最大震度観測地点}` `{遠地地震文}`。震源・深さ・マグニチュードが不明な時は「調査中」になる。
 
 未知のタグや `{ }` `[ ]` の対応ミスがある項目は、警告ログ（「読み上げテンプレート」）を出してその項目だけ従来の文言に戻る（Bot は止まらない）。展開処理は `core/yomiage.py`（純関数）。
 
@@ -682,7 +690,7 @@ python3 -m pytest tests/ -q
 | `test_eew_forecast_label.py` | EEW 予想震度の見出し |
 | `test_eew_region_resolve.py` | EEW の未知の地域名の解決・GIS 区域名の読み替え |
 | `test_env_merge.py` | `--merge_env` |
-| `test_yomiage.py`・`test_eew_yomiage_integration.py` | 読み上げテンプレートの展開・検証・EEW読み上げが従来と同じ文言になること |
+| `test_yomiage.py`・`test_eew_yomiage_integration.py`・`test_quake_yomiage_integration.py` | 読み上げテンプレートの展開・検証・EEW／地震情報の読み上げが従来と同じ文言になること |
 | `test_gis_overseas_switch.py` | 遠地地震向け地図への自動切り替え |
 | `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
@@ -823,7 +831,7 @@ QTL_Bot/
 │   ├── startup_guard.py      起動時の「既存情報」判定の補助
 │   ├── eew_convert.py        P2P EEW → Wolfx 形式の変換、予想震度の整形（純関数）
 │   ├── tsunami_speech.py     津波の読み上げ文・状態変化の分類・二重読み上げ防止（純関数）
-│   ├── yomiage.py            読み上げテンプレート（.env.yomiage）の展開・検証（純関数。現在は EEW のみ）
+│   ├── yomiage.py            読み上げテンプレート（.env.yomiage）の展開・検証（純関数。EEW・地震情報）
 │   ├── jishin_kanchi_convert.py  地震感知情報の信頼度変換（純関数）
 │   ├── epsp_area.py          地域コード → 地域名
 │   ├── gis_data.py           GIS データの取得・キャッシュ・簡略化国境の生成

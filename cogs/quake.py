@@ -66,6 +66,8 @@ from core.config import (
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
     P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS,
     P2P_FAILOVER_CATCHUP_MINUTES,
+    YOMI_QUAKE_SCALE_PROMPT, YOMI_QUAKE_DESTINATION, YOMI_QUAKE_SCALE_DEST_STRONG,
+    YOMI_QUAKE_SCALE_DEST, YOMI_QUAKE_FOREIGN, YOMI_QUAKE_OTHER,
 )
 from core.constants import (
     INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP, TSUNAMI_GRADE_ORDER,
@@ -73,6 +75,7 @@ from core.constants import (
 )
 from core.helpers import format_jma_time, format_latlon
 from core.audio import AudioClientMixin
+from core.yomiage import QUAKE_DEFAULTS, QUAKE_TAGS, TemplateSet
 from core.ews_signal import generate_ews_pcm
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
@@ -87,6 +90,21 @@ from core.quake_failover import (
 )
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    QUAKE_DEFAULTS, QUAKE_TAGS,
+    {
+        "QUAKE_SCALE_PROMPT": YOMI_QUAKE_SCALE_PROMPT,
+        "QUAKE_DESTINATION": YOMI_QUAKE_DESTINATION,
+        "QUAKE_SCALE_DEST_STRONG": YOMI_QUAKE_SCALE_DEST_STRONG,
+        "QUAKE_SCALE_DEST": YOMI_QUAKE_SCALE_DEST,
+        "QUAKE_FOREIGN": YOMI_QUAKE_FOREIGN,
+        "QUAKE_OTHER": YOMI_QUAKE_OTHER,
+    },
+    warn=logger.warning,
+)
 
 
 class QuakeInfoCog(commands.Cog, AudioClientMixin):
@@ -547,13 +565,13 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
                 remain = 900 - int((now_dt - self._last_zencyu_time).total_seconds())
                 logger.debug(f"zencyu.mp3 クールダウン中 (あと{remain}秒)")
 
-        time_str = ""
+        # 読み上げ用の発生時刻（「8時20分頃」。分からなければ空）
+        speak_time = ""
         if occur_time and "時" in occur_time and "分頃" in occur_time:
             try:
-                t_part = occur_time[occur_time.index("日") + 1:]
-                time_str = t_part + "、"
+                speak_time = occur_time[occur_time.index("日") + 1:]
             except Exception:
-                time_str = ""
+                speak_time = ""
 
         tsunami_speak = ""
         tsunami_speak_map = {
@@ -566,86 +584,50 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             "None":         "この地震による津波の心配はありません。",
         }
         if dom_tsunami in tsunami_speak_map:
-            tsunami_speak = " " + tsunami_speak_map[dom_tsunami]
+            tsunami_speak = tsunami_speak_map[dom_tsunami]
 
+        # 最大震度を観測した都道府県／地点（読み上げテンプレートのタグ用）。
+        # 要件1: 震度速報の区域名はprefecture_map.jsonで都道府県名に変換し、
+        # 重複を排除して読み上げる。
+        # 要件3: 最大震度を観測した地点名を読み上げ文言に含める。
+        max_addrs = points_by_scale.get(max_scale_val, [])
+        if not max_addrs and max_scale_val == 45:
+            # 46（推定5弱以上）は45と同階級として扱う
+            max_addrs = points_by_scale.get(46, [])
+        prefectures = []
+        seen_pref = set()
+        for addr in max_addrs:
+            pref = PREFECTURE_MAP.get(addr)
+            if not pref or pref in seen_pref:
+                continue
+            seen_pref.add(pref)
+            prefectures.append(pref)
+        pref_text = "、".join(prefectures) if prefectures else "調査中"
+        max_addr_text = "、".join(max_addrs) if max_addrs else "調査中"
+
+        values = {
+            "情報名": title,
+            "発生時刻": speak_time,
+            "震源": name,
+            "最大震度": max_scale_str,
+            "深さ": depth_str,
+            "マグニチュード": mag_str,
+            "津波": tsunami_speak,
+            "観測都道府県": pref_text,
+            "最大震度観測地点": max_addr_text,
+            "遠地地震文": "遠地地震がありました。" if is_volcano else "海外で規模の大きな地震がありました。",
+        }
         if issue_type == "ScalePrompt":
-            # 要件1: 最大震度を観測した区域名をprefecture_map.jsonで
-            # 都道府県名に変換し、重複を排除して読み上げる。
-            max_addrs = points_by_scale.get(max_scale_val, [])
-            if not max_addrs and max_scale_val == 45:
-                max_addrs = points_by_scale.get(46, [])
-            prefectures = []
-            seen_pref = set()
-            for addr in max_addrs:
-                pref = PREFECTURE_MAP.get(addr)
-                if not pref or pref in seen_pref:
-                    continue
-                seen_pref.add(pref)
-                prefectures.append(pref)
-            if len(prefectures) == 1:
-                pref_text = prefectures[0]
-            elif prefectures:
-                pref_text = "、".join(prefectures)
-            else:
-                pref_text = "調査中"
-            speak_text = (
-                f"{title}。"
-                f"{time_str}最大震度{max_scale_str}を、"
-                f"{pref_text}で観測しました。"
-                f"震源地・規模は調査中です。今後の情報に注意してください。"
-            )
+            yomi_key = "QUAKE_SCALE_PROMPT"
         elif issue_type == "Destination":
-            speak_text = (
-                f"{title}。"
-                f"{time_str}地震がありました。"
-                f" 震源地は {name}。"
-                f" 深さは {depth_str}。"
-                f" マグニチュードは {mag_str}。{tsunami_speak}"
-            )
+            yomi_key = "QUAKE_DESTINATION"
         elif issue_type in ("ScaleAndDestination", "DetailScale"):
-            if max_scale_val >= 30:
-                # 要件3: 最大震度3以上の場合、最大震度を観測した地点名を
-                # 読み上げ文言に含める。
-                max_addrs = points_by_scale.get(max_scale_val, [])
-                if not max_addrs and max_scale_val == 45:
-                    # 46（推定5弱以上）は45と同階級として扱う
-                    max_addrs = points_by_scale.get(46, [])
-                if len(max_addrs) == 1:
-                    max_addr_text = max_addrs[0]
-                elif len(max_addrs) > 1:
-                    max_addr_text = "、".join(max_addrs)
-                else:
-                    max_addr_text = "調査中"
-                speak_text = (
-                    f"{title}。"
-                    f"{time_str}最大震度{max_scale_str}を観測する地震がありました。"
-                    f" 震源地は {name}。"
-                    f" 震源の深さは {depth_str}。"
-                    f" マグニチュードは {mag_str} と推定されます。"
-                    f"この地震で、最大震度{max_scale_str}を、"
-                    f"{max_addr_text}で観測しました。{tsunami_speak}"
-                )
-            else:
-                speak_text = (
-                    f"{title}。"
-                    f"{time_str}最大震度{max_scale_str}を観測する地震がありました。{tsunami_speak}"
-                    f" 震源地は {name}。"
-                    f" 震源の深さは {depth_str}。"
-                    f" マグニチュードは {mag_str} と推定されます。"
-                )
+            yomi_key = "QUAKE_SCALE_DEST_STRONG" if max_scale_val >= 30 else "QUAKE_SCALE_DEST"
         elif issue_type == "Foreign":
-            foreign_event_text = "遠地地震がありました。" if is_volcano else "海外で規模の大きな地震がありました。"
-            speak_text = (
-                f"{title}。"
-                f"{time_str}{foreign_event_text}"
-                f" 震源地は {name}。"
-                f" マグニチュードは {mag_str}。{tsunami_speak}"
-            )
+            yomi_key = "QUAKE_FOREIGN"
         else:
-            speak_text = (
-                f"{title}。{tsunami_speak}"
-                f" 震源地 {name}。 最大震度 {max_scale_str}。 {mag_str}。"
-            )
+            yomi_key = "QUAKE_OTHER"
+        speak_text = _YOMI.render(yomi_key, values)
 
         if not skip_speech:
             await self.speak_local(speak_text)
