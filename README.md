@@ -401,6 +401,8 @@ python3 bot.py
 
 読み上げの文言だけが変わり、Discord の通知本文（Embed）は変わらない。タグ名は日本語で、項目ごとに使えるものが異なる（その場面で意味を持たないタグは空になる）。マグニチュードの扱いは項目で異なる（地震情報は「M6.1」と M込み、長周期・その他・USGS は数値のみ）。
 
+起動前に `python3 bot.py --doctor` で書式ミス（行番号つき）と、サンプル値で展開した文のイメージを確認できる。
+
 未知のタグや `{ }` `[ ]` の対応ミスがある項目は、警告ログ（「読み上げテンプレート」）を出してその項目だけ従来の文言に戻る（Bot は止まらない）。展開処理は `core/yomiage.py`（純関数）。
 
 ### ログ設定
@@ -559,6 +561,22 @@ WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞�
 - 本番機のセットアップは `pip install -r requirements.lock` を使う（版が変わって挙動が変わるのを防ぐ）。
 - `requirements.lock` の行末の `; python_version >= "3.13"` は環境マーカーで、該当しない Python では無視される。
 
+### 起動前の自己診断（`--doctor`）
+```bash
+python3 bot.py --doctor
+```
+Bot を起動せずに、動かない原因・期待どおりにならない原因を一覧する（読み取り専用。設定ファイルは変更せず、外部への通信もしない。トークンは表示しない）。
+
+| 区分 | 内容 |
+| :--- | :--- |
+| 基本環境 | Python の版、依存パッケージ、ディスクの空き、フォルダの書き込み権限 |
+| 設定ファイル | `.env` の有無・`BOT_TOKEN`・チャンネルID・ファイル権限、`.env.example` との差分 |
+| 読み上げテンプレート | `.env.yomiage` の未知のタグ・`[ ]` の対応ミス・項目名の打ち間違い（「もしかして」つき）・引用符なしの `#`・`${`、設定済みテンプレートの展開例 |
+| 音声・地図・ダッシュボード | AquesTalkPi／ffmpeg／プレーヤー、GIS データ、ダッシュボードのポートと公開設定 |
+| 実行状態 | すでに Bot が稼働していないか（PID ファイル） |
+
+`[ NG ]` は動かない原因（終了コード 1）、`[WARN]` は動くが確認してほしい内容、`[INFO]` は参考情報。systemd の `ExecStartPre=/usr/bin/python3 bot.py --doctor` にも使える。
+
 ### 脆弱性・版ずれの確認（`--audit_deps`）
 ```bash
 pip install pip-audit              # 初回のみ（requirements には含まない任意ツール）
@@ -620,6 +638,7 @@ curl http://localhost:8080/health/full | jq
 |:---|:---|
 | `--starter` | 対話式セットアップウィザード（`.env` を生成） |
 | `--merge_env [--yes]` | `.env` へ不足項目を追加 |
+| `--doctor` | 起動前の自己診断（Python・依存パッケージ・`.env` の必須項目・`.env.yomiage` の書式ミスと展開例・音声/GIS/ダッシュボードの前提条件・二重起動）。読み取り専用で外部通信なし。NG があれば終了コード 1 |
 | `--check_env` | `.env.example` とコードの整合性チェック |
 | `--audit_deps` | `requirements.lock` の版ずれ確認と既知の脆弱性の照合（要 `pip install pip-audit`） |
 | `--refresh_gis_data` | GIS データの強制再取得 |
@@ -701,6 +720,7 @@ python3 -m pytest tests/ -q
 | `test_eew_forecast_label.py` | EEW 予想震度の見出し |
 | `test_eew_region_resolve.py` | EEW の未知の地域名の解決・GIS 区域名の読み替え |
 | `test_env_merge.py` | `--merge_env` |
+| `test_doctor.py` | `--doctor`（起動前の自己診断） |
 | `test_yomiage.py`・`test_eew_yomiage_integration.py`・`test_quake_yomiage_integration.py`・`test_tsunami_yomiage.py`・`test_yomiage_other_cogs.py` | 読み上げテンプレートの展開・検証・EEW／地震情報の読み上げが従来と同じ文言になること |
 | `test_gis_overseas_switch.py` | 遠地地震向け地図への自動切り替え |
 | `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
@@ -817,6 +837,7 @@ QTL_Bot/
 │   ├── env_starter.py        --starter（対話式セットアップ）
 │   ├── env_merge.py          --merge_env
 │   ├── env_audit.py          --check_env
+│   ├── doctor.py             --doctor（起動前の自己診断）
 │   ├── test_runner.py        --test_*（CLI テスト）
 │   ├── logging_setup.py      ログ設定（ローテーション・重複抑制）
 │   ├── command_access.py        !status / /qtl_status の実行権限判定

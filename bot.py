@@ -120,6 +120,13 @@ core/test_runner.py の run_all_cli_tests を参照）。
 こちらも .env が存在しない状態で実行できる必要があるため、--starter と
 同様に core.config を import する前に判定する。
 
+【起動前の自己診断（2026-10-21 追加, core/doctor.py）】
+    python3 bot.py --doctor
+
+Python・依存パッケージ・.env の必須項目・.env.yomiage の書式ミス（展開例つき）・
+音声/GIS/ダッシュボードの前提条件・二重起動を、Bot を起動せずに一覧する。
+読み取り専用で、外部への通信はしない。[ NG ] があれば終了コード 1。
+
 【.env への不足項目の対話式追加（2026-10-05 追加, core/env_merge.py）】
     python3 bot.py --merge_env          # .env.example にあって .env に無い項目を1つずつ確認して追加
     python3 bot.py --merge_env --yes    # 確認せず、すべて既定値で追加
@@ -171,6 +178,12 @@ if "--check_env" in sys.argv[1:]:
     from core.env_audit import run_env_check
     run_env_check()
     sys.exit(0)
+
+# ── --doctor（起動前の自己診断, core/doctor.py）
+# --starter / --check_env と同様、.env が無い・不完全でも実行できるよう core.config より前に処理する。
+if "--doctor" in sys.argv[1:]:
+    from core.doctor import run_doctor
+    sys.exit(run_doctor())
 
 # ── --merge_env（2026-10-05 追加, core/env_merge.py）
 # .env.example にあって .env に無い項目を、対話式で .env へ追加する。
