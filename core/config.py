@@ -303,6 +303,26 @@ YOMI_QUAKE_SCALE_DEST = _getenv_nonempty("YOMI_QUAKE_SCALE_DEST", "")
 YOMI_QUAKE_FOREIGN = _getenv_nonempty("YOMI_QUAKE_FOREIGN", "")
 YOMI_QUAKE_OTHER = _getenv_nonempty("YOMI_QUAKE_OTHER", "")
 
+# 津波 読み上げテンプレート（同上）
+YOMI_TSUNAMI_P2P_ISSUED = _getenv_nonempty("YOMI_TSUNAMI_P2P_ISSUED", "")
+YOMI_TSUNAMI_P2P_ISSUED_PLAIN = _getenv_nonempty("YOMI_TSUNAMI_P2P_ISSUED_PLAIN", "")
+YOMI_TSUNAMI_P2P_CANCEL = _getenv_nonempty("YOMI_TSUNAMI_P2P_CANCEL", "")
+YOMI_TSUNAMI_JMA_ISSUED = _getenv_nonempty("YOMI_TSUNAMI_JMA_ISSUED", "")
+YOMI_TSUNAMI_JMA_CANCEL = _getenv_nonempty("YOMI_TSUNAMI_JMA_CANCEL", "")
+YOMI_TSUNAMI_OFFSHORE = _getenv_nonempty("YOMI_TSUNAMI_OFFSHORE", "")
+YOMI_TSUNAMI_TIDE_TIME = _getenv_nonempty("YOMI_TSUNAMI_TIDE_TIME", "")
+
+# 長周期地震動・その他／USGS／火山 読み上げテンプレート（同上）
+YOMI_OTHER_LONG_PERIOD = _getenv_nonempty("YOMI_OTHER_LONG_PERIOD", "")
+YOMI_OTHER_ADVISORY = _getenv_nonempty("YOMI_OTHER_ADVISORY", "")
+YOMI_OTHER_HYPO_UPDATE = _getenv_nonempty("YOMI_OTHER_HYPO_UPDATE", "")
+YOMI_OTHER_NANKAI = _getenv_nonempty("YOMI_OTHER_NANKAI", "")
+YOMI_OTHER_KANCHI = _getenv_nonempty("YOMI_OTHER_KANCHI", "")
+YOMI_USGS_QUAKE = _getenv_nonempty("YOMI_USGS_QUAKE", "")
+YOMI_VOLCANO_INFO = _getenv_nonempty("YOMI_VOLCANO_INFO", "")
+YOMI_VOLCANO_ERUPTION_FLASH = _getenv_nonempty("YOMI_VOLCANO_ERUPTION_FLASH", "")
+YOMI_VOLCANO_ERUPTION_WARNING = _getenv_nonempty("YOMI_VOLCANO_ERUPTION_WARNING", "")
+
 # ===============================
 # 津波・その他通知フィルター
 # ===============================

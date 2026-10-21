@@ -42,6 +42,7 @@ from discord.ext import commands
 
 from core.discord_send import send_with_retry
 from core.config import (
+    YOMI_OTHER_KANCHI,
     CHANNEL_ID, JISHIN_KANCHI_CHANNEL_ID, JISHIN_KANCHI_ENABLE,
     JISHIN_KANCHI_MAX_LEVEL, JISHIN_KANCHI_MIN_COUNT,
     JISHIN_KANCHI_SPEECH_ENABLE, JISHIN_KANCHI_SOUND_ENABLE,
@@ -50,6 +51,7 @@ from core.config import (
     JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC,
 )
 from core.audio import AudioClientMixin
+from core.yomiage import OTHER_DEFAULTS, OTHER_TAGS, TemplateSet
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.epsp_area import get_area_name
@@ -59,6 +61,16 @@ from core.jishin_kanchi_convert import (
 )
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    OTHER_DEFAULTS, OTHER_TAGS,
+    {
+        "OTHER_KANCHI": YOMI_OTHER_KANCHI,
+    },
+    warn=logger.warning,
+)
 
 # 効果音として AudioCog.audio_files に動的登録するキー名
 _SOUND_KEY = "jishin_kanchi"
@@ -392,7 +404,9 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin):
 
             # ── 音声読み上げ・効果音（第一報のときのみ）──
             if JISHIN_KANCHI_SPEECH_ENABLE and is_first_report:
-                speak_text = f"地震感知情報。信頼度{level_label.split('（')[0]}。{count}件の感知報告があります。"
+                speak_text = _YOMI.render("OTHER_KANCHI", {
+                    "信頼度": level_label.split('（')[0], "件数": str(count),
+                })
                 await self.speak_local(speak_text, priority=2)
 
             if JISHIN_KANCHI_SOUND_ENABLE and is_first_report:

@@ -6,7 +6,8 @@ from dotenv import dotenv_values
 
 from core import yomiage
 from core.yomiage import (
-    EEW_DEFAULTS, EEW_TAGS, QUAKE_DEFAULTS, QUAKE_TAGS, TemplateSet, build_eew_values, render,
+    EEW_DEFAULTS, EEW_TAGS, QUAKE_DEFAULTS, QUAKE_TAGS, TSUNAMI_DEFAULTS, TSUNAMI_TAGS, OTHER_DEFAULTS, OTHER_TAGS, USGS_DEFAULTS, USGS_TAGS,
+    VOLCANO_DEFAULTS, VOLCANO_TAGS, TemplateSet, build_eew_values, render,
     validate_template,
 )
 
@@ -83,6 +84,11 @@ def test_validate_accepts_defaults():
         assert validate_template(t, EEW_TAGS) is None
     for t in QUAKE_DEFAULTS.values():
         assert validate_template(t, QUAKE_TAGS) is None
+    for t in TSUNAMI_DEFAULTS.values():
+        assert validate_template(t, TSUNAMI_TAGS) is None
+    for defaults, tags in ((OTHER_DEFAULTS, OTHER_TAGS), (USGS_DEFAULTS, USGS_TAGS), (VOLCANO_DEFAULTS, VOLCANO_TAGS)):
+        for t in defaults.values():
+            assert validate_template(t, tags) is None
 
 
 # ---- TemplateSet ----
@@ -125,7 +131,8 @@ def test_build_eew_values_plum_and_unknown_numbers():
 # ---- .env.yomiage.example との整合 ----
 def test_example_file_matches_builtin_defaults():
     values = dotenv_values(os.path.join(_BASE, ".env.yomiage.example"))
-    assert {k[len("YOMI_"):]: v for k, v in values.items()} == {**EEW_DEFAULTS, **QUAKE_DEFAULTS}
+    assert {k[len("YOMI_"):]: v for k, v in values.items()} == {**EEW_DEFAULTS, **QUAKE_DEFAULTS, **TSUNAMI_DEFAULTS, **OTHER_DEFAULTS,
+                                                              **USGS_DEFAULTS, **VOLCANO_DEFAULTS}
 
 
 def test_yomiage_file_is_loaded_but_env_wins(tmp_path, monkeypatch):
@@ -197,3 +204,16 @@ _QUAKE_SAMPLES = [
 def test_quake_default_templates_match_previous_wording(key, values):
     ts = TemplateSet(QUAKE_DEFAULTS, QUAKE_TAGS, {})
     assert ts.render(key, values) == _old_quake(key, values)
+
+
+def test_kanchi_default_matches_previous_wording():
+    ts = TemplateSet(OTHER_DEFAULTS, OTHER_TAGS, {})
+    assert ts.render("OTHER_KANCHI", {"信頼度": "高", "件数": "12"}) == "地震感知情報。信頼度高。12件の感知報告があります。"
+
+
+def test_all_yomi_config_vars_exist_for_every_default():
+    """全ての既定キーに対応する YOMI_* 設定が core.config にあること（追加漏れ防止）。"""
+    import core.config as cfg
+    keys = {**EEW_DEFAULTS, **QUAKE_DEFAULTS, **TSUNAMI_DEFAULTS, **OTHER_DEFAULTS, **USGS_DEFAULTS, **VOLCANO_DEFAULTS}
+    missing = [k for k in keys if not hasattr(cfg, "YOMI_" + k)]
+    assert not missing

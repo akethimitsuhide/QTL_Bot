@@ -51,12 +51,15 @@ import logging
 from core.discord_send import send_with_retry
 from core import runtime_settings as rs  # 通知の ON/OFF は実行時の値を読む
 from core.config import (
+    YOMI_OTHER_LONG_PERIOD, YOMI_OTHER_ADVISORY, YOMI_OTHER_HYPO_UPDATE,
+    YOMI_OTHER_NANKAI, YOMI_OTHER_KANCHI,
     CHANNEL_ID, OTHER_CHANNEL_ID,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
 from core.helpers import format_jma_time, truncate_embed_description, parse_jma_coordinate
 from core.audio import AudioMixin
+from core.yomiage import OTHER_DEFAULTS, OTHER_TAGS, TemplateSet
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.startup_guard import reported_since_start
@@ -67,6 +70,20 @@ from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    OTHER_DEFAULTS, OTHER_TAGS,
+    {
+        "OTHER_LONG_PERIOD": YOMI_OTHER_LONG_PERIOD,
+        "OTHER_ADVISORY": YOMI_OTHER_ADVISORY,
+        "OTHER_HYPO_UPDATE": YOMI_OTHER_HYPO_UPDATE,
+        "OTHER_NANKAI": YOMI_OTHER_NANKAI,
+        "OTHER_KANCHI": YOMI_OTHER_KANCHI,
+    },
+    warn=logger.warning,
+)
 
 
 class OtherInfoCog(commands.Cog, AudioMixin):
@@ -420,17 +437,14 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             time_speak = ""
             if origin_time and "時" in origin_time and "分頃" in origin_time:
                 try:
-                    time_speak = origin_time[origin_time.index("日") + 1:] + "に"
+                    time_speak = origin_time[origin_time.index("日") + 1:]
                 except Exception:
                     pass
 
-            speak_text = (
-                f"長周期地震動に関する観測情報。"
-                f"{time_speak}発生した"
-                F"{hypo_name}を震源とする"
-                f" マグニチュード{magnitude}の地震により、"
-                f"最大長周期地震動階級{max_lg}を観測しました。"
-            )
+            speak_text = _YOMI.render("OTHER_LONG_PERIOD", {
+                "発生時刻": time_speak, "震源": hypo_name,
+                "マグニチュード": str(magnitude), "最大階級": max_lg,
+            })
             await self.speak_local(speak_text)
 
         except Exception as e:
@@ -553,7 +567,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 record_delivery(True, "気象庁その他")
                 record_notification("気象庁その他", title_text)
 
-            speak_text = f"{title_text} が発表されました"
+            speak_text = _YOMI.render("OTHER_ADVISORY", {"情報名": title_text})
             if "顕著な地震の震源要素更新のお知らせ" in title_text:
                 # origin_time は「YYYY年M月D日H時MM分頃」形式なので「H時MM分頃」部分を抽出
                 time_speak = "先程"
@@ -563,12 +577,10 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                         # 例: "8時20分" → "8時20分"
                     except Exception:
                         pass
-                speak_text = (
-                    f"{time_speak}頃の地震について、震源要素を更新しました。"
-                    f" 震源地 {hypo_name}"
-                    f" マグニチュード M{magnitude}"
-                    f" 深さ {depth_str}"
-                )
+                speak_text = _YOMI.render("OTHER_HYPO_UPDATE", {
+                    "情報名": title_text, "発生時刻": time_speak, "震源": hypo_name,
+                    "マグニチュード": str(magnitude), "深さ": depth_str,
+                })
             await self.speak_local(speak_text)
 
         except Exception as e:
@@ -748,7 +760,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
             # 読み上げ（巨大地震警戒・注意のみ）
             if info_serial in ("巨大地震警戒", "巨大地震注意"):
-                await self.speak_local(f"南海トラフ地震臨時情報。{info_serial}が発表されました。", priority=1)
+                await self.speak_local(_YOMI.render("OTHER_NANKAI", {"情報種別": info_serial}), priority=1)
 
         except Exception as e:
             record_delivery(False, "南海トラフ", str(e))

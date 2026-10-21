@@ -76,6 +76,9 @@ from core.config import (
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
     TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
+    YOMI_TSUNAMI_P2P_ISSUED, YOMI_TSUNAMI_P2P_ISSUED_PLAIN, YOMI_TSUNAMI_P2P_CANCEL,
+    YOMI_TSUNAMI_JMA_ISSUED, YOMI_TSUNAMI_JMA_CANCEL, YOMI_TSUNAMI_OFFSHORE,
+    YOMI_TSUNAMI_TIDE_TIME,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.tsunami_speech import (
@@ -84,6 +87,7 @@ from core.tsunami_speech import (
     offshore_station_keys, state_from_jma_forecast,
 )
 from core.helpers import truncate_embed_description, format_jma_time
+from core.yomiage import TSUNAMI_DEFAULTS, TSUNAMI_TAGS, TemplateSet
 from core.audio import AudioMixin
 from core.startup_guard import reported_since_start
 from core.gis_render import (
@@ -95,6 +99,22 @@ from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    TSUNAMI_DEFAULTS, TSUNAMI_TAGS,
+    {
+        "TSUNAMI_P2P_ISSUED": YOMI_TSUNAMI_P2P_ISSUED,
+        "TSUNAMI_P2P_ISSUED_PLAIN": YOMI_TSUNAMI_P2P_ISSUED_PLAIN,
+        "TSUNAMI_P2P_CANCEL": YOMI_TSUNAMI_P2P_CANCEL,
+        "TSUNAMI_JMA_ISSUED": YOMI_TSUNAMI_JMA_ISSUED,
+        "TSUNAMI_JMA_CANCEL": YOMI_TSUNAMI_JMA_CANCEL,
+        "TSUNAMI_OFFSHORE": YOMI_TSUNAMI_OFFSHORE,
+        "TSUNAMI_TIDE_TIME": YOMI_TSUNAMI_TIDE_TIME,
+    },
+    warn=logger.warning,
+)
 
 # 津波警報等級の重要度順（高い順）。notify_tsunami の Embed本文組み立てと
 # 読み上げ文言の両方から参照するため、モジュールレベルに定義する
@@ -751,7 +771,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # 一切反映されていなかった。ここでは grade_height_map を使って
             # 「{地域名}に{警報種別}が発表されました」の形で組み立てる。
             if cancelled:
-                speak_text = "津波情報が解除されました"
+                speak_text = _YOMI.render("TSUNAMI_P2P_CANCEL", {"情報名": title})
             elif grade_height_map:
                 # 最も重要度の高い grade を一つ選び、その地域名を読み上げる
                 top_grade = min(
@@ -773,9 +793,11 @@ class TsunamiCog(commands.Cog, AudioMixin):
                     area_text = "、".join(area_names)
                 else:
                     area_text = "、".join(area_names[:3]) + "等"
-                speak_text = f"{area_text}に{grade_label}が発表されました"
+                speak_text = _YOMI.render("TSUNAMI_P2P_ISSUED", {
+                    "情報名": title, "区分": grade_label, "地域": area_text,
+                })
             else:
-                speak_text = f"{title} が発表されました"
+                speak_text = _YOMI.render("TSUNAMI_P2P_ISSUED_PLAIN", {"情報名": title})
 
             await self.speak_local(speak_text)
             # 【2026-09-06 修正】以前は grade に応じて vxse51/52/53/5c の
@@ -1185,7 +1207,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # ── 読み上げ ──
             # 【2026-10-01追加】is_test時は本番の重複防止状態を汚染しないよう、
             # 判定を経ずに毎回読み上げる。
-            speech = build_offshore_observation_speech(detail)
+            speech = build_offshore_observation_speech(detail, yomi=_YOMI)
             if speech:
                 text, priority = speech
                 gate_key = str(head.get("EventID") or title)
@@ -1353,7 +1375,7 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # 前回読み上げから一定時間（既定120秒）経過した場合のみ読み上げる
             # （core.tsunami_speech.EventGate mode="change"）。is_test時は
             # 本番の重複防止状態を汚染しないよう、判定を経ずに毎回読み上げる。
-            speech = build_tide_time_speech(detail)
+            speech = build_tide_time_speech(detail, yomi=_YOMI)
             if speech:
                 text, priority, gate_value = speech
                 now = datetime.now().timestamp()
@@ -1762,17 +1784,29 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # のみが解除された場合でも誤って警報解除と案内してしまっていた）。
             is_cancelled = max_level == 0 and bool(forecast_items) and has_any_cancel_code
             headline_text = (head.get("Headline", {}) or {}).get("Text", "").strip()
+            # 読み上げテンプレート用の「解除文」「解除対象」（.env.yomiage の
+            # YOMI_TSUNAMI_JMA_CANCEL。既定は {解除文} そのもの＝従来と同じ文言）
+            cancel_sentence = ""
+            cancel_target = {4: "津波警報", 2: "津波注意報"}.get(cancelled_from_level, "")
             if is_cancelled:
                 if headline_text:
-                    cancel_speak_text = headline_text
+                    cancel_sentence = headline_text
                 elif cancelled_from_level == 4:
-                    cancel_speak_text = "津波警報が解除されました"
+                    cancel_sentence = "津波警報が解除されました"
                 elif cancelled_from_level == 2:
-                    cancel_speak_text = "津波注意報が解除されました"
+                    cancel_sentence = "津波注意報が解除されました"
                 else:
-                    cancel_speak_text = "津波の心配はなくなりました"
+                    cancel_sentence = "津波の心配はなくなりました"
+                # Embed本文（下の description）に載せる文言は従来どおり固定
+                # （読み上げテンプレートの設定で本文が変わらないようにする）。
+                cancel_speak_text = cancel_sentence
+                cancel_speech = _YOMI.render("TSUNAMI_JMA_CANCEL", {
+                    "情報名": title, "解除文": cancel_sentence,
+                    "気象庁見出し": headline_text, "解除対象": cancel_target,
+                })
             else:
                 cancel_speak_text = ""
+                cancel_speech = ""
 
             # ── description 組み立て（notify_tsunami_observation スタイル準拠） ──
             # 【2026-09-02 修正】embed.title と同じ文言をdescriptionの1行目にも
@@ -1895,10 +1929,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # チャイム（WARN_MP3: vxse51/52/5c）の再生を廃止した。津波情報
             # 発表時に鳴らす音声は「読み上げ」と「EWS警告音」のみとする。
             if is_cancelled:
-                await self.speak_local(cancel_speak_text)
+                await self.speak_local(cancel_speech)
             else:
                 speak_label = WARN_LABEL.get(max_level, "津波情報")
-                await self.speak_local(f"{speak_label}が発表されました")
+                await self.speak_local(_YOMI.render("TSUNAMI_JMA_ISSUED", {
+                    "情報名": title, "区分": speak_label,
+                }))
 
             # ── EWS（緊急警報放送）信号音 ──
             # 【2026-09-01 追加】notify_tsunami と同じ理由・同じ仕組みで

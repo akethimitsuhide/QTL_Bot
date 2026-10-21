@@ -42,6 +42,7 @@ import logging
 
 from core.discord_send import send_with_retry
 from core.config import (
+    YOMI_USGS_QUAKE,
     CHANNEL_ID, USGS_CHANNEL_ID,
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
     USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX,
@@ -51,12 +52,23 @@ from core.config import (
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.audio import AudioMixin
+from core.yomiage import USGS_DEFAULTS, USGS_TAGS, TemplateSet
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.gis_render import render_shindo_map, is_outside_japan_bbox, render_overseas_map
 from core.gis_data import ensure_gis_data_ready
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    USGS_DEFAULTS, USGS_TAGS,
+    {
+        "USGS_QUAKE": YOMI_USGS_QUAKE,
+    },
+    warn=logger.warning,
+)
 
 
 class UsgsCog(commands.Cog, AudioMixin):
@@ -417,12 +429,9 @@ class UsgsCog(commands.Cog, AudioMixin):
             record_notification("USGS", title, place)
             
             # 読み上げ
-            speak_text = (
-                f"USGS地震情報。"
-                f"{occur_time_str}、"
-                f"{place}で"
-                f"マグニチュード{mag:.1f}の地震が発生しました。"
-            )
+            speak_text = _YOMI.render("USGS_QUAKE", {
+                "発生時刻": occur_time_str, "場所": str(place), "マグニチュード": f"{mag:.1f}",
+            })
             await self.speak_local(speak_text, priority=3)
             
             logger.info(f"USGS地震情報を通知しました: {event_id} / M{mag:.1f}")

@@ -32,16 +32,30 @@ import logging
 
 from core.discord_send import send_with_retry
 from core.config import (
+    YOMI_VOLCANO_INFO, YOMI_VOLCANO_ERUPTION_FLASH, YOMI_VOLCANO_ERUPTION_WARNING,
     CHANNEL_ID, VOLCANO_CHANNEL_ID,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.helpers import format_jma_time
 from core.audio import AudioMixin
+from core.yomiage import VOLCANO_DEFAULTS, VOLCANO_TAGS, TemplateSet
 from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.startup_guard import reported_since_start
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
+# 設定ミスの警告はモジュール読み込み時に1回だけ出る。
+_YOMI = TemplateSet(
+    VOLCANO_DEFAULTS, VOLCANO_TAGS,
+    {
+        "VOLCANO_INFO": YOMI_VOLCANO_INFO,
+        "VOLCANO_ERUPTION_FLASH": YOMI_VOLCANO_ERUPTION_FLASH,
+        "VOLCANO_ERUPTION_WARNING": YOMI_VOLCANO_ERUPTION_WARNING,
+    },
+    warn=logger.warning,
+)
 
 
 class VolcanoCog(commands.Cog, AudioMixin):
@@ -390,7 +404,9 @@ class VolcanoCog(commands.Cog, AudioMixin):
             # 読み上げ（警戒レベル L1〜L3 のみ）
             if alert_code in ("01", "02", "03"):
                 level = {"01": "1", "02": "2", "03": "3"}[alert_code]
-                speak_text = f"火山情報。{head_title}。警戒レベル{level}。"
+                speak_text = _YOMI.render("VOLCANO_INFO", {
+                    "情報名": head_title, "火山名": "", "警戒レベル": level,   # 火山情報には火山名の項目が無い
+                })
                 await self.speak_local(speak_text, priority=1)
 
         except Exception as e:
@@ -502,7 +518,9 @@ class VolcanoCog(commands.Cog, AudioMixin):
             record_notification("噴火速報", head_title)
             logger.info(f"噴火速報通知完了: {head_title} eventId={event_id}")
 
-            speak_text = f"噴火速報。{volcano_name or title}で噴火が発生しました。"
+            speak_text = _YOMI.render("VOLCANO_ERUPTION_FLASH", {
+                "情報名": head_title, "火山名": volcano_name or title,
+            })
             await self.speak_local(speak_text, priority=0)
 
         except Exception as e:
@@ -649,7 +667,10 @@ class VolcanoCog(commands.Cog, AudioMixin):
             record_notification("噴火警報", title)
             logger.info(f"噴火警報通知完了: {title} eventId={event_id}")
 
-            speak_text = f"噴火警報。{volcano_name or '火山'}で{warn_name}が{condition or '発表'}されました。"
+            speak_text = _YOMI.render("VOLCANO_ERUPTION_WARNING", {
+                "情報名": title, "火山名": volcano_name or "火山",
+                "警報名": warn_name, "状況": condition or "発表",
+            })
             await self.speak_local(speak_text, priority=0)
 
         except Exception as e:

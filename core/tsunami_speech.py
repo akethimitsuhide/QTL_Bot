@@ -22,8 +22,15 @@ from __future__ import annotations
 
 import re
 import unicodedata
+
 from dataclasses import dataclass, field
 from typing import Optional
+
+from core.yomiage import TSUNAMI_DEFAULTS, TSUNAMI_TAGS, TemplateSet
+
+# 読み上げテンプレートの既定（.env.yomiage が無い場合・テスト用）。本番では
+# cogs/tsunami.py が .env.yomiage の設定を反映した TemplateSet を yomi= で渡す。
+_DEFAULT_YOMI = TemplateSet(TSUNAMI_DEFAULTS, TSUNAMI_TAGS, {})
 
 GRADE_ORDER = ["MajorWarning", "Warning", "Watch", "Forecast"]  # 先頭ほど深刻
 GRADE_LABEL = {
@@ -540,7 +547,8 @@ def _offshore_station_name_for_speech(name: str) -> str:
 
 
 def build_offshore_observation_speech(detail: dict,
-                                      max_areas: int = DEFAULT_MAX_AREAS) -> Optional[tuple[str, int]]:
+                                      max_areas: int = DEFAULT_MAX_AREAS,
+                                      yomi: Optional[TemplateSet] = None) -> Optional[tuple[str, int]]:
     """
     「沖合の津波観測に関する情報」（VTSE52）の読み上げ。観測点が無ければ None。
 
@@ -568,12 +576,10 @@ def build_offshore_observation_speech(detail: dict,
 
     head = detail.get("Head", {}) or {}
     t = format_time_for_speech(head.get("ReportDateTime") or head.get("TargetDateTime") or "")
-    text = "沖合の津波観測に関する情報。"
-    if t:
-        text += f"{t}、"
-    text += "次の沖合で津波を観測しました。"
-    if names:
-        text += f"{format_areas_for_speech(names, max_areas)}。"
+    text = (yomi or _DEFAULT_YOMI).render("TSUNAMI_OFFSHORE", {
+        "発表時刻": t,
+        "観測点": format_areas_for_speech(names, max_areas) if names else "",
+    })
     return text, 2
 
 
@@ -596,7 +602,8 @@ def offshore_station_keys(detail: dict) -> frozenset:
     return frozenset(keys)
 
 
-def build_tide_time_speech(detail: dict) -> Optional[tuple[str, int, tuple[str, str]]]:
+def build_tide_time_speech(detail: dict,
+                           yomi: Optional[TemplateSet] = None) -> Optional[tuple[str, int, tuple[str, str]]]:
     """
     「各地の満潮時刻・津波到達予想時刻に関する情報」の読み上げ。
     戻り値: (読み上げ文, 優先度, 変化検知用の値=(予報区名, 到達予想時刻))。
@@ -611,9 +618,11 @@ def build_tide_time_speech(detail: dict) -> Optional[tuple[str, int, tuple[str, 
     when = format_time_for_speech(state.arrival[earliest])
     if not when:
         return None
-    text = f"津波の到達予想時刻を発表しました。最も早い到達は、{when}、{earliest}です。"
-    if earliest in state.immediate:
-        text += f"{earliest}ではただちに津波が来襲すると予測されています。"
+    text = (yomi or _DEFAULT_YOMI).render("TSUNAMI_TIDE_TIME", {
+        "到達予想時刻": when,
+        "予報区": earliest,
+        "即時地域": earliest if earliest in state.immediate else "",
+    })
     top = state.top_grade
     priority = 2 if top in ("MajorWarning", "Warning") else 3
     return text, priority, (earliest, state.arrival[earliest])
