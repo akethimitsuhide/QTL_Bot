@@ -313,3 +313,18 @@ def test_unhandled_exception_becomes_generic_500_with_security_headers():
             await c.close()
 
     _run(run())
+
+
+def test_vendored_files_match_documented_sha256():
+    """web/vendor/ の同梱ライブラリが、VENDORED.md に書いたハッシュ（npm 公式パッケージの内容）と1バイトも違わないこと。
+
+    改行コードの変換・文字コードの変更・転送時の破損・改ざんを検出する。
+    失敗した場合の直し方は web/vendor/VENDORED.md の「更新するとき」と同じ手順で、公式パッケージから取り直す。
+    """
+    import hashlib
+    rows = re.findall(r"\|\s*`([^`]+)`\s*\|[^\n]*?`([0-9a-f]{64})`\s*\|", _read("vendor/VENDORED.md"))
+    assert {name for name, _ in rows} == {"chart.umd.min.js", "leaflet.js", "leaflet.css"}
+    for name, expected in rows:
+        with open(os.path.join(_REAL_WEB, "vendor", name), "rb") as f:
+            data = f.read()
+        assert hashlib.sha256(data).hexdigest() == expected, f"web/vendor/{name} が公式パッケージと一致しません"

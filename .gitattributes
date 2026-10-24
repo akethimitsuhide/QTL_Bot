@@ -1,0 +1,5 @@
+# 同梱している外部ライブラリ（web/vendor/）は、改行コードの変換などを Git にさせない。
+# 1バイトでも変わると web/vendor/VENDORED.md のハッシュと合わなくなり、改ざんと区別できなくなるため。
+# （leaflet.css は元から CRLF 改行。他のファイルも含め、取り込んだままの内容を保つ）
+web/vendor/*.js  -text
+web/vendor/*.css -text
