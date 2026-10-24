@@ -38,8 +38,6 @@ import asyncio
 import logging
 import secrets
 
-import aiohttp
-import discord
 
 from core.config import DISCORD_SEND_RETRY_ATTEMPTS
 from core import webhook_notify
@@ -49,13 +47,8 @@ logger = logging.getLogger("QTLBot")
 _BASE_DELAY_SEC = 2.0
 _MAX_DELAY_SEC = 10.0
 
-# 一時的な失敗として再送する例外
-RETRYABLE_EXCEPTIONS = (
-    discord.DiscordServerError,
-    aiohttp.ClientError,
-    asyncio.TimeoutError,
-    ConnectionError,
-)
+# 一時的な失敗として再送する例外（複数チャンネル送信の ChannelGroup と共通。core/channels.py）
+from core.channels import RETRYABLE_EXCEPTIONS  # noqa: E402,F401
 
 
 def _retry_delay(retry_index: int) -> float:

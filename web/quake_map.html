@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>QTL_Bot 地震情報履歴</title>
+<script src="/assets/js/theme.js"></script>
+<link rel="stylesheet" href="/assets/vendor/leaflet.css">
+<link rel="stylesheet" href="/assets/css/common.css">
+<link rel="stylesheet" href="/assets/css/quake_map.css">
+<script src="/assets/vendor/leaflet.js" defer></script>
+<script src="/assets/vendor/chart.umd.min.js" defer></script>
+<script src="/assets/js/common.js" defer></script>
+<script src="/assets/js/quake_map.js" defer></script>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <h1 id="pageTitle">QTL_Bot 地震情報履歴</h1>
+      <div class="subtitle" id="pageSubtitle">P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震・EEWは含まれません。</div>
+    </div>
+    <button class="btn-link" id="themeBtn" type="button">テーマ</button>
+  </div>
+
+  <div class="toolbar">
+    <a class="btn-link" href="/dashboard">ダッシュボード</a>
+    <select class="btn-link" id="typeSelect" aria-label="表示する種別">
+      <option value="quake">種別: 地震情報</option>
+      <option value="eew">種別: EEW（緊急地震速報）</option>
+    </select>
+    <select class="btn-link" id="scaleFilter" aria-label="最大震度で絞り込む">
+      <option value="0">最大震度: すべて</option>
+    </select>
+    <label>から <input type="date" class="date-input" id="dateFrom"></label>
+    <label>まで <input type="date" class="date-input" id="dateTo"></label>
+    <button class="btn-link" id="clearDateBtn" type="button">日付クリア</button>
+    <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
+  </div>
+
+  <div id="map" role="application" aria-label="地震の震源地図"></div>
+
+  <div class="card card-spaced">
+    <h2 id="chartTitle">月次件数</h2>
+    <div class="chart-wrap"><canvas id="monthlyChart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <h2 id="tableTitle">履歴一覧</h2>
+    <div class="table-wrap table-wrap-tall" id="tableContent"><div class="notif-empty">読み込み中...</div></div>
+  </div>
+
+  <noscript><div class="error">このページの表示には JavaScript が必要です。</div></noscript>
+</body>
+</html>

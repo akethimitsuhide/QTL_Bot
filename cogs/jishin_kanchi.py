@@ -41,9 +41,10 @@ import discord
 from discord.ext import commands
 
 from core.discord_send import send_with_retry
+from core.channels import resolve_channels
 from core.config import (
     YOMI_OTHER_KANCHI,
-    CHANNEL_ID, JISHIN_KANCHI_CHANNEL_ID, JISHIN_KANCHI_ENABLE,
+    CHANNEL_IDS, JISHIN_KANCHI_CHANNEL_IDS, JISHIN_KANCHI_ENABLE,
     JISHIN_KANCHI_MAX_LEVEL, JISHIN_KANCHI_MIN_COUNT,
     JISHIN_KANCHI_SPEECH_ENABLE, JISHIN_KANCHI_SOUND_ENABLE,
     JISHIN_KANCHI_SOUND_FILE,
@@ -136,9 +137,9 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel = self.bot.get_channel(CHANNEL_ID)
-        self.jishin_kanchi_channel = (
-            self.bot.get_channel(JISHIN_KANCHI_CHANNEL_ID) or self.channel
+        self.channel = resolve_channels(self.bot, CHANNEL_IDS)
+        self.jishin_kanchi_channel = resolve_channels(
+            self.bot, JISHIN_KANCHI_CHANNEL_IDS, self.channel
         )
 
         if not JISHIN_KANCHI_ENABLE:

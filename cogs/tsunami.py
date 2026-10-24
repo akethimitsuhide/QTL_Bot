@@ -70,8 +70,9 @@ import logging
 
 from core.discord_send import send_with_retry
 from core import runtime_settings as rs  # 津波通知の ON/OFF は実行時の値を読む
+from core.channels import resolve_channels
 from core.config import (
-    CHANNEL_ID, TSUNAMI_CHANNEL_ID,
+    CHANNEL_IDS, TSUNAMI_CHANNEL_IDS, TSUNAMI_CHANNEL_ID,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
@@ -227,8 +228,8 @@ class TsunamiCog(commands.Cog, AudioMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel         = self.bot.get_channel(CHANNEL_ID)
-        self.tsunami_channel = self.bot.get_channel(TSUNAMI_CHANNEL_ID) or self.channel
+        self.channel         = resolve_channels(self.bot, CHANNEL_IDS)
+        self.tsunami_channel = resolve_channels(self.bot, TSUNAMI_CHANNEL_IDS, self.channel)
 
         if rs.get("TSUNAMI_ENABLE"):
             logger.info(f"津波情報機能: 有効（チャンネルID: {TSUNAMI_CHANNEL_ID}）")

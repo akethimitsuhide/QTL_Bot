@@ -52,7 +52,7 @@ def test_parse_urls_accepts_discord_and_slack_and_dedupes():
 ])
 def test_parse_urls_rejects(bad):
     targets, rejected = parse_webhook_urls(bad)
-    assert targets == [] and len(rejected) == 1
+    assert targets == [] and len(rejected) >= 1      # 空白を含む値は区切りとして分割されるため、複数件になりうる
 
 
 def test_secrets_never_appear_in_repr_or_rejection_text():

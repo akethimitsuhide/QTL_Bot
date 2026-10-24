@@ -41,9 +41,10 @@ from datetime import datetime
 import logging
 
 from core.discord_send import send_with_retry
+from core.channels import resolve_channels
 from core.config import (
     YOMI_USGS_QUAKE,
-    CHANNEL_ID, USGS_CHANNEL_ID,
+    CHANNEL_IDS, USGS_CHANNEL_IDS,
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
     USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX,
     USGS_REGION_LON_MIN, USGS_REGION_LON_MAX,
@@ -158,8 +159,8 @@ class UsgsCog(commands.Cog, AudioMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel      = self.bot.get_channel(CHANNEL_ID)
-        self.usgs_channel = self.bot.get_channel(USGS_CHANNEL_ID) or self.channel
+        self.channel      = resolve_channels(self.bot, CHANNEL_IDS)
+        self.usgs_channel = resolve_channels(self.bot, USGS_CHANNEL_IDS, self.channel)
 
         if USGS_ENABLED:
             if not self.fetch_usgs_quake.is_running():

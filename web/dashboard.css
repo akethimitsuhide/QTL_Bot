@@ -1,0 +1,22 @@
+/* /dashboard 専用スタイル（共通部分は common.css） */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 20px; }
+.grid-spaced { margin-top: 20px; }
+canvas { max-height: 280px; max-width: 100%; }
+
+/* ── ステータスサマリー ── */
+.summary-bar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+.summary-chip { background: var(--surface); border-radius: 8px; padding: 10px 16px; min-width: 130px; flex: 1 1 130px; }
+.summary-chip .chip-label { color: var(--text-muted); font-size: 0.75em; margin-bottom: 4px; }
+.summary-chip .chip-value { font-size: 1.1em; font-weight: 600; overflow-wrap: anywhere; }
+
+/* ── 通知履歴 ── */
+.notif-card { grid-column: 1 / -1; }
+.notif-header-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.notif-header-row h2 { margin: 0; }
+
+@media (max-width: 640px) {
+  .grid { grid-template-columns: 1fr; gap: 12px; }
+  .grid-spaced { margin-top: 12px; }
+  .summary-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .summary-chip { min-width: 0; padding: 8px 12px; }
+}

@@ -37,6 +37,7 @@ from typing import Callable, Optional
 from dotenv import dotenv_values
 
 from core import env_merge
+from core.channels import parse_channel_ids
 from core.yomiage import TEMPLATE_REGISTRY, render, validate_template
 
 OK, INFO, WARN, NG = "OK", "INFO", "WARN", "NG"
@@ -167,18 +168,21 @@ def check_env_files(base_dir: str, env: dict[str, str]) -> list[Check]:
         checks.append(Check(OK, "BOT_TOKEN が設定されています（値は表示しません）"))
 
     channel = (env.get("CHANNEL_ID") or "").strip()
+    ids, rejected = parse_channel_ids(channel)
     if not channel:
         checks.append(Check(NG, "CHANNEL_ID が設定されていません"))
-    elif not channel.isdigit():
-        checks.append(Check(NG, f"CHANNEL_ID は数値で指定してください（現在: {channel!r}）"))
+    elif rejected or not ids:
+        checks.append(Check(NG, f"CHANNEL_ID は数値（複数ならカンマ区切り）で指定してください（現在: {channel!r}）"))
     else:
-        checks.append(Check(OK, "CHANNEL_ID が設定されています"))
+        suffix = f"（{len(ids)}チャンネル）" if len(ids) > 1 else ""
+        checks.append(Check(OK, f"CHANNEL_ID が設定されています{suffix}"))
 
     bad = sorted(k for k, v in env.items()
-                 if k.endswith("_CHANNEL_ID") and k != "CHANNEL_ID" and v.strip() and not v.strip().isdigit())
+                 if k.endswith("_CHANNEL_ID") and k != "CHANNEL_ID" and v.strip()
+                 and (parse_channel_ids(v)[1] or not parse_channel_ids(v)[0]))
     for key in bad:
-        checks.append(Check(WARN, f"{key} が数値ではありません（現在: {env[key].strip()!r}）",
-                            "Discord のチャンネルIDは数字だけです"))
+        checks.append(Check(WARN, f"{key} に数値以外の値があります（現在: {env[key].strip()!r}）",
+                            "Discord のチャンネルIDは数字だけです（複数指定はカンマ区切り）。無効な値は無視されます"))
 
     # .env.example との差分
     for example_name, target_name in env_merge._FILE_PAIRS:
@@ -333,6 +337,14 @@ def check_features(base_dir: str, env: dict[str, str]) -> list[Check]:
             checks.append(Check(NG, f"WEB_DASHBOARD_PORT が不正です（現在: {port_raw!r}）"))
         else:
             checks.append(_check_port(host, int(port_raw)))
+        from core.web_static import StaticFiles
+        missing_web = StaticFiles().missing()
+        if missing_web:
+            checks.append(Check(WARN, f"ダッシュボードの画面ファイルが不足しています（web/ の {len(missing_web)} ファイル）",
+                                "画面が表示されません。" + "、".join(missing_web[:4]) + ("…" if len(missing_web) > 4 else "")
+                                + " ／ git pull で web/ フォルダごと更新してください"))
+        else:
+            checks.append(Check(OK, "ダッシュボード: 画面ファイル（web/）がそろっています"))
         exposed = host not in ("127.0.0.1", "localhost", "::1")
         if exposed and not (env.get("WEB_DASHBOARD_TOKEN") or "").strip() \
                 and not (env.get("WEB_DASHBOARD_ALLOWED_IPS") or "").strip():

@@ -31,6 +31,7 @@ def _initial(**over):
         "QUAKE_ENABLE_SCALE_PROMPT": True, "QUAKE_ENABLE_DESTINATION": True,
         "QUAKE_ENABLE_SCALE_AND_DEST": True, "QUAKE_ENABLE_DETAIL_SCALE": True,
         "QUAKE_ENABLE_FOREIGN": True, "QUAKE_ENABLE_OTHER": True,
+        "EEW_ENABLE": True, "QUAKE_ENABLE": True, "VOLCANO_ENABLE": True,
         "TSUNAMI_ENABLE": True, "ENABLE_LONG_PERIOD": True, "ENABLE_ADVISORY": True,
         "GIS_MAP_THEME": "light",
     }

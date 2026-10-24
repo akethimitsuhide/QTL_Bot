@@ -127,6 +127,14 @@ Python・依存パッケージ・.env の必須項目・.env.yomiage の書式�
 音声/GIS/ダッシュボードの前提条件・二重起動を、Bot を起動せずに一覧する。
 読み取り専用で、外部への通信はしない。[ NG ] があれば終了コード 1。
 
+【読み上げテンプレートのテスト再生（2026-10-21 追加, core/yomiage_test.py）】
+    python3 bot.py --test_yomiage                 # 全項目の展開例を一覧（再生しない）
+    python3 bot.py --test_yomiage EEW_FIRST_WARN  # その項目を展開して実際に音声を再生
+    python3 bot.py --test_yomiage all             # 全項目を順に再生
+    python3 bot.py --test_yomiage EEW_FIRST_WARN --blank 警報地域   # タグを空にした場合を確認
+
+Discord へは接続せず、通知も送らない。.env / .env.yomiage の設定を Bot と同じ読み込み方で反映する。
+
 【.env への不足項目の対話式追加（2026-10-05 追加, core/env_merge.py）】
     python3 bot.py --merge_env          # .env.example にあって .env に無い項目を1つずつ確認して追加
     python3 bot.py --merge_env --yes    # 確認せず、すべて既定値で追加
@@ -184,6 +192,12 @@ if "--check_env" in sys.argv[1:]:
 if "--doctor" in sys.argv[1:]:
     from core.doctor import run_doctor
     sys.exit(run_doctor())
+
+# ── --test_yomiage（読み上げテンプレートのテスト再生, core/yomiage_test.py）
+# Discord へ接続せず、.env.yomiage のテンプレートを展開して音声を再生する。
+if "--test_yomiage" in sys.argv[1:]:
+    from core.yomiage_test import run_test_yomiage
+    sys.exit(run_test_yomiage(sys.argv[sys.argv.index("--test_yomiage") + 1:]))
 
 # ── --merge_env（2026-10-05 追加, core/env_merge.py）
 # .env.example にあって .env に無い項目を、対話式で .env へ追加する。

@@ -47,10 +47,10 @@ from discord.ext import commands
 import aiohttp
 
 from core.config import (
-    CHANNEL_ID, ADMIN_CHANNEL_ID,
-    EEW_CHANNEL_ID, P2P_EEW_CHANNEL_ID, QUAKE_CHANNEL_ID, TSUNAMI_CHANNEL_ID,
-    OTHER_CHANNEL_ID, VOLCANO_CHANNEL_ID, KYOSHIN_CHANNEL_ID, USGS_CHANNEL_ID,
-    JISHIN_KANCHI_CHANNEL_ID,
+    CHANNEL_IDS, ADMIN_CHANNEL_IDS,
+    EEW_CHANNEL_IDS, P2P_EEW_CHANNEL_IDS, QUAKE_CHANNEL_IDS, TSUNAMI_CHANNEL_IDS,
+    OTHER_CHANNEL_IDS, VOLCANO_CHANNEL_IDS, KYOSHIN_CHANNEL_IDS, USGS_CHANNEL_IDS,
+    JISHIN_KANCHI_CHANNEL_IDS,
     WOLFX_HEARTBEAT_TIMEOUT,
     USGS_ENABLED, USGS_MAGNITUDE_MIN, USGS_FETCH_INTERVAL,
     USGS_REGION_LAT_MIN, USGS_REGION_LAT_MAX,
@@ -62,7 +62,7 @@ from core.config import (
     HEALTH_CHECK_TIMEOUT, HEALTH_CHECK_CACHE_TTL, ERROR_NOTIFICATION_TTL,
     ENABLE_KYOSHIN,
     QUAKE_HISTORY_DEFAULT_LIMIT, QUAKE_HISTORY_CACHE_TTL_SEC,
-    DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_ID,
+    DIGEST_ENABLED, DIGEST_INTERVAL, DIGEST_WEEKDAY, DIGEST_HOUR, DIGEST_CHANNEL_IDS,
     GIS_MAP_ENABLE,
     QTL_STATUS_ACCESS, QTL_STATUS_ROLE_IDS,
     QTL_STATUS_HISTORY_ACCESS, QTL_STATUS_HISTORY_ROLE_IDS,
@@ -71,6 +71,8 @@ from core.constants import INT_MAP
 from core.command_access import ACCESS_ADMIN, is_allowed
 from core.status_history_view import format_quake_line, format_eew_line, join_lines
 from core import runtime_settings as rs
+from core.channels import resolve_channels
+from core.web_static import register_routes as register_static_routes, security_headers_middleware
 from core import webhook_notify
 from core.dashboard_auth import DashboardAuth, MIN_RECOMMENDED_TOKEN_LENGTH
 from core.cog_utils import get_cog_attr
@@ -116,751 +118,9 @@ WEB_DASHBOARD_ALLOWED_IPS = [
 # 空（未設定）の場合は認証なし（従来どおり）。詳細は core/dashboard_auth.py。
 WEB_DASHBOARD_TOKEN = os.getenv("WEB_DASHBOARD_TOKEN", "").strip()
 
-# GET /dashboard で返すグラフ表示用HTML。
-# Chart.js は CDN から読み込み、グラフの計算・描画処理はすべて
-# ブラウザ側（クライアント）で行う。Bot側（Raspberry Pi）は
-# /status/history のスナップショット履歴を返すだけで、追加の
-# 計算負荷は発生しない設計。
-_DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QTL_Bot ダッシュボード</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
-  h1 { font-size: 1.4em; margin-bottom: 4px; }
-  .subtitle { color: #7f849c; font-size: 0.85em; margin-bottom: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-          gap: 20px; }
-  .card { background: #292c3c; border-radius: 8px; padding: 16px; }
-  .card h2 { font-size: 1em; margin: 0 0 12px 0; color: #a6adc8; }
-  canvas { max-height: 280px; }
-  .status-line { color: #7f849c; font-size: 0.8em; margin-top: 8px; }
-  .error { color: #f38ba8; padding: 20px; }
-  .toolbar { margin-bottom: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .btn-link { display: inline-block; color: #89b4fa; background: #292c3c;
-              border: 1px solid #45475a; border-radius: 6px;
-              padding: 6px 14px; font-size: 0.85em; text-decoration: none;
-              cursor: pointer; font-family: inherit; }
-  .btn-link:hover { background: #313244; }
-
-  /* ── ステータスサマリーヘッダー ── */
-  .summary-bar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
-  .summary-chip { background: #292c3c; border-radius: 8px; padding: 10px 16px;
-                  min-width: 130px; flex: 1 1 130px; }
-  .summary-chip .chip-label { color: #7f849c; font-size: 0.75em; margin-bottom: 4px; }
-  .summary-chip .chip-value { font-size: 1.1em; font-weight: 600; }
-  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-  .dot-green  { background: #a6e3a1; }
-  .dot-yellow { background: #f9e2af; }
-  .dot-red    { background: #f38ba8; }
-  .dot-gray   { background: #6c7086; }
-
-  /* ── 通知履歴 ── */
-  .notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-  .notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #313244; }
-  .notif-table th { color: #7f849c; font-weight: normal; }
-  .notif-kind { display: inline-block; padding: 2px 8px; border-radius: 10px;
-                background: #45475a; color: #11111b; font-size: 0.85em; white-space: nowrap;
-                font-weight: 600; }
-  .notif-empty { color: #7f849c; padding: 12px 0; }
-  .notif-card { grid-column: 1 / -1; }
-  .notif-header-row { display: flex; justify-content: space-between; align-items: center;
-                      flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-  .notif-header-row h2 { margin: 0; }
-  .notif-filter { background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a;
-                  border-radius: 6px; padding: 5px 10px; font-size: 0.85em; }
-
-  @media (max-width: 480px) {
-    body { padding: 10px; }
-    .grid { grid-template-columns: 1fr; gap: 12px; }
-    .summary-chip { min-width: 100px; }
-  }
-</style>
-</head>
-<body>
-  <h1>QTL_Bot ダッシュボード</h1>
-  <div class="subtitle">システムリソース・受信件数の推移（メモリ上のリングバッファ、Bot再起動でリセットされます）</div>
-
-  <div class="summary-bar" id="summaryBar">
-    <div class="summary-chip"><div class="chip-label">Bot状態</div><div class="chip-value" id="sumStatus">読み込み中...</div></div>
-    <div class="summary-chip"><div class="chip-label">稼働時間</div><div class="chip-value" id="sumUptime">-</div></div>
-    <div class="summary-chip"><div class="chip-label">Ping</div><div class="chip-value" id="sumPing">-</div></div>
-    <div class="summary-chip"><div class="chip-label">Wolfx EEW</div><div class="chip-value" id="sumWolfx">-</div></div>
-    <div class="summary-chip"><div class="chip-label">CPU / メモリ</div><div class="chip-value" id="sumResource">-</div></div>
-    <div class="summary-chip"><div class="chip-label">ディスク</div><div class="chip-value" id="sumDisk">-</div></div>
-  </div>
-
-  <div class="toolbar">
-    <a class="btn-link" href="/status/history?format=csv" download>CSVをダウンロード</a>
-    <a class="btn-link" href="/quake_map">地震情報履歴（地図・表）</a>
-    <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
-  </div>
-  <div id="chartsContent" class="grid">
-    <div class="card"><h2>CPU 使用率 (%)</h2><canvas id="cpuChart"></canvas></div>
-    <div class="card"><h2>メモリ使用量 (MB)</h2><canvas id="memChart"></canvas></div>
-    <div class="card"><h2>ディスク使用率 (%)</h2><canvas id="diskChart"></canvas></div>
-    <div class="card"><h2>受信件数（累積）</h2><canvas id="recvChart"></canvas></div>
-  </div>
-  <div id="notifSection" class="grid" style="margin-top: 20px;">
-    <div class="card notif-card">
-      <div class="notif-header-row">
-        <h2>直近の通知履歴</h2>
-        <select class="notif-filter" id="notifFilter">
-          <option value="">すべての種別</option>
-        </select>
-      </div>
-      <div id="notifContent"><div class="notif-empty">読み込み中...</div></div>
-    </div>
-  </div>
-  <div class="status-line" id="statusLine">読み込み中...</div>
-
-<script>
-const COLORS = {
-  cpu: '#89b4fa', mem: '#a6e3a1', disk: '#f9e2af',
-  wolfx: '#f38ba8', p2p_eew: '#fab387', quake: '#94e2d5',
-  tsunami: '#89dceb', usgs: '#cba6f7', volcano: '#eba0ac',
-  // 【2026-09-09追加】recvChartのrecvKeysには元々含まれていたが、
-  // 色定義が漏れていたため未定義色（Chart.jsのデフォルト）で描画
-  // されていた。status_history_recorderのスナップショット側にも
-  // 併せてキーを追加している。
-  jishin_kanchi: '#f2cdcd', kyoshin: '#b4befe',
-};
-
-// 通知種別ごとの表示色（notif-kindピルの背景色）。
-// core/notification_log.py 経由で記録されるkind文字列と対応させる。
-// 未知の種別が来た場合はCSS側のデフォルト（#45475a）にフォールバックする。
-const KIND_COLORS = {
-  'EEW': '#f38ba8', '地震情報': '#94e2d5', '津波情報': '#89dceb',
-  '津波観測情報': '#74c7ec', '津波予報': '#89dceb', '震源要素更新': '#b4befe',
-  '南海トラフ': '#eba0ac', '火山情報': '#fab387', '噴火速報': '#f9e2af',
-  '噴火警報': '#f38ba8', 'USGS': '#cba6f7', '長周期地震動': '#a6e3a1',
-  '気象庁その他': '#9399b2',
-};
-
-let notifItemsCache = [];  // フィルタ再描画用に直近取得分を保持
-
-function makeLineChart(ctx, labels, datasets, yLabel) {
-  return new Chart(ctx, {
-    type: 'line',
-    data: { labels: labels, datasets: datasets },
-    options: {
-      responsive: true,
-      animation: false,
-      scales: {
-        x: { ticks: { color: '#7f849c', maxTicksLimit: 8 }, grid: { color: '#313244' } },
-        y: { ticks: { color: '#7f849c' }, grid: { color: '#313244' }, title: { display: true, text: yLabel, color: '#7f849c' } },
-      },
-      plugins: { legend: { labels: { color: '#cdd6f4' } } },
-    },
-  });
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
-// ── ステータスサマリーヘッダー（/status を取得して表示） ──
-async function loadAndRenderSummary() {
-  try {
-    const res = await fetch('/status');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-
-    const statusOk = data.status === 'online';
-    document.getElementById('sumStatus').innerHTML =
-      '<span class="dot ' + (statusOk ? 'dot-green' : 'dot-red') + '"></span>' +
-      escapeHtml(data.bot_user || (statusOk ? 'オンライン' : 'オフライン'));
-
-    document.getElementById('sumUptime').textContent = data.uptime || '-';
-    document.getElementById('sumPing').textContent =
-      (data.ping_ms != null ? data.ping_ms + ' ms' : '-');
-
-    const wolfx = (data.eew && data.eew.wolfx) || {};
-    const wolfxStatus = wolfx.ws_status || 'unknown';
-    const wolfxDot = wolfxStatus === 'online' ? 'dot-green'
-      : (wolfxStatus === 'connecting' ? 'dot-yellow' : 'dot-red');
-    document.getElementById('sumWolfx').innerHTML =
-      '<span class="dot ' + wolfxDot + '"></span>' + escapeHtml(wolfxStatus);
-
-    const sys = data.system || {};
-    if (sys.cpu_percent != null) {
-      document.getElementById('sumResource').textContent =
-        sys.cpu_percent.toFixed(1) + '% / ' + sys.memory_mb + 'MB';
-    }
-    if (sys.disk_percent != null) {
-      const diskDot = sys.disk_percent >= 90 ? 'dot-red' : (sys.disk_percent >= 80 ? 'dot-yellow' : 'dot-green');
-      document.getElementById('sumDisk').innerHTML =
-        '<span class="dot ' + diskDot + '"></span>' + sys.disk_percent + '%';
-    }
-  } catch (e) {
-    document.getElementById('sumStatus').innerHTML =
-      '<span class="dot dot-gray"></span>取得失敗';
-  }
-}
-
-async function loadAndRender() {
-  try {
-    const res = await fetch('/status/history');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    const history = data.history || [];
-
-    if (history.length === 0) {
-      document.getElementById('statusLine').textContent =
-        'まだ履歴データがありません（記録間隔: ' + data.interval_sec + '秒。しばらく待ってから再読み込みしてください）';
-      return;
-    }
-
-    const labels = history.map(h => {
-      const d = new Date(h.timestamp);
-      return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
-    });
-
-    makeLineChart(document.getElementById('cpuChart'), labels, [
-      { label: 'CPU %', data: history.map(h => h.cpu_percent), borderColor: COLORS.cpu, tension: 0.2, pointRadius: 0 },
-    ], '%');
-
-    makeLineChart(document.getElementById('memChart'), labels, [
-      { label: 'メモリ MB', data: history.map(h => h.memory_mb), borderColor: COLORS.mem, tension: 0.2, pointRadius: 0 },
-    ], 'MB');
-
-    makeLineChart(document.getElementById('diskChart'), labels, [
-      { label: 'ディスク %', data: history.map(h => h.disk_percent), borderColor: COLORS.disk, tension: 0.2, pointRadius: 0 },
-    ], '%');
-
-    const recvKeys = ['wolfx', 'p2p_eew', 'quake', 'tsunami', 'jishin_kanchi', 'usgs', 'volcano', 'kyoshin'];
-    const recvDatasets = recvKeys.map(k => ({
-      label: k,
-      data: history.map(h => (h.recv_count || {})[k] || 0),
-      borderColor: COLORS[k],
-      tension: 0.2,
-      pointRadius: 0,
-    }));
-    makeLineChart(document.getElementById('recvChart'), labels, recvDatasets, '件数（累積）');
-
-    const nowStr = new Date().toLocaleTimeString('ja-JP');
-    document.getElementById('statusLine').textContent =
-      data.count + '件のスナップショット（記録間隔: ' + data.interval_sec + '秒、最大保持: ' + data.max_points + '件） ／ 最終更新: ' + nowStr;
-  } catch (e) {
-    document.getElementById('chartsContent').innerHTML = '<div class="error">履歴データの取得に失敗しました: ' + e.message + '</div>';
-  }
-}
-
-function renderNotifTable(items) {
-  const el = document.getElementById('notifContent');
-  if (items.length === 0) {
-    el.innerHTML = '<div class="notif-empty">該当する通知がありません</div>';
-    return;
-  }
-  let html = '<table class="notif-table"><thead><tr>' +
-    '<th>時刻</th><th>種別</th><th>タイトル</th><th>詳細</th>' +
-    '</tr></thead><tbody>';
-  for (const n of items) {
-    const d = new Date(n.timestamp);
-    const timeStr = (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
-      d.getHours().toString().padStart(2, '0') + ':' +
-      d.getMinutes().toString().padStart(2, '0') + ':' +
-      d.getSeconds().toString().padStart(2, '0');
-    const kindColor = KIND_COLORS[n.kind] || '#45475a';
-    html += '<tr>' +
-      '<td>' + timeStr + '</td>' +
-      '<td><span class="notif-kind" style="background:' + kindColor + '">' + escapeHtml(n.kind) + '</span></td>' +
-      '<td>' + escapeHtml(n.title) + '</td>' +
-      '<td>' + escapeHtml(n.detail || '') + '</td>' +
-      '</tr>';
-  }
-  html += '</tbody></table>';
-  el.innerHTML = html;
-}
-
-function populateNotifFilterOptions(items) {
-  const select = document.getElementById('notifFilter');
-  const prevValue = select.value;
-  const kinds = [...new Set(items.map(n => n.kind))].sort();
-
-  select.innerHTML = '<option value="">すべての種別</option>' +
-    kinds.map(k => '<option value="' + escapeHtml(k) + '">' + escapeHtml(k) + '</option>').join('');
-
-  // 再描画後も選択中のフィルタを維持する（選択肢が存在する場合のみ）
-  if (kinds.includes(prevValue)) {
-    select.value = prevValue;
-  }
-}
-
-function applyNotifFilter() {
-  const selected = document.getElementById('notifFilter').value;
-  const filtered = selected
-    ? notifItemsCache.filter(n => n.kind === selected)
-    : notifItemsCache;
-  renderNotifTable(filtered);
-}
-
-async function loadAndRenderNotifications() {
-  const el = document.getElementById('notifContent');
-  try {
-    const res = await fetch('/status/notifications?limit=50');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    notifItemsCache = data.notifications || [];
-
-    populateNotifFilterOptions(notifItemsCache);
-    applyNotifFilter();
-  } catch (e) {
-    el.innerHTML = '<div class="error">通知履歴の取得に失敗しました: ' + e.message + '</div>';
-  }
-}
-
-function loadAll() {
-  loadAndRenderSummary();
-  loadAndRender();
-  loadAndRenderNotifications();
-}
-
-document.getElementById('notifFilter').addEventListener('change', applyNotifFilter);
-document.getElementById('refreshBtn').addEventListener('click', loadAll);
-
-loadAll();
-setInterval(loadAndRenderSummary, 15000);
-setInterval(loadAndRender, 60000);
-setInterval(loadAndRenderNotifications, 30000);
-</script>
-</body>
-</html>
-"""
-
-
-# GET /quake_map で返す、地震情報履歴の地図・表表示用HTML。
-# Leaflet（地図描画）はCDNから読み込む。
-# 【2026-09-26 地理院タイルの使用を廃止】従来は背景地図に国土地理院の
-# 地図タイルを使っていたが、地理院タイルサーバー側の負荷・大規模地震時
-# のアクセス集中への配慮から使用を取りやめた。代わりに、GIS地図描画
-# 機能（試験導入）が管理する世界の国境データ（簡略化版、
-# /status/gis_countries）・日本の細分区域データ（/status/gis_local_areas）
-# を陸地色で塗りつぶす、タイルサーバーに依存しない簡易ベースマップに
-# 切り替えた（詳細は下記JS内のコメント参照）。地震情報自体のデータ取得元
-# は /status/quake_history のみで、地図描画・表描画はすべてブラウザ側で
-# 行うため、_DASHBOARD_HTML と同様にRaspberry Pi側の処理負荷は増えない
-# （ただし、簡易ベースマップ用のGeoJSON〈数百KB程度〉をBot自身が配信する
-# ようになった分、従来の「ブラウザが地理院タイルサーバーへ直接アクセス
-# するだけでBot側の帯域は消費しない」構成と比べると、Bot側の送信帯域は
-# 少し増える。これは地理院タイルサーバーへの依存を無くすためのトレード
-# オフとして許容している）。
-_QUAKE_MAP_HTML = """<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QTL_Bot 地震情報履歴</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
-  h1 { font-size: 1.4em; margin-bottom: 4px; }
-  .subtitle { color: #7f849c; font-size: 0.85em; margin-bottom: 16px; }
-  .toolbar { margin-bottom: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .btn-link { display: inline-block; color: #89b4fa; background: #292c3c;
-              border: 1px solid #45475a; border-radius: 6px;
-              padding: 6px 14px; font-size: 0.85em; text-decoration: none;
-              cursor: pointer; font-family: inherit; }
-  .btn-link:hover { background: #313244; }
-  select.btn-link { padding: 5px 10px; }
-  /* 背景色は core/gis_render.py の _SEA_COLOR (178,205,227) と揃えている
-     （地理院タイル廃止後、GeoJSON読み込み前の一瞬や、国境データを持たない
-     南極等の空白部分でもDiscordの地図画像と近い見た目になるように） */
-  #map { height: 420px; border-radius: 8px; margin-bottom: 20px; background: #b2cde3; }
-  .notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-  .notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #313244; }
-  .notif-table th { color: #7f849c; font-weight: normal; position: sticky; top: 0; background: #292c3c; }
-  .notif-table tbody tr:hover { background: #313244; cursor: pointer; }
-  .card { background: #292c3c; border-radius: 8px; padding: 16px; }
-  .card h2 { font-size: 1em; margin: 0 0 12px 0; color: #a6adc8; }
-  .scale-badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
-                 color: #11111b; font-size: 0.85em; white-space: nowrap; font-weight: 600; }
-  .notif-empty { color: #7f849c; padding: 12px 0; }
-  .table-wrap { max-height: 480px; overflow-y: auto; }
-  .date-input { background: #292c3c; border: 1px solid #45475a; border-radius: 6px;
-                color: #cdd6f4; padding: 5px 8px; font-size: 0.85em; font-family: inherit; }
-  .toolbar label { font-size: 0.8em; color: #7f849c; display: flex; align-items: center; gap: 4px; }
-  .chart-wrap { height: 220px; }
-  @media (max-width: 480px) {
-    body { padding: 10px; }
-    #map { height: 300px; }
-    .chart-wrap { height: 180px; }
-  }
-</style>
-</head>
-<body>
-  <h1 id="pageTitle">QTL_Bot 地震情報履歴</h1>
-  <div class="subtitle" id="pageSubtitle">P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震・EEWは含まれません。</div>
-
-  <div class="toolbar">
-    <select class="btn-link" id="typeSelect">
-      <option value="quake">種別: 地震情報</option>
-      <option value="eew">種別: EEW（緊急地震速報）</option>
-    </select>
-    <select class="btn-link" id="scaleFilter">
-      <option value="0">最大震度: すべて</option>
-    </select>
-    <label>から <input type="date" class="date-input" id="dateFrom"></label>
-    <label>まで <input type="date" class="date-input" id="dateTo"></label>
-    <button class="btn-link" id="clearDateBtn" type="button">日付クリア</button>
-    <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
-  </div>
-
-  <div id="map"></div>
-
-  <div class="card" style="margin-bottom: 16px;">
-    <h2 id="chartTitle">月次件数</h2>
-    <div class="chart-wrap"><canvas id="monthlyChart"></canvas></div>
-  </div>
-
-  <div class="card">
-    <h2 id="tableTitle">履歴一覧</h2>
-    <div class="table-wrap" id="tableContent"><div class="notif-empty">読み込み中...</div></div>
-  </div>
-
-<script>
-// core/constants.py の SHINDO_COLORS / INT_MAP と同じ対応関係を
-// ブラウザ側で描画するためのミラー（_DASHBOARD_HTML の KIND_COLORS と
-// 同様、Bot側の値を都度APIで渡す設計にはしていない。値を変更した場合は
-// 両方を合わせて更新すること）。
-const SHINDO_COLORS = {
-  '-1': '#62626B', '0': '#62626B', '10': '#3098BD', '20': '#4CD0A7',
-  '30': '#F6CB51', '40': '#FF9939', '45': '#E52A18', '46': '#E52A18',
-  '50': '#C31B1B', '55': '#A30A6B', '60': '#86046E', '70': '#54068E',
-};
-const INT_MAP = {
-  '-1': '不明', '10': '1', '20': '2', '30': '3', '40': '4',
-  '45': '5弱', '46': '推定5弱以上', '50': '5強', '55': '6弱', '60': '6強', '70': '7',
-};
-
-// 種別ごとの設定。2026-09-09追加: EEWにも対応（core/eew_history_log.py）。
-const TYPE_CONFIG = {
-  quake: {
-    label: '地震情報',
-    endpoint: '/status/quake_history',
-    subtitle: 'P2P地震情報（地震情報）の通知履歴。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前に発生した地震は含まれません。',
-    emptyMessage: '該当する地震情報がありません',
-  },
-  eew: {
-    label: 'EEW（緊急地震速報）',
-    endpoint: '/status/eew_history',
-    subtitle: '緊急地震速報（Wolfx/P2P由来）の通知履歴。同一の地震は最終報（またはその時点での最新の報）に統合して表示しています。qtlbot.log（ローテーション含む）から復元しています。この記録形式を導入する前のEEWは含まれません。',
-    emptyMessage: '該当するEEWがありません',
-  },
-};
-let currentType = 'quake';
-
-let allRecords = [];
-let markers = [];
-
-// 【2026-10-19 日付変更線（経度±180度）での地図切れの修正】
-// 背景地図（国境・区域のGeoJSON）は経度-180〜180度の1枚だけで、Leafletの
-// タイルレイヤーと違い自動では東西にコピーされない。そのため、日本から見て
-// 太平洋の向こう側（フィジー・トンガ・アリューシャン・アラスカ・南北アメリカ等）
-// の地震を表示すると、①陸地が180度で途切れる（ロシア東端・フィジー等の180度を
-// またぐ国は東西に分割されている）②震源マーカーが地図の反対端（経度-170度付近
-// なら西の端）に飛ぶ、という状態になっていた。
-// 対策: 経度を「日本を中心に太平洋側へ連続させた座標系」（WRAP_WEST〜WRAP_WEST+360度）
-// に揃え、陸地は+360度シフトしたコピーも重ねて描画する（core/gis_render.py の
-// _pick_lon_shift と同じ考え方）。表示範囲もこの座標系に制限する。
-// 描画負荷対策として、ベクターはCanvasレンダラーで描画する（SVGよりDOMが軽い）。
-const WRAP_WEST = -30;   // 座標系の西端（大西洋上。欧州・アフリカ西岸を分断しない）
-function normLon(lon) {
-  lon = Number(lon);
-  while (lon < WRAP_WEST) lon += 360;
-  while (lon >= WRAP_WEST + 360) lon -= 360;
-  return lon;
-}
-function shiftCoords(c, dx) {
-  return typeof c[0] === 'number' ? [c[0] + dx, c[1]] : c.map(function (x) { return shiftCoords(x, dx); });
-}
-function shiftFeatures(features, dx) {
-  return features.map(function (f) {
-    return { type: 'Feature', properties: {}, geometry: { type: f.geometry.type, coordinates: shiftCoords(f.geometry.coordinates, dx) } };
-  });
-}
-
-const map = L.map('map', {
-  preferCanvas: true,
-  minZoom: 2,
-  maxBounds: [[-85, WRAP_WEST], [85, WRAP_WEST + 360]],
-  maxBoundsViscosity: 1.0,
-}).setView([36.5, 138.0], 5);  // 日本全体が収まる初期表示
-
-// 【2026-09-26 地理院タイルの使用を廃止】
-// 従来は国土地理院タイル（Leafletのタイルレイヤー）を背景地図に使って
-// いたが、地理院タイルサーバー側の負荷・大規模地震時のアクセス集中への
-// 配慮から使用を取りやめた。代わりに、GIS地図描画機能（試験導入）が
-// キャッシュ済みの世界の国境データ（簡略化版、/status/gis_countries）・
-// 日本の細分区域データ（/status/gis_local_areas）を陸地色で塗りつぶす、
-// タイルサーバーに依存しない簡易ベースマップに切り替えた（Bot自身
-// 〈Raspberry Pi〉が配信するのはこの2つのGeoJSON〈合計で数百KB程度〉の
-// みで、地図タイルサーバーへの外部アクセスはブラウザ側・Bot側とも発生
-// しない）。震源マーカーより必ず背面に描画されるよう、専用のレンダリング
-// ペイン（landFillPane、既定のoverlayPane〈z-index:400〉より低いz-index）
-// に配置する。これにより、2つのGeoJSONの読み込み完了タイミングや
-// マーカー描画とのタイミングに関わらず、重なり順が常に保証される
-// （タイミング依存で塗りつぶしがマーカーの上に来てしまう事故を防ぐ）。
-map.createPane('landFillPane');
-map.getPane('landFillPane').style.zIndex = 350;
-
-function loadBaseMapLayer(url, styleOverrides, wrapCopy) {
-  fetch(url)
-    .then(r => { if (!r.ok) throw new Error('not available'); return r.json(); })
-    .then(features => {
-      const style = Object.assign({
-        color: '#9a9a9a', weight: 1,
-        fillColor: '#eee8dc', fillOpacity: 1, interactive: false,
-      }, styleOverrides || {});
-      L.geoJSON(features, { pane: 'landFillPane', style: style }).addTo(map);
-      // 日付変更線をまたいだ先（東経180度〜）にも陸地を描くための+360度コピー
-      if (wrapCopy) {
-        L.geoJSON(shiftFeatures(features, 360), { pane: 'landFillPane', style: style }).addTo(map);
-      }
-    })
-    .catch(() => { /* データ未取得時は#mapのbackground（海色）のみの地図になる（致命的ではない） */ });
-}
-
-// 世界の国境データ（簡略化版、日本を除く）→ 日本の細分区域データの順で
-// 重ねる（日本部分は自前のGeoJSONの方が精密なため、後から重ね描きして
-// 上書きする。core/gis_render.py の render_overseas_map と同じレイヤー
-// 順）。GIS_MAP_ENABLE=false・GeoJSON未取得の場合はいずれも404が返り、
-// その場合は#mapのbackground（海色）だけの地図になる。
-loadBaseMapLayer('/status/gis_countries', null, true);  // 世界の国境のみ+360度コピーも描く（日本の区域は不要）
-loadBaseMapLayer('/status/gis_local_areas', { color: '#6e6e6e' });
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
-function scaleLabel(code) {
-  return INT_MAP[String(code)] || '不明';
-}
-function scaleColor(code) {
-  return SHINDO_COLORS[String(code)] || '#62626B';
-}
-
-// マグニチュードに応じた円マーカーの半径(px)。規模が大きいほど円を
-// 大きく表示し、地図を一目見て地震の規模感を掴みやすくする
-// （2026-09-26追加）。M3.0〜M8.0の範囲を半径5px〜22pxへ線形マッピングし、
-// 範囲外は上下限にクランプする。マグニチュード不明（0以下・null等）の
-// 場合は、不明を小さく/大きく見せて誤解を招かないよう、固定の中間値に
-// フォールバックする。
-function magnitudeRadius(mag) {
-  const MIN_MAG = 3.0, MAX_MAG = 8.0;
-  const MIN_R = 5, MAX_R = 22;
-  const m = Number(mag);
-  if (!m || m <= 0) return 9;
-  const clamped = Math.min(Math.max(m, MIN_MAG), MAX_MAG);
-  const ratio = (clamped - MIN_MAG) / (MAX_MAG - MIN_MAG);
-  return MIN_R + ratio * (MAX_R - MIN_R);
-}
-
-function clearMarkers() {
-  for (const m of markers) map.removeLayer(m);
-  markers = [];
-}
-
-function renderMarkers(records) {
-  clearMarkers();
-  const pts = [];
-  // 最大震度が大きい地震ほど後から描画し、地図上で重なった際に前面に
-  // 表示されるようにする（震度が同じ場合はマグニチュードが大きい方を
-  // 優先。2026-09-26追加）。Leafletは同一ペイン内では後から追加した
-  // レイヤーほど手前に表示されるため、震度の小さい順にソートしてから
-  // 描画すればよい（circleMarkerは既定でoverlayPaneに描画され、上の
-  // landFillPaneより常に手前に来るため、地図の塗りつぶしとの重なりは
-  // そもそも考慮不要）。
-  const sorted = records.slice().sort((a, b) => {
-    const sa = a.max_scale != null ? a.max_scale : -1;
-    const sb = b.max_scale != null ? b.max_scale : -1;
-    if (sa !== sb) return sa - sb;
-    return (a.magnitude || 0) - (b.magnitude || 0);
-  });
-  for (const r of sorted) {
-    if (r.latitude == null || r.longitude == null) continue;
-    const color = scaleColor(r.max_scale);
-    const marker = L.circleMarker([r.latitude, normLon(r.longitude)], {
-      radius: magnitudeRadius(r.magnitude), color: color, fillColor: color, fillOpacity: 0.75, weight: 1,
-    }).addTo(map);
-    let popup = '<b>' + escapeHtml(r.hypocenter_name) + '</b><br>' +
-      escapeHtml(r.time_display) + '<br>' +
-      '最大震度: ' + escapeHtml(scaleLabel(r.max_scale)) +
-      (r.magnitude && r.magnitude > 0 ? ' / M' + r.magnitude : '') +
-      (r.depth != null && r.depth >= 0 ? ' / 深さ約' + r.depth + 'km' : '');
-    if (currentType === 'eew') {
-      popup += '<br>' + (r.is_final ? '最終報' : '予報中（第' + r.serial + '報）') +
-        (r.is_warn ? ' / 警報' : ' / 予報');
-    }
-    marker.bindPopup(popup);
-    markers.push(marker);
-    pts.push([r.latitude, normLon(r.longitude)]);
-  }
-  if (pts.length > 0) {
-    map.fitBounds(pts, { maxZoom: 9, padding: [20, 20] });
-  }
-}
-
-function renderTable(records) {
-  const el = document.getElementById('tableContent');
-  document.getElementById('tableTitle').textContent = '履歴一覧（' + records.length + '件）';
-  if (records.length === 0) {
-    el.innerHTML = '<div class="notif-empty">' + TYPE_CONFIG[currentType].emptyMessage + '</div>';
-    return;
-  }
-  const extraHeader = currentType === 'eew' ? '<th>状態</th>' : '';
-  let html = '<table class="notif-table"><thead><tr>' +
-    '<th>発生時刻</th><th>震源地</th><th>最大震度</th><th>M</th><th>深さ</th>' + extraHeader +
-    '</tr></thead><tbody>';
-  for (const r of records) {
-    const color = scaleColor(r.max_scale);
-    const depthText = (r.depth != null && r.depth >= 0) ? (r.depth === 0 ? 'ごく浅い' : r.depth + 'km') : '-';
-    const magText = (r.magnitude != null && r.magnitude > 0) ? r.magnitude : '-';
-    let extraCell = '';
-    if (currentType === 'eew') {
-      const statusText = (r.is_final ? '最終報' : '第' + r.serial + '報') + (r.is_warn ? '・警報' : '・予報');
-      extraCell = '<td>' + escapeHtml(statusText) + '</td>';
-    }
-    html += '<tr data-lat="' + (r.latitude != null ? r.latitude : '') + '" data-lon="' + (r.longitude != null ? r.longitude : '') + '">' +
-      '<td>' + escapeHtml(r.time_display) + '</td>' +
-      '<td>' + escapeHtml(r.hypocenter_name) + '</td>' +
-      '<td><span class="scale-badge" style="background:' + color + '">' + escapeHtml(scaleLabel(r.max_scale)) + '</span></td>' +
-      '<td>' + escapeHtml(magText) + '</td>' +
-      '<td>' + escapeHtml(depthText) + '</td>' + extraCell +
-      '</tr>';
-  }
-  html += '</tbody></table>';
-  el.innerHTML = html;
-
-  // 行クリックで地図を該当地点へフォーカスする
-  for (const row of el.querySelectorAll('tbody tr')) {
-    row.addEventListener('click', () => {
-      const lat = parseFloat(row.dataset.lat);
-      const lon = parseFloat(row.dataset.lon);
-      if (!isNaN(lat) && !isNaN(lon)) {
-        map.setView([lat, normLon(lon)], 9);
-      }
-    });
-  }
-}
-
-function populateScaleFilterOptions(records) {
-  const select = document.getElementById('scaleFilter');
-  const prevValue = select.value;
-  const scales = [...new Set(records.map(r => r.max_scale))].sort((a, b) => b - a);
-  select.innerHTML = '<option value="0">最大震度: すべて</option>' +
-    scales.map(s => '<option value="' + s + '">震度' + escapeHtml(scaleLabel(s)) + 'のみ</option>').join('');
-  if ([...select.options].some(o => o.value === prevValue)) {
-    select.value = prevValue;
-  }
-}
-
-function applyFilter() {
-  const selected = document.getElementById('scaleFilter').value;
-  const dateFrom = document.getElementById('dateFrom').value;   // "YYYY-MM-DD" or ""
-  const dateTo = document.getElementById('dateTo').value;
-
-  let filtered = allRecords;
-  if (selected !== '0') {
-    filtered = filtered.filter(r => String(r.max_scale) === selected);
-  }
-  if (dateFrom || dateTo) {
-    filtered = filtered.filter(r => {
-      // time_raw: "YYYY/MM/DD HH:MM" 形式。日付部分だけ "YYYY-MM-DD" に揃えて比較する。
-      const raw = (r.time_raw || '').slice(0, 10).split('/').join('-');
-      if (!raw) return false;
-      if (dateFrom && raw < dateFrom) return false;
-      if (dateTo && raw > dateTo) return false;
-      return true;
-    });
-  }
-  renderMarkers(filtered);
-  renderTable(filtered);
-  renderMonthlyChart(filtered);
-}
-
-let monthlyChartInstance = null;
-
-function renderMonthlyChart(records) {
-  // time_raw ("YYYY/MM/DD HH:MM") から "YYYY-MM" を抽出して月次集計する。
-  const counts = {};
-  for (const r of records) {
-    const raw = r.time_raw || '';
-    const ym = raw.slice(0, 7).replace('/', '-');  // "YYYY-MM"
-    if (ym.length !== 7) continue;
-    counts[ym] = (counts[ym] || 0) + 1;
-  }
-  const months = Object.keys(counts).sort();
-  const values = months.map(m => counts[m]);
-
-  document.getElementById('chartTitle').textContent =
-    '月次件数（' + TYPE_CONFIG[currentType].label + '、表示中のフィルタ適用後）';
-
-  const ctx = document.getElementById('monthlyChart');
-  if (monthlyChartInstance) monthlyChartInstance.destroy();
-  monthlyChartInstance = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: months,
-      datasets: [{ label: '件数', data: values, backgroundColor: '#89b4fa' }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: '#a6adc8' }, grid: { color: '#313244' } },
-        y: { beginAtZero: true, ticks: { color: '#a6adc8', precision: 0 }, grid: { color: '#313244' } },
-      },
-    },
-  });
-}
-
-async function loadAndRender() {
-  const el = document.getElementById('tableContent');
-  const cfg = TYPE_CONFIG[currentType];
-  document.getElementById('pageSubtitle').textContent = cfg.subtitle;
-  try {
-    const res = await fetch(cfg.endpoint);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    allRecords = data.records || [];
-    populateScaleFilterOptions(allRecords);
-    applyFilter();
-  } catch (e) {
-    el.innerHTML = '<div class="error">' + cfg.label + '履歴の取得に失敗しました: ' + e.message + '</div>';
-  }
-}
-
-document.getElementById('typeSelect').addEventListener('change', (ev) => {
-  currentType = ev.target.value;
-  loadAndRender();
-});
-document.getElementById('scaleFilter').addEventListener('change', applyFilter);
-document.getElementById('dateFrom').addEventListener('change', applyFilter);
-document.getElementById('dateTo').addEventListener('change', applyFilter);
-document.getElementById('clearDateBtn').addEventListener('click', () => {
-  document.getElementById('dateFrom').value = '';
-  document.getElementById('dateTo').value = '';
-  applyFilter();
-});
-document.getElementById('refreshBtn').addEventListener('click', loadAndRender);
-
-loadAndRender();
-</script>
-</body>
-</html>
-"""
+# ダッシュボードの画面（/dashboard・/quake_map）の HTML・CSS・JS は web/ フォルダの別ファイルに分離した
+# （2026-10-23）。配信は core/web_static.py（許可リスト方式。リクエストのパスからファイルを探さず、
+# .env 等を読み出せない作り。セキュリティヘッダーも同モジュールが付ける）が担当する。
 
 
 # ===============================
@@ -1081,14 +341,14 @@ class SystemCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel = self.bot.get_channel(CHANNEL_ID)
+        self.channel = resolve_channels(self.bot, CHANNEL_IDS)
 
-        if ADMIN_CHANNEL_ID != 0:
-            self.admin_channel = self.bot.get_channel(ADMIN_CHANNEL_ID)
+        if ADMIN_CHANNEL_IDS:
+            self.admin_channel = resolve_channels(self.bot, ADMIN_CHANNEL_IDS)
             if self.admin_channel:
-                logger.info(f"管理者チャンネルを設定しました（ID: {ADMIN_CHANNEL_ID}）")
+                logger.info(f"管理者チャンネルを設定しました（ID: {', '.join(map(str, ADMIN_CHANNEL_IDS))}）")
             else:
-                logger.warning(f"管理者チャンネルが見つかりません（ID: {ADMIN_CHANNEL_ID}）")
+                logger.warning(f"管理者チャンネルが見つかりません（ID: {', '.join(map(str, ADMIN_CHANNEL_IDS))}）")
 
         # ERROR 以上のログを管理者チャンネルへ自動通知する（on_ready の再発火で二重登録しない）
         if self.admin_channel and self._error_log_handler is None:
@@ -1708,23 +968,26 @@ class SystemCog(commands.Cog):
         # 「結局どのチャンネルに何が送られるか」が分かりにくい。
         # core.config側で既に解決済みの最終的なチャンネルIDを、
         # 送信先チャンネルごとにグルーピングして一覧表示する。
+        # 各用途のチャンネルは、カンマ区切りで複数指定されている場合は全IDを表示する
+        # （未設定は [0] として「未設定」扱い）。
         channel_purpose_map = [
-            ("デフォルト", CHANNEL_ID),
-            ("EEW", EEW_CHANNEL_ID),
-            ("P2P EEW", P2P_EEW_CHANNEL_ID),
-            ("地震情報", QUAKE_CHANNEL_ID),
-            ("津波情報", TSUNAMI_CHANNEL_ID),
-            ("火山情報", VOLCANO_CHANNEL_ID),
-            ("その他（長周期地震動等）", OTHER_CHANNEL_ID),
-            ("強震モニタ", KYOSHIN_CHANNEL_ID),
-            ("USGS地震情報", USGS_CHANNEL_ID),
-            ("地震感知情報", JISHIN_KANCHI_CHANNEL_ID),
-            ("週間/月間ダイジェスト", DIGEST_CHANNEL_ID),
-            ("エラー通知（管理者）", ADMIN_CHANNEL_ID),
+            ("デフォルト", CHANNEL_IDS),
+            ("EEW", EEW_CHANNEL_IDS),
+            ("P2P EEW", P2P_EEW_CHANNEL_IDS),
+            ("地震情報", QUAKE_CHANNEL_IDS),
+            ("津波情報", TSUNAMI_CHANNEL_IDS),
+            ("火山情報", VOLCANO_CHANNEL_IDS),
+            ("その他（長周期地震動等）", OTHER_CHANNEL_IDS),
+            ("強震モニタ", KYOSHIN_CHANNEL_IDS),
+            ("USGS地震情報", USGS_CHANNEL_IDS),
+            ("地震感知情報", JISHIN_KANCHI_CHANNEL_IDS),
+            ("週間/月間ダイジェスト", DIGEST_CHANNEL_IDS),
+            ("エラー通知（管理者）", ADMIN_CHANNEL_IDS),
         ]
         by_channel: dict = {}
-        for purpose, cid in channel_purpose_map:
-            by_channel.setdefault(cid, []).append(purpose)
+        for purpose, cids in channel_purpose_map:
+            for cid in (cids or [0]):
+                by_channel.setdefault(cid, []).append(purpose)
 
         channel_lines = []
         for cid, purposes in sorted(by_channel.items(), key=lambda kv: -len(kv[1])):
@@ -2257,16 +1520,6 @@ class SystemCog(commands.Cog):
                 "records": [display_eew_record(r) for r in records],
             })
 
-        async def quake_map_handler(request):
-            """
-            GET /quake_map - 地震情報履歴を地図・表で閲覧するHTMLページ。
-            データ取得は /status/quake_history のみに依存し、地図・表の
-            描画自体はブラウザ側（Leaflet + 独自の簡易ベースマップ。
-            2026-09-26に地理院タイルの使用を廃止し、GeoJSONベースの
-            ベクター描画に切り替えた）で行う。
-            """
-            return web.Response(text=_QUAKE_MAP_HTML, content_type="text/html")
-
         async def gis_local_areas_handler(request):
             """
             GET /status/gis_local_areas - GIS地図描画機能（試験導入）用に
@@ -2346,19 +1599,9 @@ class SystemCog(commands.Cog):
                 return web.json_response({"error": "countries.geojson not cached yet"}, status=404)
             return _gis_payload_response(request, payload)
 
-        async def dashboard_handler(request):
-            """
-            GET /dashboard - システムリソース・受信件数の推移をグラフ表示
-            するHTMLページ。外部ライブラリ（Chart.js等）はCDNから読み込み、
-            Bot側は /status/history のデータをそのまま描画するのみで、
-            グラフ計算処理自体はブラウザ側で行う（Raspberry Pi側の
-            負荷を増やさない設計）。
-            """
-            html = _DASHBOARD_HTML
-            return web.Response(text=html, content_type="text/html")
-
         try:
-            _middlewares = [ip_allowlist_middleware]
+            # security_headers_middleware は最も外側（認証・IP制限の拒否応答にもセキュリティヘッダーを付ける）
+            _middlewares = [security_headers_middleware, ip_allowlist_middleware]
             if dashboard_auth:
                 _middlewares.append(dashboard_auth.middleware)
             self._web_app = web.Application(middlewares=_middlewares)
@@ -2369,10 +1612,16 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status/notifications", notifications_handler)
             self._web_app.router.add_get("/status/quake_history", quake_history_handler)
             self._web_app.router.add_get("/status/eew_history", eew_history_handler)
-            self._web_app.router.add_get("/quake_map", quake_map_handler)
             self._web_app.router.add_get("/status/gis_local_areas", gis_local_areas_handler)
             self._web_app.router.add_get("/status/gis_countries", gis_countries_handler)
-            self._web_app.router.add_get("/dashboard", dashboard_handler)
+            # 画面（/dashboard・/quake_map）と /assets/*（web/ の静的ファイル。許可リスト方式）
+            _static_files = register_static_routes(self._web_app)
+            _missing_web_files = _static_files.missing()
+            if _missing_web_files:
+                logger.error(
+                    "ダッシュボードの画面ファイルが見つかりません（web/ フォルダが欠けていないか確認してください）: "
+                    + ", ".join(_missing_web_files)
+                )
             self._web_app.router.add_get("/health", health_handler)
             self._web_app.router.add_get("/health/full", health_full_handler)
 
@@ -2515,8 +1764,8 @@ class SystemCog(commands.Cog):
                             "tsunami": p2p_recv.get("tsunami", recv_count.get("tsunami", 0)),
                             "usgs": recv_count.get("usgs", 0),
                             "volcano": recv_count.get("volcano", 0),
-                            # 【2026-09-09 追加】_DASHBOARD_HTML側のrecvChart
-                            # (recvKeys) は以前からjishin_kanchi・kyoshinを
+                            # 【2026-09-09 追加】web/js/dashboard.js 側のrecvChart
+                            # (RECV_KEYS) は以前からjishin_kanchi・kyoshinを
                             # 描画しようとしていたが、このスナップショット
                             # 側にキー自体が無く、常に0（グラフ上でフラット
                             # な線）になっていた。_merged_recv_count()には
@@ -2854,7 +2103,7 @@ class SystemCog(commands.Cog):
         不自然な値になるため、0でクランプする（実態よりは少なく
         出るが、マイナス表示になるよりは健全）。
         """
-        channel = self.bot.get_channel(DIGEST_CHANNEL_ID) or self.bot.get_channel(CHANNEL_ID)
+        channel = resolve_channels(self.bot, DIGEST_CHANNEL_IDS) or resolve_channels(self.bot, CHANNEL_IDS)
         if not channel:
             logger.warning("digest_worker: 送信先チャンネルが見つかりません")
             return

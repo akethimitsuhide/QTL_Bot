@@ -50,10 +50,11 @@ import logging
 
 from core.discord_send import send_with_retry
 from core import runtime_settings as rs  # 通知の ON/OFF は実行時の値を読む
+from core.channels import resolve_channels
 from core.config import (
     YOMI_OTHER_LONG_PERIOD, YOMI_OTHER_ADVISORY, YOMI_OTHER_HYPO_UPDATE,
     YOMI_OTHER_NANKAI, YOMI_OTHER_KANCHI,
-    CHANNEL_ID, OTHER_CHANNEL_ID,
+    CHANNEL_IDS, OTHER_CHANNEL_IDS,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.constants import LG_COLORS
@@ -166,8 +167,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel       = self.bot.get_channel(CHANNEL_ID)
-        self.other_channel = self.bot.get_channel(OTHER_CHANNEL_ID) or self.channel
+        self.channel       = resolve_channels(self.bot, CHANNEL_IDS)
+        self.other_channel = resolve_channels(self.bot, OTHER_CHANNEL_IDS, self.channel)
 
         if not self.fetch_long_period.is_running():
             self.fetch_long_period.start()

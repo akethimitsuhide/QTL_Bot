@@ -18,6 +18,7 @@ import os
 import logging
 
 from core.env_loader import load_env_files
+from core.channels import parse_channel_ids
 
 # ===============================
 # ロガー（設定値読み込み時のログ出力用）
@@ -78,6 +79,30 @@ def _getenv_nonempty(key: str, default: str) -> str:
     if value is None or value.strip() == "":
         return default
     return value
+
+
+def _channel_ids(*keys: str) -> list[int]:
+    """
+    チャンネルID（カンマ区切りで複数可）を、keys の順に見て最初に「空でない」ものから読む。
+    例: _channel_ids("EEW_CHANNEL_ID", "CHANNEL_ID") は、EEW_CHANNEL_ID が設定されていればそれ、
+    空・未設定なら CHANNEL_ID を使う（従来の多段フォールバックと同じ）。
+    数字以外の語は警告を出して無視する（Bot は止まらない。CHANNEL_ID だけは必須のため別に検査する）。
+    """
+    for key in keys:
+        raw = _getenv_nonempty(key, "")
+        if not raw:
+            continue
+        ids, rejected = parse_channel_ids(raw)
+        for token in rejected:
+            logger.warning(f"{key} に無効なチャンネルIDがあります（無視します）: {token!r}")
+        if ids:
+            return ids
+    return []
+
+
+def _first(ids: list[int]) -> int:
+    """複数指定の先頭のID（従来の単一IDとしての互換用。未設定は 0）。"""
+    return ids[0] if ids else 0
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -144,11 +169,14 @@ LOG_FILE_PATH = _getenv_nonempty(
 BOT_TOKEN = _require_env("BOT_TOKEN")
 
 _channel_id_raw = _require_env("CHANNEL_ID")
-try:
-    CHANNEL_ID = int(_channel_id_raw)
-except ValueError:
-    logger.critical(f"CHANNEL_ID は数値で指定してください（現在の値: {_channel_id_raw!r}）")
+# CHANNEL_ID はカンマ区切りで複数指定できる（先頭が従来の CHANNEL_ID。core/channels.py 参照）
+CHANNEL_IDS, _bad_channel_ids = parse_channel_ids(_channel_id_raw)
+if _bad_channel_ids or not CHANNEL_IDS:
+    logger.critical(
+        f"CHANNEL_ID は数値（複数ならカンマ区切り）で指定してください（現在の値: {_channel_id_raw!r}）"
+    )
     raise SystemExit(1)
+CHANNEL_ID = CHANNEL_IDS[0]
 
 # ===============================
 # 音声設定（AquesTalkPi / ScratchTTS）
@@ -210,16 +238,29 @@ SCRATCHTTS_TIMEOUT_SEC = float(os.getenv("SCRATCHTTS_TIMEOUT_SEC", "10"))
 # ===============================
 # チャンネル ID 設定
 # ===============================
-EEW_CHANNEL_ID       = int(_getenv_nonempty("EEW_CHANNEL_ID",       _getenv_nonempty("CHANNEL_ID", "0")))
-QUAKE_CHANNEL_ID     = int(_getenv_nonempty("QUAKE_CHANNEL_ID",     _getenv_nonempty("CHANNEL_ID", "0")))
-TSUNAMI_CHANNEL_ID   = int(_getenv_nonempty("TSUNAMI_CHANNEL_ID",   _getenv_nonempty("CHANNEL_ID", "0")))
-OTHER_CHANNEL_ID     = int(_getenv_nonempty("OTHER_CHANNEL_ID",     _getenv_nonempty("CHANNEL_ID", "0")))
-P2P_EEW_CHANNEL_ID   = int(_getenv_nonempty("P2P_EEW_CHANNEL_ID",   _getenv_nonempty("EEW_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
-KYOSHIN_CHANNEL_ID   = int(_getenv_nonempty("KYOSHIN_CHANNEL_ID",   _getenv_nonempty("OTHER_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
-ADMIN_CHANNEL_ID     = int(_getenv_nonempty("ADMIN_CHANNEL_ID",   "0"))
-VOLCANO_CHANNEL_ID   = int(_getenv_nonempty("VOLCANO_CHANNEL_ID",   _getenv_nonempty("CHANNEL_ID", "0")))
-USGS_CHANNEL_ID      = int(_getenv_nonempty("USGS_CHANNEL_ID", _getenv_nonempty("QUAKE_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))))
-DIGEST_CHANNEL_ID    = int(_getenv_nonempty("DIGEST_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0")))
+# 各 *_CHANNEL_IDS は、カンマ区切りで複数指定された場合の全ID（core/channels.py の resolve_channels で
+# 解決し、複数あれば全チャンネルへ同時に送る）。*_CHANNEL_ID は従来の互換用に、その先頭のID（未設定は 0）。
+EEW_CHANNEL_IDS       = _channel_ids("EEW_CHANNEL_ID", "CHANNEL_ID")
+QUAKE_CHANNEL_IDS     = _channel_ids("QUAKE_CHANNEL_ID", "CHANNEL_ID")
+TSUNAMI_CHANNEL_IDS   = _channel_ids("TSUNAMI_CHANNEL_ID", "CHANNEL_ID")
+OTHER_CHANNEL_IDS     = _channel_ids("OTHER_CHANNEL_ID", "CHANNEL_ID")
+P2P_EEW_CHANNEL_IDS   = _channel_ids("P2P_EEW_CHANNEL_ID", "EEW_CHANNEL_ID", "CHANNEL_ID")
+KYOSHIN_CHANNEL_IDS   = _channel_ids("KYOSHIN_CHANNEL_ID", "OTHER_CHANNEL_ID", "CHANNEL_ID")
+ADMIN_CHANNEL_IDS     = _channel_ids("ADMIN_CHANNEL_ID")
+VOLCANO_CHANNEL_IDS   = _channel_ids("VOLCANO_CHANNEL_ID", "CHANNEL_ID")
+USGS_CHANNEL_IDS      = _channel_ids("USGS_CHANNEL_ID", "QUAKE_CHANNEL_ID", "CHANNEL_ID")
+DIGEST_CHANNEL_IDS    = _channel_ids("DIGEST_CHANNEL_ID", "CHANNEL_ID")
+
+EEW_CHANNEL_ID       = _first(EEW_CHANNEL_IDS)
+QUAKE_CHANNEL_ID     = _first(QUAKE_CHANNEL_IDS)
+TSUNAMI_CHANNEL_ID   = _first(TSUNAMI_CHANNEL_IDS)
+OTHER_CHANNEL_ID     = _first(OTHER_CHANNEL_IDS)
+P2P_EEW_CHANNEL_ID   = _first(P2P_EEW_CHANNEL_IDS)
+KYOSHIN_CHANNEL_ID   = _first(KYOSHIN_CHANNEL_IDS)
+ADMIN_CHANNEL_ID     = _first(ADMIN_CHANNEL_IDS)
+VOLCANO_CHANNEL_ID   = _first(VOLCANO_CHANNEL_IDS)
+USGS_CHANNEL_ID      = _first(USGS_CHANNEL_IDS)
+DIGEST_CHANNEL_ID    = _first(DIGEST_CHANNEL_IDS)
 
 # ===============================
 # USGS 地震情報設定
@@ -326,6 +367,12 @@ YOMI_VOLCANO_ERUPTION_WARNING = _getenv_nonempty("YOMI_VOLCANO_ERUPTION_WARNING"
 # ===============================
 # 津波・その他通知フィルター
 # ===============================
+# 通知種類ごとの ON/OFF（false にすると、その種類の Discord 通知・読み上げ・効果音をすべて止める）。
+# 他の種類（TSUNAMI_ENABLE・ENABLE_LONG_PERIOD・ENABLE_ADVISORY・USGS_ENABLED・
+# KYOSHIN_NOTIFY_ENABLE・JISHIN_KANCHI_ENABLE）も同じ考え方で、既存の設定をそのまま使う。
+EEW_ENABLE         = _env_bool("EEW_ENABLE", True)
+QUAKE_ENABLE       = _env_bool("QUAKE_ENABLE", True)
+VOLCANO_ENABLE     = _env_bool("VOLCANO_ENABLE", True)
 TSUNAMI_ENABLE     = _env_bool("TSUNAMI_ENABLE", True)
 ENABLE_LONG_PERIOD = _env_bool("ENABLE_LONG_PERIOD", True)
 ENABLE_ADVISORY    = _env_bool("ENABLE_ADVISORY", True)
@@ -676,6 +723,16 @@ DISCORD_SEND_RETRY_ATTEMPTS = max(1, min(5, _env_int("DISCORD_SEND_RETRY_ATTEMPT
 # 検証・送信は core/webhook_notify.py。
 WEBHOOK_URLS = os.getenv("WEBHOOK_URLS", "")
 WEBHOOK_EVENTS = os.getenv("WEBHOOK_EVENTS", "all")
+# 種別ごとの Webhook URL（カンマ区切りで複数可）。書いた URL には、その種別だけが届く
+# （WEBHOOK_EVENTS の設定に関わらず）。WEBHOOK_URLS と併用でき、同じ URL が両方にあっても
+# 1つの通知につき1回しか送らない。
+WEBHOOK_URLS_EEW = os.getenv("WEBHOOK_URLS_EEW", "")
+WEBHOOK_URLS_QUAKE = os.getenv("WEBHOOK_URLS_QUAKE", "")
+WEBHOOK_URLS_TSUNAMI = os.getenv("WEBHOOK_URLS_TSUNAMI", "")
+WEBHOOK_URLS_VOLCANO = os.getenv("WEBHOOK_URLS_VOLCANO", "")
+WEBHOOK_URLS_USGS = os.getenv("WEBHOOK_URLS_USGS", "")
+WEBHOOK_URLS_KANCHI = os.getenv("WEBHOOK_URLS_KANCHI", "")
+WEBHOOK_URLS_OTHER = os.getenv("WEBHOOK_URLS_OTHER", "")
 
 # ===============================
 # !status / /qtl_status の実行権限
@@ -886,9 +943,8 @@ DIGEST_HOUR     = _env_int("DIGEST_HOUR", 9)
 # 推定する非公式な速報値。信頼度（レベル1〜4）が低い場合は誤報の
 # 可能性があるため、閾値で通知を絞れるようにしている。
 JISHIN_KANCHI_ENABLE = _env_bool("JISHIN_KANCHI_ENABLE", False)
-JISHIN_KANCHI_CHANNEL_ID = int(_getenv_nonempty(
-    "JISHIN_KANCHI_CHANNEL_ID", _getenv_nonempty("QUAKE_CHANNEL_ID", _getenv_nonempty("CHANNEL_ID", "0"))
-))
+JISHIN_KANCHI_CHANNEL_IDS = _channel_ids("JISHIN_KANCHI_CHANNEL_ID", "QUAKE_CHANNEL_ID", "CHANNEL_ID")
+JISHIN_KANCHI_CHANNEL_ID = _first(JISHIN_KANCHI_CHANNEL_IDS)
 # 通知する最大レベル（数値が大きいほど信頼度が低い）。この値以下の
 # レベルのみ通知する。例: 2を指定するとレベル1・2のみ通知し、
 # レベル3・4（信頼度が低い）は抑制する。1〜4で指定（既定4=全レベル通知）。

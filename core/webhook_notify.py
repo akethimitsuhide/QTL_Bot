@@ -12,8 +12,13 @@ Webhook の送信は別タスクで行い、失敗・遅延しても Discord へ
 【設定（.env）】
   WEBHOOK_URLS   : Webhook URL（カンマ区切りで複数可）。空なら無効。
                    許可するのは https の Discord / Slack の Webhook URL のみ。
-  WEBHOOK_EVENTS : 送る通知の種別。all（既定）または eew,quake,tsunami,volcano,usgs,kanchi,other
-                   のカンマ区切り。
+  WEBHOOK_EVENTS : WEBHOOK_URLS に送る通知の種別。all（既定）または
+                   eew,quake,tsunami,volcano,usgs,kanchi,other のカンマ区切り。
+  WEBHOOK_URLS_EEW / _QUAKE / _TSUNAMI / _VOLCANO / _USGS / _KANCHI / _OTHER :
+                   種別ごとの宛先（カンマ区切りで複数可）。書いた URL にはその種別「だけ」が届く
+                   （WEBHOOK_EVENTS には影響されない）。WEBHOOK_URLS と併用でき、同じ URL が
+                   複数の欄にあっても1つの通知につき1回しか送らない。
+  区切りは「,」「;」空白のどれでもよい（URL は空白を含まないため）。
 
 【送信形式】
   宛先のホストで自動判別する。
@@ -37,12 +42,17 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Mapping
 from datetime import datetime
 from urllib.parse import urlsplit
 
 import aiohttp
 
-from core.config import WEBHOOK_URLS, WEBHOOK_EVENTS
+from core.config import (
+    WEBHOOK_URLS, WEBHOOK_EVENTS,
+    WEBHOOK_URLS_EEW, WEBHOOK_URLS_QUAKE, WEBHOOK_URLS_TSUNAMI, WEBHOOK_URLS_VOLCANO,
+    WEBHOOK_URLS_USGS, WEBHOOK_URLS_KANCHI, WEBHOOK_URLS_OTHER,
+)
 
 logger = logging.getLogger("QTLBot")
 
@@ -83,43 +93,77 @@ class WebhookTarget:
 
 # ───────────────────────── 設定のパース ─────────────────────────
 
+_SPLIT_RE = re.compile(r"[,;\s]+")
+
+
+def _validate_url(item: str) -> tuple[str | None, str | None]:
+    """URL を検査し、(種別 "discord"/"slack", 却下理由) を返す。却下なら種別は None。理由に URL は含めない。"""
+    parts = urlsplit(item)
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https":
+        return None, "https の URL ではありません"
+    if parts.username or parts.password or "@" in parts.netloc:
+        return None, "認証情報付きの URL は使えません"
+    if parts.port not in (None, 443):
+        return None, "ポート指定は使えません"
+    if host in _DISCORD_HOSTS:
+        if not parts.path.startswith("/api/webhooks/"):
+            return None, "Discord の Webhook URL の形式ではありません"
+        return "discord", None
+    if host in _SLACK_HOSTS:
+        if not parts.path.startswith("/services/"):
+            return None, "Slack の Webhook URL の形式ではありません"
+        return "slack", None
+    return None, "Discord / Slack 以外のホストです"
+
+
+def parse_targets(raw_global: str | None,
+                  per_event_raw: Mapping[str, str | None] | None = None,
+                  ) -> tuple[list[WebhookTarget], dict[str, list[WebhookTarget]], list[str]]:
+    """
+    WEBHOOK_URLS と、種別ごとの URL（WEBHOOK_URLS_<種別>）を読み、
+    (全種別向けの宛先, {種別: その種別専用の宛先}, 却下した項目の説明) を返す。
+    却下の説明に URL は含めない（変数名・番号・理由のみ）。
+    同じ URL は、どの欄にあっても同じ宛先（同じ番号）として扱う。同じ欄での重複は無視する。
+    """
+    registry: dict[str, WebhookTarget] = {}
+    rejected: list[str] = []
+
+    def _parse(raw: str | None, source: str) -> list[WebhookTarget]:
+        out: list[WebhookTarget] = []
+        seen: set[str] = set()
+        for pos, item in enumerate((p for p in _SPLIT_RE.split((raw or "").strip()) if p), 1):
+            kind, reason = _validate_url(item)
+            where = f"{source} の{pos}番目" if source else f"{pos}番目"
+            if reason:
+                rejected.append(f"{where}: {reason}")
+                continue
+            if item in seen:
+                rejected.append(f"{where}: 重複しているため無視しました")
+                continue
+            seen.add(item)
+            target = registry.get(item)
+            if target is None:
+                target = WebhookTarget(kind=kind, index=len(registry) + 1, url=item)
+                registry[item] = target
+            out.append(target)
+        return out
+
+    global_targets = _parse(raw_global, "WEBHOOK_URLS" if per_event_raw else "")
+    event_targets = {}
+    for event, raw in (per_event_raw or {}).items():
+        targets = _parse(raw, f"WEBHOOK_URLS_{event.upper()}")
+        if targets:
+            event_targets[event] = targets
+    return global_targets, event_targets, rejected
+
+
 def parse_webhook_urls(raw: str | None) -> tuple[list[WebhookTarget], list[str]]:
     """
-    WEBHOOK_URLS を (有効な宛先, 却下した項目の説明) に分ける。
+    WEBHOOK_URLS を (有効な宛先, 却下した項目の説明) に分ける（種別別の宛先なし版。互換用）。
     却下の説明に URL は含めない（番号と理由のみ）。同じ URL の重複は1つにまとめる。
     """
-    targets: list[WebhookTarget] = []
-    rejected: list[str] = []
-    seen: set[str] = set()
-    items = [p.strip() for p in (raw or "").split(",") if p.strip()]
-    for pos, item in enumerate(items, 1):
-        parts = urlsplit(item)
-        reason = None
-        host = (parts.hostname or "").lower()
-        if parts.scheme != "https":
-            reason = "https の URL ではありません"
-        elif parts.username or parts.password or "@" in parts.netloc:
-            reason = "認証情報付きの URL は使えません"
-        elif parts.port not in (None, 443):
-            reason = "ポート指定は使えません"
-        elif host in _DISCORD_HOSTS:
-            kind = "discord"
-            if not parts.path.startswith("/api/webhooks/"):
-                reason = "Discord の Webhook URL の形式ではありません"
-        elif host in _SLACK_HOSTS:
-            kind = "slack"
-            if not parts.path.startswith("/services/"):
-                reason = "Slack の Webhook URL の形式ではありません"
-        else:
-            reason = "Discord / Slack 以外のホストです"
-        if reason:
-            rejected.append(f"{pos}番目: {reason}")
-            continue
-        if item in seen:
-            rejected.append(f"{pos}番目: 重複しているため無視しました")
-            continue
-        seen.add(item)
-        targets.append(WebhookTarget(kind=kind, index=len(targets) + 1, url=item))
+    targets, _, rejected = parse_targets(raw)
     return targets, rejected
 
 
@@ -241,18 +285,31 @@ def _retry_after_sec(resp: aiohttp.ClientResponse, attempt: int) -> float:
 
 class WebhookNotifier:
     def __init__(self, targets: list[WebhookTarget], events: frozenset[str] | None,
-                 attempts: int = _ATTEMPTS):
-        self.targets = list(targets)
+                 attempts: int = _ATTEMPTS,
+                 event_targets: Mapping[str, list[WebhookTarget]] | None = None):
+        self.targets = list(targets)            # 全種別向け（events で絞れる）
         self.events = events                    # None = すべて
+        self.event_targets = {k: list(v) for k, v in (event_targets or {}).items() if v}  # 種別専用
         self._attempts = max(1, attempts)
         self._tasks: set[asyncio.Task] = set()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.targets)
+        return bool(self.targets or self.event_targets)
+
+    def targets_for(self, label: str) -> list[WebhookTarget]:
+        """この通知を送る宛先（全種別向け＋その種別専用。同じ宛先は1回だけ）。"""
+        key = event_key(label)
+        chosen: list[WebhookTarget] = []
+        if self.targets and (self.events is None or key in self.events):
+            chosen.extend(self.targets)
+        for t in self.event_targets.get(key, []):
+            if t not in chosen:
+                chosen.append(t)
+        return chosen
 
     def should_send(self, label: str) -> bool:
-        return self.enabled and (self.events is None or event_key(label) in self.events)
+        return bool(self.targets_for(label))
 
     def dispatch(self, label: str, embeds: list[dict]) -> None:
         """送信タスクを起動して即座に戻る（呼び出し元を待たせない）。イベントループ内から呼ぶこと。"""
@@ -267,7 +324,7 @@ class WebhookNotifier:
 
     async def _run(self, label: str, embeds: list[dict]) -> None:
         payloads = {"discord": to_discord_payload(embeds), "slack": to_slack_payload(embeds)}
-        jobs = [(t, payloads[t.kind]) for t in self.targets if payloads[t.kind] is not None]
+        jobs = [(t, payloads[t.kind]) for t in self.targets_for(label) if payloads[t.kind] is not None]
         if not jobs:
             return
         try:
@@ -309,22 +366,32 @@ class WebhookNotifier:
     def describe_for_log(self) -> str:
         if not self.enabled:
             return "Webhook 通知: 無効（WEBHOOK_URLS 未設定）"
-        kinds = ", ".join(t.describe() for t in self.targets)
-        events = "all" if self.events is None else ",".join(sorted(self.events))
-        return f"Webhook 通知: 有効（宛先{len(self.targets)}件: {kinds} / 種別: {events}）"
+        parts = []
+        if self.targets:
+            kinds = ", ".join(t.describe() for t in self.targets)
+            events = "all" if self.events is None else ",".join(sorted(self.events))
+            parts.append(f"全種別向け{len(self.targets)}件: {kinds} / 種別: {events}")
+        for event in sorted(self.event_targets):
+            kinds = ", ".join(t.describe() for t in self.event_targets[event])
+            parts.append(f"{event}専用{len(self.event_targets[event])}件: {kinds}")
+        return "Webhook 通知: 有効（" + " ／ ".join(parts) + "）"
 
 
 # ───────────────────────── 既定のインスタンスと呼び出し口 ─────────────────────────
 
-_targets, rejected_urls = parse_webhook_urls(WEBHOOK_URLS)
+_targets, _event_targets, rejected_urls = parse_targets(WEBHOOK_URLS, {
+    "eew": WEBHOOK_URLS_EEW, "quake": WEBHOOK_URLS_QUAKE, "tsunami": WEBHOOK_URLS_TSUNAMI,
+    "volcano": WEBHOOK_URLS_VOLCANO, "usgs": WEBHOOK_URLS_USGS, "kanchi": WEBHOOK_URLS_KANCHI,
+    "other": WEBHOOK_URLS_OTHER,
+})
 _events, unknown_events = parse_event_filter(WEBHOOK_EVENTS)
-notifier = WebhookNotifier(_targets, _events)
+notifier = WebhookNotifier(_targets, _events, event_targets=_event_targets)
 
 
 def log_startup_status() -> None:
     """起動時に設定の状況（却下した項目・無視した種別名を含む）をログに出す。URL は出さない。"""
     for r in rejected_urls:
-        logger.warning(f"WEBHOOK_URLS: {r}")
+        logger.warning(r if r.startswith("WEBHOOK_URLS") else f"WEBHOOK_URLS: {r}")
     for t in unknown_events:
         logger.warning(f"WEBHOOK_EVENTS: 未知の種別 {t!r} を無視しました（{', '.join(sorted(EVENT_KEYS))} / all）")
     logger.info(notifier.describe_for_log())

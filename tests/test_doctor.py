@@ -189,3 +189,23 @@ def test_run_doctor_exit_code_and_report(tmp_path, capsys):
     os.chmod(tmp_path / ".env", 0o600)
     assert doctor.run_doctor(str(tmp_path)) == 0
     assert "読み取り専用" in capsys.readouterr().out
+
+
+def test_multiple_channel_ids_are_accepted(tmp_path):
+    _write(tmp_path, ".env", "BOT_TOKEN=a.b.c\nCHANNEL_ID=111, 222\nEEW_CHANNEL_ID=333;444\nQUAKE_CHANNEL_ID=555,abc\n")
+    os.chmod(tmp_path / ".env", 0o600)
+    checks = doctor.check_env_files(str(tmp_path), doctor._read_env_values(str(tmp_path)))
+    assert _find(checks, "CHANNEL_ID が設定されています（2チャンネル）")[0].level == OK
+    assert not _find(checks, "EEW_CHANNEL_ID")                     # 正常な複数指定は警告しない
+    assert _find(checks, "QUAKE_CHANNEL_ID")[0].level == WARN       # 一部に数値以外があれば警告
+
+
+def test_dashboard_web_files_check(tmp_path, monkeypatch):
+    from core import web_static
+    env = {"WEB_DASHBOARD_ENABLED": "true", "WEB_DASHBOARD_PORT": "59123"}
+    assert _find(doctor.check_features(str(tmp_path), env), "画面ファイル（web/）がそろっています")
+    monkeypatch.setattr(web_static, "WEB_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(web_static.StaticFiles, "__init__", lambda self, web_dir=str(tmp_path / "nowhere"): (
+        setattr(self, "_web_dir", web_dir), setattr(self, "_cache", {}), setattr(self, "_warned", set()))[0])
+    found = _find(doctor.check_features(str(tmp_path), env), "画面ファイルが不足しています")
+    assert found and found[0].level == WARN and "git pull" in found[0].detail

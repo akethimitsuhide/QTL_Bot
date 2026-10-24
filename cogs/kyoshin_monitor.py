@@ -92,8 +92,9 @@ import discord
 from discord.ext import commands
 import aiohttp
 
+from core.channels import resolve_channels
 from core.config import (
-    CHANNEL_ID, KYOSHIN_CHANNEL_ID, ENABLE_KYOSHIN,
+    CHANNEL_IDS, KYOSHIN_CHANNEL_IDS, ENABLE_KYOSHIN,
     KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
     KYOSHIN_IMAGE_MAX_RETRY,
     KYOSHIN_RECV_JMA_S_ENABLE, KYOSHIN_RECV_LMONI_ENABLE, KYOSHIN_RECV_VIBRATION_ENABLE,
@@ -308,8 +309,8 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel = self.bot.get_channel(CHANNEL_ID)
-        self.kyoshin_channel = self.bot.get_channel(KYOSHIN_CHANNEL_ID) or self.channel
+        self.channel = resolve_channels(self.bot, CHANNEL_IDS)
+        self.kyoshin_channel = resolve_channels(self.bot, KYOSHIN_CHANNEL_IDS, self.channel)
 
         if not ENABLE_KYOSHIN:
             logger.info("KyoshinMonitorCog: ENABLE_KYOSHIN=false のため起動しません")

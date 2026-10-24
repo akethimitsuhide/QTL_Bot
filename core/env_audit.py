@@ -54,7 +54,7 @@ _CODE_GLOB_PATTERNS = ("bot.py", "cogs/*.py", "core/*.py")
 # ここにも追記すること。
 _GETENV_FUNC_NAMES = (
     "_env_int", "_env_float", "_env_bool", "_getenv_nonempty", "_require_env",
-    "_env_hex_color", "getenv",
+    "_env_hex_color", "getenv", "_channel_ids",
 )
 
 # 意図的にドキュメント化していない、または意図的にコード側で

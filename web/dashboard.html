@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>QTL_Bot ダッシュボード</title>
+<script src="/assets/js/theme.js"></script>
+<link rel="stylesheet" href="/assets/css/common.css">
+<link rel="stylesheet" href="/assets/css/dashboard.css">
+<script src="/assets/vendor/chart.umd.min.js" defer></script>
+<script src="/assets/js/common.js" defer></script>
+<script src="/assets/js/dashboard.js" defer></script>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <h1>QTL_Bot ダッシュボード</h1>
+      <div class="subtitle">システムリソース・受信件数の推移（メモリ上のリングバッファ、Bot再起動でリセットされます）</div>
+    </div>
+    <button class="btn-link" id="themeBtn" type="button">テーマ</button>
+  </div>
+
+  <div class="summary-bar" id="summaryBar">
+    <div class="summary-chip"><div class="chip-label">Bot状態</div><div class="chip-value" id="sumStatus">読み込み中...</div></div>
+    <div class="summary-chip"><div class="chip-label">稼働時間</div><div class="chip-value" id="sumUptime">-</div></div>
+    <div class="summary-chip"><div class="chip-label">Ping</div><div class="chip-value" id="sumPing">-</div></div>
+    <div class="summary-chip"><div class="chip-label">Wolfx EEW</div><div class="chip-value" id="sumWolfx">-</div></div>
+    <div class="summary-chip"><div class="chip-label">CPU / メモリ</div><div class="chip-value" id="sumResource">-</div></div>
+    <div class="summary-chip"><div class="chip-label">ディスク</div><div class="chip-value" id="sumDisk">-</div></div>
+  </div>
+
+  <div class="toolbar">
+    <a class="btn-link" href="/status/history?format=csv" download>CSVをダウンロード</a>
+    <a class="btn-link" href="/quake_map">地震情報履歴（地図・表）</a>
+    <button class="btn-link" id="refreshBtn" type="button">今すぐ更新</button>
+  </div>
+
+  <div id="chartsContent" class="grid">
+    <div class="card"><h2>CPU 使用率 (%)</h2><canvas id="cpuChart"></canvas></div>
+    <div class="card"><h2>メモリ使用量 (MB)</h2><canvas id="memChart"></canvas></div>
+    <div class="card"><h2>ディスク使用率 (%)</h2><canvas id="diskChart"></canvas></div>
+    <div class="card"><h2>受信件数（累積）</h2><canvas id="recvChart"></canvas></div>
+  </div>
+
+  <div id="notifSection" class="grid grid-spaced">
+    <div class="card notif-card">
+      <div class="notif-header-row">
+        <h2>直近の通知履歴</h2>
+        <select class="notif-filter" id="notifFilter" aria-label="通知の種別で絞り込む">
+          <option value="">すべての種別</option>
+        </select>
+      </div>
+      <div id="notifContent" class="table-wrap"><div class="notif-empty">読み込み中...</div></div>
+    </div>
+  </div>
+  <div class="status-line" id="statusLine" role="status" aria-live="polite">読み込み中...</div>
+
+  <noscript><div class="error">このページの表示には JavaScript が必要です。</div></noscript>
+</body>
+</html>

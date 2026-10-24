@@ -1,0 +1,188 @@
+/*
+ * QTL_Bot ダッシュボード 共通スタイル（/dashboard・/quake_map 共通）
+ *
+ * 【テーマ】ダーク（Catppuccin Mocha）／ライト（Catppuccin Latte 系）／自動（OS の設定に従う）。
+ *   <html data-theme="dark|light"> で固定。未指定・"auto" は prefers-color-scheme に従う。
+ *   ページ右上のボタンで切り替え、選択は js/theme.js がブラウザに保存する。
+ *   JS（Chart.js・Leaflet の配色）は下の CSS 変数を getComputedStyle で読むため、
+ *   色を変えたい場合はこのファイルの変数だけを編集すればよい。
+ *
+ * 【スマホ対応】画面幅 640px 以下: 余白・文字サイズ・ボタンの高さ（タップしやすい 44px）を調整し、
+ *   表は横スクロール（重要でない列は非表示）。ノッチ付き端末の安全領域（safe-area）に対応。
+ *
+ * 【CSP】このサイトは style-src 'self'（インライン style 属性・<style> 禁止）で配信される。
+ *   スタイルはすべてこのファイルか css/*.css に書くこと。JS から色を付ける場合は
+ *   element.style.xxx = ...（CSSOM。CSP の対象外）を使う。
+ */
+
+/* ── ダーク（既定）── */
+:root {
+  color-scheme: dark;
+  --bg: #1e1e2e;
+  --surface: #292c3c;
+  --surface-2: #313244;
+  --border: #45475a;
+  --text: #cdd6f4;
+  --text-sub: #a6adc8;
+  --text-muted: #8a8fa8;
+  --accent: #89b4fa;
+  --danger: #f38ba8;
+  --ok: #a6e3a1;
+  --warn: #f9e2af;
+  --badge-text: #11111b;
+  --chart-grid: #313244;
+  --map-sea: #1b2a3a;
+  --map-land: #3b4252;
+  --map-border: #6c7086;
+  --map-border-local: #8a8fa8;
+  /* グラフの系列色 */
+  --c-cpu: #89b4fa; --c-mem: #a6e3a1; --c-disk: #f9e2af;
+  --c-wolfx: #f38ba8; --c-p2p_eew: #fab387; --c-quake: #94e2d5; --c-tsunami: #89dceb;
+  --c-usgs: #cba6f7; --c-volcano: #eba0ac; --c-jishin_kanchi: #f2cdcd; --c-kyoshin: #b4befe;
+}
+
+/* ── ライト ── */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eff1f5;
+  --surface: #ffffff;
+  --surface-2: #e6e9ef;
+  --border: #bcc0cc;
+  --text: #4c4f69;
+  --text-sub: #5c5f77;
+  --text-muted: #6c6f85;
+  --accent: #1e66f5;
+  --danger: #d20f39;
+  --ok: #40a02b;
+  --warn: #c77d0a;
+  --badge-text: #11111b;
+  --chart-grid: #dce0e8;
+  --map-sea: #b2cde3;      /* core/gis_render.py の海色 (178,205,227) と同じ */
+  --map-land: #eee8dc;
+  --map-border: #9a9a9a;
+  --map-border-local: #6e6e6e;
+  --c-cpu: #1e66f5; --c-mem: #40a02b; --c-disk: #df8e1d;
+  --c-wolfx: #d20f39; --c-p2p_eew: #fe640b; --c-quake: #179299; --c-tsunami: #04a5e5;
+  --c-usgs: #8839ef; --c-volcano: #e64553; --c-jishin_kanchi: #dd7878; --c-kyoshin: #7287fd;
+}
+
+/* ── 自動（data-theme 未指定・"auto"）で OS がライトのとき ── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #eff1f5;
+    --surface: #ffffff;
+    --surface-2: #e6e9ef;
+    --border: #bcc0cc;
+    --text: #4c4f69;
+    --text-sub: #5c5f77;
+    --text-muted: #6c6f85;
+    --accent: #1e66f5;
+    --danger: #d20f39;
+    --ok: #40a02b;
+    --warn: #c77d0a;
+    --badge-text: #11111b;
+    --chart-grid: #dce0e8;
+    --map-sea: #b2cde3;
+    --map-land: #eee8dc;
+    --map-border: #9a9a9a;
+    --map-border-local: #6e6e6e;
+    --c-cpu: #1e66f5; --c-mem: #40a02b; --c-disk: #df8e1d;
+    --c-wolfx: #d20f39; --c-p2p_eew: #fe640b; --c-quake: #179299; --c-tsunami: #04a5e5;
+    --c-usgs: #8839ef; --c-volcano: #e64553; --c-jishin_kanchi: #dd7878; --c-kyoshin: #7287fd;
+  }
+}
+
+/* ── 基本 ── */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", Meiryo, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 20px;
+  /* ノッチ・角丸のある端末で内容が隠れないようにする */
+  padding-left: max(20px, env(safe-area-inset-left));
+  padding-right: max(20px, env(safe-area-inset-right));
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
+  line-height: 1.5;
+}
+h1 { font-size: 1.4em; margin: 0 0 4px 0; }
+.subtitle { color: var(--text-muted); font-size: 0.85em; margin-bottom: 16px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.page-header > div { min-width: 0; }
+
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── ボタン・入力 ── */
+.toolbar { margin-bottom: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.btn-link {
+  display: inline-block; color: var(--accent); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 14px; font-size: 0.85em; text-decoration: none;
+  cursor: pointer; font-family: inherit; line-height: 1.4;
+}
+.btn-link:hover { background: var(--surface-2); }
+select.btn-link { padding: 5px 10px; }
+.date-input {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 5px 8px; font-size: 0.85em; font-family: inherit;
+}
+.toolbar label { font-size: 0.8em; color: var(--text-muted); display: flex; align-items: center; gap: 4px; }
+.notif-filter {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 10px; font-size: 0.85em; font-family: inherit;
+}
+
+/* ── カード・表 ── */
+.card { background: var(--surface); border-radius: 8px; padding: 16px; min-width: 0; }
+.card h2 { font-size: 1em; margin: 0 0 12px 0; color: var(--text-sub); }
+.error { color: var(--danger); padding: 20px; }
+.status-line { color: var(--text-muted); font-size: 0.8em; margin-top: 8px; }
+.notif-empty { color: var(--text-muted); padding: 12px 0; }
+
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.notif-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+.notif-table th, .notif-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--surface-2); }
+.notif-table th { color: var(--text-muted); font-weight: normal; position: sticky; top: 0; background: var(--surface); }
+.notif-table tbody tr:hover { background: var(--surface-2); }
+.notif-table td { overflow-wrap: anywhere; }
+.nowrap { white-space: nowrap; }
+.notif-kind, .scale-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  background: var(--border); color: var(--badge-text); font-size: 0.85em; white-space: nowrap; font-weight: 600;
+}
+
+/* ── 状態ドット ── */
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+.dot-green  { background: var(--ok); }
+.dot-yellow { background: var(--warn); }
+.dot-red    { background: var(--danger); }
+.dot-gray   { background: var(--text-muted); }
+
+/* ── スマホ・小さい画面 ── */
+@media (max-width: 640px) {
+  body {
+    padding: 12px;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  h1 { font-size: 1.2em; }
+  .card { padding: 12px; }
+  /* タップしやすい高さ（44px）にし、iOS の入力時の自動拡大（16px 未満で発生）を防ぐ */
+  .btn-link, select.btn-link, .date-input, .notif-filter { min-height: 44px; font-size: 16px; }
+  .toolbar { gap: 8px; }
+  .toolbar > .btn-link { flex: 1 1 auto; text-align: center; }
+  .toolbar label { font-size: 0.85em; flex: 1 1 140px; }
+  .toolbar label .date-input { flex: 1; min-width: 0; }
+  .hide-sm { display: none; }
+  .notif-table { font-size: 0.8em; }
+}
+
+/* 動きを減らす設定の人にはアニメーションを使わない（このサイトは基本的に使っていない） */
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}

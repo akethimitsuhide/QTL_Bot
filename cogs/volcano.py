@@ -31,9 +31,11 @@ from datetime import datetime
 import logging
 
 from core.discord_send import send_with_retry
+from core import runtime_settings as rs  # 通知の ON/OFF は実行時の値を読む
+from core.channels import resolve_channels
 from core.config import (
     YOMI_VOLCANO_INFO, YOMI_VOLCANO_ERUPTION_FLASH, YOMI_VOLCANO_ERUPTION_WARNING,
-    CHANNEL_ID, VOLCANO_CHANNEL_ID,
+    CHANNEL_IDS, VOLCANO_CHANNEL_IDS,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
 )
 from core.helpers import format_jma_time
@@ -129,8 +131,8 @@ class VolcanoCog(commands.Cog, AudioMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel         = self.bot.get_channel(CHANNEL_ID)
-        self.volcano_channel = self.bot.get_channel(VOLCANO_CHANNEL_ID) or self.channel
+        self.channel         = resolve_channels(self.bot, CHANNEL_IDS)
+        self.volcano_channel = resolve_channels(self.bot, VOLCANO_CHANNEL_IDS, self.channel)
 
         # 火山情報ポーリング開始（1分ごと）
         if self.volcano_task is None or self.volcano_task.done():
@@ -327,6 +329,8 @@ class VolcanoCog(commands.Cog, AudioMixin):
           volcanoActivity : 詳細
           volcanoPrevention: 防災上の注意
         """
+        if not rs.get("VOLCANO_ENABLE"):
+            return                      # 火山情報の通知を止める設定（VOLCANO_ENABLE=false）
         channel = self.volcano_channel or self.channel
         if not channel:
             logger.warning("Volcano: 通知チャンネルが見つかりません")
@@ -477,6 +481,8 @@ class VolcanoCog(commands.Cog, AudioMixin):
         """噴火速報を Discord に通知する。
         item: eruption.json の1エントリ
         """
+        if not rs.get("VOLCANO_ENABLE"):
+            return                      # 火山情報の通知を止める設定（VOLCANO_ENABLE=false）
         channel = self.volcano_channel or self.channel
         if not channel:
             logger.warning("Eruption: 通知チャンネルが見つかりません")
@@ -587,6 +593,8 @@ class VolcanoCog(commands.Cog, AudioMixin):
 
     async def _notify_warning(self, item: dict, event_id: str) -> None:
         """噴火警報を Discord に通知する。item は warning.json の1エントリ。"""
+        if not rs.get("VOLCANO_ENABLE"):
+            return                      # 火山情報の通知を止める設定（VOLCANO_ENABLE=false）
         channel = self.volcano_channel or self.channel
         if not channel:
             logger.warning("Warning: 通知チャンネルが見つかりません")

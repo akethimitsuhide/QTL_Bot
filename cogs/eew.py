@@ -46,9 +46,11 @@ from datetime import datetime
 import logging
 
 from core.discord_send import send_with_retry
+from core import runtime_settings as rs  # 通知の ON/OFF は実行時の値を読む
+from core.channels import resolve_channels
 from core.config import (
-    CHANNEL_ID, EEW_CHANNEL_ID, P2P_EEW_CHANNEL_ID,
-    KYOSHIN_CHANNEL_ID, OTHER_CHANNEL_ID,
+    CHANNEL_IDS, EEW_CHANNEL_IDS, P2P_EEW_CHANNEL_IDS,
+    KYOSHIN_CHANNEL_IDS, OTHER_CHANNEL_IDS,
     WOLFX_WSS,
     ENABLE_KYOSHIN,
     EEW_REGION_COLLAPSE_THRESHOLD,
@@ -210,11 +212,11 @@ class EewCog(commands.Cog, AudioClientMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel         = self.bot.get_channel(CHANNEL_ID)
-        self.eew_channel     = self.bot.get_channel(EEW_CHANNEL_ID) or self.channel
-        self.other_channel   = self.bot.get_channel(OTHER_CHANNEL_ID) or self.channel
-        self.p2p_eew_channel = self.bot.get_channel(P2P_EEW_CHANNEL_ID) or self.eew_channel
-        self.kyoshin_channel = self.bot.get_channel(KYOSHIN_CHANNEL_ID) or self.other_channel
+        self.channel         = resolve_channels(self.bot, CHANNEL_IDS)
+        self.eew_channel     = resolve_channels(self.bot, EEW_CHANNEL_IDS, self.channel)
+        self.other_channel   = resolve_channels(self.bot, OTHER_CHANNEL_IDS, self.channel)
+        self.p2p_eew_channel = resolve_channels(self.bot, P2P_EEW_CHANNEL_IDS, self.eew_channel)
+        self.kyoshin_channel = resolve_channels(self.bot, KYOSHIN_CHANNEL_IDS, self.other_channel)
 
         if self._wolfx_ws_task is None or self._wolfx_ws_task.done():
             self._wolfx_ws_task = self.bot.loop.create_task(self.connect_eew_ws())
@@ -394,6 +396,8 @@ class EewCog(commands.Cog, AudioClientMixin):
         channel = channel_override or _source_channel_map.get(source, self.eew_channel) or self.channel
         if not channel:
             return
+        if not rs.get("EEW_ENABLE") and not is_test:
+            return                      # EEW の通知を止める設定（EEW_ENABLE=false）
 
         try:
             event_id = data.get("EventID")

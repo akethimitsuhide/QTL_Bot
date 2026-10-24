@@ -60,8 +60,9 @@ import logging
 
 from core.discord_send import send_with_retry
 from core import runtime_settings as rs  # 通知フィルターは実行時の値を読む（再起動不要で変更可能）
+from core.channels import resolve_channels
 from core.config import (
-    CHANNEL_ID, QUAKE_CHANNEL_ID,
+    CHANNEL_IDS, QUAKE_CHANNEL_IDS,
     EWS_ENABLE, EWS_REGION, EWS_BLOCKS, EWS_PRETONE_SEC, EWS_POSTTONE_SEC,
     QUAKE_INTENSITY_COLLAPSE_THRESHOLD,
     P2P_FAILOVER_ENABLE, QUAKE_FAILOVER_POLL_SECONDS, QUAKE_FAILOVER_SOURCES, QUAKE_ONE_POLL_SECONDS,
@@ -167,8 +168,8 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.channel       = self.bot.get_channel(CHANNEL_ID)
-        self.quake_channel = self.bot.get_channel(QUAKE_CHANNEL_ID) or self.channel
+        self.channel       = resolve_channels(self.bot, CHANNEL_IDS)
+        self.quake_channel = resolve_channels(self.bot, QUAKE_CHANNEL_IDS, self.channel)
 
         # P2P地震情報（code=551）の受信は core.p2p_ws_hub.P2PWebSocketHub が
         # 一元管理する接続から配信される（bot.py 側で
@@ -352,6 +353,8 @@ class QuakeInfoCog(commands.Cog, AudioClientMixin):
             return True
 
     async def notify_quake(self, data, is_test=False, extra_note=None, skip_speech=False):
+        if not rs.get("QUAKE_ENABLE") and not is_test:
+            return                      # 地震情報の通知を止める設定（QUAKE_ENABLE=false）
         channel = self.quake_channel or self.channel
         if not channel:
             return

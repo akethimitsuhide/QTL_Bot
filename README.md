@@ -156,6 +156,8 @@ python3 bot.py
 `.env` の読み込み後、`.env.kyoshin`・`.env.yomiage` があれば追加で読み込む（`core/env_loader.py`。同じ変数は `.env` が優先）。以下の「既定値」は `core/config.py` の値。
 
 ### Discord 設定
+**複数のチャンネルへ同時に通知できる**: `CHANNEL_ID` を含む下記すべての `*_CHANNEL_ID` は、カンマ（`,`）区切りで複数指定できる（例: `EEW_CHANNEL_ID=111111111111111111,222222222222222222`。別サーバーでも可。区切りは `,` `;` 空白のどれでも可、重複は1つにまとめる）。全チャンネルへ並行して送り、一部で権限不足などが起きても他へは届く。見つからないID・数字以外の値は警告ログを出して無視する。1つだけ書いた場合は従来と同じ動作。`/qtl_config` の設定チェックにも全IDが表示される。実装は `core/channels.py`。
+
 | 変数名 | 必須 | 既定値 | 説明 |
 | :--- | :---: | :--- | :--- |
 | `BOT_TOKEN` | 必須 | — | Discord Bot のトークン |
@@ -189,6 +191,9 @@ python3 bot.py
 | `QUAKE_ENABLE_DETAIL_SCALE` | true | 各地の震度に関する情報（`DetailScale`）の通知 |
 | `QUAKE_ENABLE_FOREIGN` | true | 遠地地震に関する情報（`Foreign`）の通知 |
 | `QUAKE_ENABLE_OTHER` | true | その他の情報（`Other`）の通知 |
+| `EEW_ENABLE` | true | EEW（緊急地震速報）の通知・読み上げ・効果音の有効化 |
+| `QUAKE_ENABLE` | true | 地震情報（全体）の通知の有効化。false なら下の `QUAKE_ENABLE_*` に関わらず通知しない |
+| `VOLCANO_ENABLE` | true | 火山情報（火山情報・噴火速報・噴火警報）の通知の有効化 |
 | `TSUNAMI_ENABLE` | true | 津波情報通知の有効化 |
 | `ENABLE_ADVISORY` | true | 気象庁その他情報の有効化 |
 | `ENABLE_LONG_PERIOD` | true | 長周期地震動通知の有効化 |
@@ -214,6 +219,7 @@ python3 bot.py
 | `FETCH_BACKOFF_SECONDS` | 60 | API 失敗時のバックオフ待機時間（秒） |
 | `DISCORD_SEND_RETRY_ATTEMPTS` | 3 | Discord への通知送信が一時的に失敗したときの総試行回数（初回を含む。1〜5、1 で再送なし）。詳細は下記「Discord 送信の再送」 |
 | `WEBHOOK_URLS` | （空） | 追加の通知先 Webhook URL（カンマ区切りで複数可。https の Discord / Slack のみ）。**秘密情報**。空なら無効。詳細は下記「Webhook 通知」 |
+| `WEBHOOK_URLS_EEW` / `_QUAKE` / `_TSUNAMI` / `_VOLCANO` / `_USGS` / `_KANCHI` / `_OTHER` | （空） | 種別ごとの宛先（書いた URL にはその種別だけが届く）。**秘密情報**。`WEBHOOK_URLS` と併用可 |
 | `WEBHOOK_EVENTS` | all | Webhook に送る種別。`all` または `eew,quake,tsunami,volcano,usgs,kanchi,other` のカンマ区切り |
 
 ### 震度色設定（Embed配色／GIS地図で共通）
@@ -460,8 +466,13 @@ python3 bot.py
 ```bash
 # .env
 WEBHOOK_URLS=https://discord.com/api/webhooks/xxx/yyy,https://hooks.slack.com/services/T/B/zzz
-WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞る
+WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞る（WEBHOOK_URLS の宛先にだけ効く）
+
+# 種別ごとに宛先を分ける（書いた URL には、その種別「だけ」が届く。WEBHOOK_EVENTS の影響を受けない）
+WEBHOOK_URLS_EEW=https://hooks.slack.com/services/T/B/zzz          # EEW だけを緊急用の Slack へ
+WEBHOOK_URLS_TSUNAMI=https://hooks.slack.com/services/T/B/zzz      # 津波だけ（同じ URL が複数の欄にあっても1回しか送らない）
 ```
+どの欄も区切りは `,` `;` 空白のどれでも可。Discord と Slack を混在でき、同じ URL が全種別用と種別専用の両方にあっても、1つの通知につき1回しか送らない。
 
 | 種別名 | 対象 |
 |:---|:---|
@@ -480,7 +491,7 @@ WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞�
 - **再送**: 429（`Retry-After` を尊重）・5xx・ネットワークエラーは最大 3 回（2 秒 → 4 秒、上限 10 秒）。それ以外の 4xx は再送しない。最終的に失敗しても WARNING ログのみで、Bot の動作は継続する。複数の通知が続くと、再送の都合で受信側に届く順序が前後することがある（EEW は「第N報」の表記で判別できる）。
 - **宛先の指定は https の Discord / Slack の Webhook URL のみ**。他のホスト・http・認証情報付き・ポート指定付きの URL は、起動時に警告を出して無視する。
 - **URL は秘密情報**（知っていれば誰でもその宛先へ投稿できる）。ログには一切出さず、宛先は「discord#1」「slack#2」のように番号で表示する。`.env` を公開しないこと。URL が漏れた場合は、Discord / Slack 側で Webhook を削除して作り直す。
-- 起動時のログで、有効な宛先の数と種別を確認できる（例: `Webhook 通知: 有効（宛先2件: discord#1, slack#2 / 種別: all）`）。
+- 起動時のログで、有効な宛先の数と種別を確認できる（例: `Webhook 通知: 有効（全種別向け2件: discord#1, slack#2 / 種別: all ／ eew専用1件: slack#2）`）。
 - Slack 向けの送信は、テスト用の HTTP サーバーでの動作確認のみで、実際の Slack ワークスペースでの確認は行っていない。初回は `--test_*` などで実際に届くことを確認すること。
 
 ### 設定の変更（`/qtl_config`・再起動不要）
@@ -498,6 +509,7 @@ WEBHOOK_EVENTS=all            # または eew,tsunami のように種別を絞�
 | `QUAKE_MIN_MAG`（Mの下限） | 0〜10 の数値（例: `3.5`） |
 | `QUAKE_MIN_DEPTH` / `QUAKE_MAX_DEPTH`（深さの下限/上限・km） | 0〜9999 の整数（下限 ≤ 上限） |
 | `QUAKE_ENABLE_SCALE_PROMPT` / `_DESTINATION` / `_SCALE_AND_DEST` / `_DETAIL_SCALE` / `_FOREIGN` / `_OTHER`（地震情報の種別ごと） | `on` / `off` |
+| `EEW_ENABLE`（EEW）・`QUAKE_ENABLE`（地震情報全体）・`VOLCANO_ENABLE`（火山情報） | `on` / `off` |
 | `TSUNAMI_ENABLE`（津波情報） | `on` / `off` |
 | `ENABLE_LONG_PERIOD`（長周期地震動） | `on` / `off` |
 | `ENABLE_ADVISORY`（後発地震注意情報等） | `on` / `off` |
@@ -613,11 +625,29 @@ python3 bot.py --audit_deps
 | `GET /status/quake_history`・`/status/eew_history` | `qtlbot.log` ベースの地震情報・EEW の履歴（座標つき） |
 | `GET /quake_map` | 地震情報・EEW の履歴を地図（Leaflet）と表で閲覧（日付・震度で絞り込み。国境・区域データ `GET /status/gis_countries`・`/status/gis_local_areas` を背景に使う。経度は日本を中心に太平洋側へ連続させた座標系（西経30度〜東経330度）で扱い、日付変更線をまたいでも陸地・震源が途切れない。背景データは geometry のみ・座標4桁に丸めて gzip し、プロセス内にキャッシュして配信する） |
 | `GET /dashboard` | 上記を可視化する HTML ページ（ステータス、推移グラフ、通知履歴、CSV ダウンロード） |
+| `GET /assets/<ファイル>` | 画面用の CSS・JS（許可リストのファイルのみ。下記） |
 
 ```bash
 curl http://localhost:8080/status | jq
 curl http://localhost:8080/health/full | jq
 ```
+
+### 画面（`web/`）・テーマ・スマホ対応
+`/dashboard`・`/quake_map` の HTML・CSS・JS は `web/` フォルダの別ファイル（`web/*.html`・`web/css/`・`web/js/`・`web/vendor/`）。`git pull` で `web/` ごと更新されるので、`cogs/system.py` を触らずに見た目を変えられる。
+
+- **テーマ**: ダーク／ライト／自動（OS の設定に従う）。ページ右上の「テーマ」ボタンで切り替え、選択はそのブラウザにだけ保存される。色は `web/css/common.css` の CSS 変数だけで決まり、グラフ（Chart.js）・地図（Leaflet）もこの変数に連動する。
+- **スマホ対応**: 画面幅 640px 以下で、1 列表示・タップしやすい大きさのボタン（44px）・表の横スクロールと重要でない列の非表示・ノッチ付き端末の余白に対応。非表示のタブでは自動更新を止め、Raspberry Pi への無駄なアクセスを減らす。
+- **外部 CDN を使わない**: Chart.js 4.5.1・Leaflet 1.9.4 を `web/vendor/` に固定の版で同梱（版・ハッシュ・更新手順は `web/vendor/VENDORED.md`）。CDN の改ざん・停止・追跡の影響を受けず、LAN 内だけでも動く。
+
+### ダッシュボードのセキュリティ
+`web/` の中身を「フォルダごと公開」する作りにはしていない（パスの組み立て 1 か所の誤りが `.env` などの漏えいにつながるため）。`core/web_static.py` が次の方針で配信する。
+
+- **許可リスト方式**: 配信するのは `core/web_static.py` の `PAGES`・`ASSETS` に書かれたファイルだけ。リクエストのパスは辞書のキーと文字列として一致するか調べるだけで、ファイルパスの組み立てには使わない（`..`・`%2e%2e`・二重エンコード・NUL 文字等を送られても 404）。ディレクトリ一覧も無い。`.env`・`bot.py`・`web/` 内の許可外ファイルは、どんなパスでも返らない。
+- **実行できるものを配信しない**: PHP 等のサーバー側スクリプトの実行機構・アップロード機能は存在しない。Bot が返すのは、許可リストのファイルのバイト列と JSON のみ。シンボリックリンクも辿らない。
+- **全レスポンスにセキュリティヘッダー**: CSP（`script-src 'self'`・インラインスクリプト禁止・外部接続禁止・フレーム埋め込み禁止）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等。404・認証失敗・想定外の例外（汎用の 500。内部情報は返さない）にも付き、`Server` ヘッダーでライブラリの版も出さない。
+- **XSS 対策**: 外部から受け取った文字列（震源地名・通知タイトル・気象庁のコメント等）は HTML 文字列にせず、DOM API（テキストノード）で表示する。さらに CSP により、万一インラインスクリプトが注入されても実行されない。
+- **認証**: `WEB_DASHBOARD_TOKEN`・`WEB_DASHBOARD_ALLOWED_IPS` は、画面・`/assets/*`・JSON のすべてに同じように効く。ダッシュボードの内容に `.env`・トークン・Webhook URL は含まれない（実際にサーバーを起動して確認するテスト `tests/test_dashboard_security.py` あり）。
+- **起動前の確認**: `python3 bot.py --doctor` が `web/` のファイル不足やダッシュボードの公開設定（外部公開なのに認証なし等）を警告する。
 
 ### Discord コマンド
 | コマンド | 種別 | 権限 | 説明 |
@@ -638,6 +668,7 @@ curl http://localhost:8080/health/full | jq
 |:---|:---|
 | `--starter` | 対話式セットアップウィザード（`.env` を生成） |
 | `--merge_env [--yes]` | `.env` へ不足項目を追加 |
+| `--test_yomiage` | 読み上げテンプレートのテスト再生。Discord に接続せず、引数なしで全項目の展開例を一覧、`<項目名>` でその項目を実際に音声再生、`all` で全項目、`--blank <タグ>` でタグを空にした場合、`--no-play` で文だけ表示 |
 | `--doctor` | 起動前の自己診断（Python・依存パッケージ・`.env` の必須項目・`.env.yomiage` の書式ミスと展開例・音声/GIS/ダッシュボードの前提条件・二重起動）。読み取り専用で外部通信なし。NG があれば終了コード 1 |
 | `--check_env` | `.env.example` とコードの整合性チェック |
 | `--audit_deps` | `requirements.lock` の版ずれ確認と既知の脆弱性の照合（要 `pip install pip-audit`） |
@@ -731,6 +762,12 @@ python3 -m pytest tests/ -q
 | `test_quake_test_input.py` | `--test_quake` の気象庁JSON／Quake.One入力・観測点名の「＊」照合・代替取得の既定の取得元 |
 | `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
 | `test_env_writer.py` | `.env` の指定キーだけの安全な書き換え（行の保持・アトミック書き込み・拒否する値） |
+| `test_channels.py` | 通知チャンネルの複数指定（解析・同時送信・再送との整合・設定の読み込み） |
+| `test_notify_enable.py` | 通知種類ごとの ON/OFF（EEW・地震情報・火山） |
+| `test_webhook_event_urls.py` | Webhook の種別別 URL・区切り・重複 |
+| `test_yomiage_test.py` | `--test_yomiage`（一覧・再生・引数・実際のプレーヤー起動経路） |
+| `test_web_static.py` | ダッシュボードの静的配信（許可リスト・`.env` を狙うパス探索の拒否・304 でのヘッダー維持・CSP 適合の静的点検） |
+| `test_dashboard_security.py` | 実際のダッシュボードを起動して、秘密が返らないこと・全応答のヘッダー・認証が静的ファイルにも効くことを確認 |
 | `test_webhook_notify.py` | Webhook 通知（URL 検証・Embed 変換・再送・複数宛先・種別フィルター・Discord 送信との独立性） |
 | `test_runtime_settings.py` | 再起動不要の設定変更（入力解釈・保存失敗時・再起動後の読み戻し）と `/qtl_config` コマンド |
 | `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
@@ -818,6 +855,7 @@ QTL_Bot/
 ├── pref_region_map.json      府県予報区名 → 地方予報区名（EEWの集約表示）
 ├── epsp_area.csv             P2P地震情報の地域コード → 地域名
 ├── hokkaido_bosaitaiou_area.png / nankai_bosaitaiou_area.png   後発地震・南海トラフ情報の区域図
+├── web/                      ダッシュボードの画面（HTML・CSS・JS。web/vendor/ に Chart.js・Leaflet を同梱）
 ├── cogs/
 │   ├── apm.py                ApmCog: Mackerel APM 連携
 │   ├── audio_shared.py       AudioCog: 音声読み上げ・MP3再生の実体（EewCog/QuakeInfoCog が共有）
@@ -843,7 +881,10 @@ QTL_Bot/
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
 │   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
 │   ├── discord_send.py          Discord 送信の再送ヘルパー（一時的な失敗のみ再送）
-│   ├── webhook_notify.py        Webhook 通知（Discord / Slack・複数宛先）
+│   ├── webhook_notify.py        Webhook 通知（Discord / Slack・複数宛先・種別別の宛先）
+│   ├── channels.py           通知チャンネルの複数指定（カンマ区切り）・複数チャンネルへの同時送信
+│   ├── web_static.py         ダッシュボードの静的ファイル配信（許可リスト方式）・セキュリティヘッダー
+│   ├── yomiage_test.py       --test_yomiage（読み上げテンプレートのテスト再生）
 │   ├── runtime_settings.py      再起動不要で変更できる設定の定義・現在値・変更処理（/qtl_config）
 │   ├── env_writer.py            .env の指定キーだけを安全に書き換える
 │   ├── dependency_audit.py      --audit_deps（版ずれ確認・脆弱性照合）
