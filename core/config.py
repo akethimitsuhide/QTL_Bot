@@ -335,6 +335,7 @@ YOMI_EEW_FIRST_FORECAST = _getenv_nonempty("YOMI_EEW_FIRST_FORECAST", "")
 YOMI_EEW_UPDATE_WARN = _getenv_nonempty("YOMI_EEW_UPDATE_WARN", "")
 YOMI_EEW_UPDATE_INTENSITY = _getenv_nonempty("YOMI_EEW_UPDATE_INTENSITY", "")
 YOMI_EEW_UPDATE_HYPO = _getenv_nonempty("YOMI_EEW_UPDATE_HYPO", "")
+YOMI_EEW_CANCEL = _getenv_nonempty("YOMI_EEW_CANCEL", "")
 
 # 地震情報 読み上げテンプレート（同上）
 YOMI_QUAKE_SCALE_PROMPT = _getenv_nonempty("YOMI_QUAKE_SCALE_PROMPT", "")

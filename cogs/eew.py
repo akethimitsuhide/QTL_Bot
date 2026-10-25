@@ -55,7 +55,7 @@ from core.config import (
     ENABLE_KYOSHIN,
     EEW_REGION_COLLAPSE_THRESHOLD,
     YOMI_EEW_FIRST_WARN, YOMI_EEW_FIRST_FORECAST, YOMI_EEW_UPDATE_WARN,
-    YOMI_EEW_UPDATE_INTENSITY, YOMI_EEW_UPDATE_HYPO,
+    YOMI_EEW_UPDATE_INTENSITY, YOMI_EEW_UPDATE_HYPO, YOMI_EEW_CANCEL,
 )
 from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP, collapse_regions_if_needed
 from core.yomiage import EEW_DEFAULTS, EEW_TAGS, TemplateSet, build_eew_values
@@ -94,6 +94,7 @@ _YOMI = TemplateSet(
         "EEW_UPDATE_WARN": YOMI_EEW_UPDATE_WARN,
         "EEW_UPDATE_INTENSITY": YOMI_EEW_UPDATE_INTENSITY,
         "EEW_UPDATE_HYPO": YOMI_EEW_UPDATE_HYPO,
+        "EEW_CANCEL": YOMI_EEW_CANCEL,
     },
     warn=logger.warning,
 )
@@ -468,6 +469,10 @@ class EewCog(commands.Cog, AudioClientMixin):
                     self.monitored_event_id = None
                     if self.eew_monitor_timeout_task:
                         self.eew_monitor_timeout_task.cancel()
+                # キャンセル報の読み上げ（EEW_CANCEL。警報の読み上げと同じ高優先度）
+                await self.speak_local(
+                    _YOMI.render("EEW_CANCEL", build_eew_values(data, [])), 1
+                )
                 # キャンセル音（eewC）。play_eew_sound にキャンセル用の分岐があるが、
                 # ここで return するため従来は到達しない死んだコードだった
                 await self.play_eew_sound(data)

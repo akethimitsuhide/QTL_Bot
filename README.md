@@ -385,6 +385,7 @@ python3 bot.py
 | `YOMI_EEW_UPDATE_WARN` | 続報: 警報の対象地域が増えた時 |
 | `YOMI_EEW_UPDATE_INTENSITY` | 続報: 予想最大震度が変わった時 |
 | `YOMI_EEW_UPDATE_HYPO` | 続報: 震源（震央地名）が変わった時 |
+| `YOMI_EEW_CANCEL` | キャンセル報（既定: 「先程の緊急地震速報はキャンセルされました。」） |
 | `YOMI_QUAKE_SCALE_PROMPT` | 地震情報: 震度速報 |
 | `YOMI_QUAKE_DESTINATION` | 地震情報: 震源に関する情報 |
 | `YOMI_QUAKE_SCALE_DEST_STRONG` | 地震情報: 震度・震源に関する情報／各地の震度に関する情報（最大震度3以上） |
@@ -422,6 +423,7 @@ python3 bot.py
 | `LOG_BACKUP_COUNT` | 7 | ローテーション保持ファイル数 |
 | `LOG_DUPLICATE_THRESHOLD` | 60 | 同一メッセージの重複抑制時間（秒）。ERROR 以上は常に出力 |
 | `LOG_SUPPRESS_HTTP_SUCCESS` | true | aiohttp.access の 2xx 成功ログを抑制 |
+| `KYOSHIN_LOG_LEVEL` | INFO | 強震モニタ・揺れ検知のログだけの最低レベル。`WARNING` で INFO（イベントのマージ・初回通知など）を出さない。他のログには影響しない |
 
 ### Web Dashboard 設定
 | 変数名 | 既定値 | 説明 |

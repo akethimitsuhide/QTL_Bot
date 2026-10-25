@@ -53,3 +53,48 @@ def test_custom_template_is_applied(monkeypatch):
     cog = _cog()
     _run(cog, {"EventID": "E1", "Serial": 1, "Hypocenter": "宮城県沖", "MaxIntensity": "4", "Magnitude": 6.1})
     assert cog.spoken == [(3, "宮城県沖、マグニチュード6.1、")]     # 深さ不明の [ ] は省略される
+
+
+# ── キャンセル報の読み上げ（EEW_CANCEL） ──
+def _cancel_cog(monkeypatch):
+    cog = object.__new__(eew_mod.EewCog)
+    cog.spoken, cog.sounds, cog.sent = [], [], []
+    cog.eew_channel = cog.p2p_eew_channel = cog.channel = object()
+    cog.recent_eews, cog.recent_eews_max_size = {}, 50
+    cog.eew_state, cog._eew_state_max_size = {}, 50
+    cog.monitored_event_id = None
+    cog.eew_monitor_timeout_task = None
+
+    async def speak_local(text, priority=2):
+        cog.spoken.append((priority, text))
+
+    async def play_eew_sound(data, cumulative_warn_areas=None):
+        cog.sounds.append(data.get("isCancel"))
+
+    async def fake_send(channel, **kw):
+        cog.sent.append(kw["embed"].description)
+
+    cog.speak_local = speak_local
+    cog.play_eew_sound = play_eew_sound
+    monkeypatch.setattr(eew_mod, "send_with_retry", fake_send)
+    monkeypatch.setattr(eew_mod, "record_delivery", lambda *a, **k: None)
+    monkeypatch.setattr(eew_mod, "record_notification", lambda *a, **k: None)
+    monkeypatch.setattr(eew_mod.rs, "get", lambda key, *a, **k: True, raising=False)
+    return cog
+
+
+def test_cancel_report_is_spoken(monkeypatch):
+    cog = _cancel_cog(monkeypatch)
+    # P2P のキャンセル報は震源などを含まない最小形（EventID・Serial・isCancel のみ）でも読み上げる
+    asyncio.run(cog.notify_eew({"EventID": "E1", "Serial": 2, "isCancel": True, "OriginTime": "不明"}))
+    assert cog.spoken == [(1, "先程の緊急地震速報はキャンセルされました。")]
+    assert cog.sent and "キャンセルされました" in cog.sent[0]
+    assert cog.sounds == [True]            # 従来どおりキャンセル音も鳴らす
+
+
+def test_cancel_custom_template(monkeypatch):
+    monkeypatch.setattr(eew_mod, "_YOMI", TemplateSet(
+        EEW_DEFAULTS, EEW_TAGS, {"EEW_CANCEL": "{震源}の緊急地震速報は取り消されました。"}))
+    cog = _cancel_cog(monkeypatch)
+    asyncio.run(cog.notify_eew({"EventID": "E1", "Serial": 2, "isCancel": True, "Hypocenter": "三陸沖"}))
+    assert cog.spoken == [(1, "三陸沖の緊急地震速報は取り消されました。")]
