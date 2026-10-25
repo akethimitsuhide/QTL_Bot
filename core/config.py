@@ -105,11 +105,25 @@ def _first(ids: list[int]) -> int:
     return ids[0] if ids else 0
 
 
+_BOOL_TRUE = ("1", "true", "yes")
+_BOOL_FALSE = ("0", "false", "no", "off")
+
+
 def _env_bool(key: str, default: bool) -> bool:
     v = os.getenv(key, "")
     if not v:
         return default
-    return v.strip().lower() in ("1", "true", "yes")
+    s = v.strip().lower()
+    if s in _BOOL_TRUE:
+        return True
+    # 【2026-10-26 追加】"ture" のような綴りミスは、従来は黙って False（無効）扱いになり、
+    # 機能が動かない原因に気づけなかった。判定結果は変えず、認識できない値だけ警告する。
+    if s and s not in _BOOL_FALSE:
+        logging.getLogger("QTLBot").warning(
+            f"環境変数 {key}={v!r} は真偽値として認識できないため false 扱いにします "
+            f"(有効にするには true / 1 / yes、無効にするには false / 0 / no / off)"
+        )
+    return False
 
 
 def _env_hex_color(key: str, default: int) -> int:
