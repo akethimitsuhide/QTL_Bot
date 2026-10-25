@@ -148,6 +148,11 @@ LOG_LEVEL_CONSOLE         = os.getenv("LOG_LEVEL_CONSOLE", LOG_LEVEL)
 LOG_DUPLICATE_THRESHOLD   = int(os.getenv("LOG_DUPLICATE_THRESHOLD", "60"))
 LOG_SUPPRESS_HTTP_SUCCESS = os.getenv("LOG_SUPPRESS_HTTP_SUCCESS", "true").lower() == "true"
 
+# 【2026-10-26 追加】強震モニタ・揺れ検知（kyoshin*.py）のログだけに適用する最低ログレベル。
+# 既定 INFO は従来どおり。WARNING にすると揺れ検知の INFO ログ（イベントのマージ・初回通知など）を
+# 出さず、WARNING / ERROR のみ残す。他モジュールのログには影響しない。
+KYOSHIN_LOG_LEVEL         = os.getenv("KYOSHIN_LOG_LEVEL", "INFO")
+
 # 【2026-08-29 追加】ログファイルの出力先パス。
 # 従来は core/logging_setup.py 内で "qtlbot.log"（相対パス）を直接
 # 指定していたため、systemdサービス化等で WorkingDirectory の設定を

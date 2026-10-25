@@ -21,7 +21,7 @@ from core.config import (
     LOG_MAX_BYTES, LOG_BACKUP_COUNT,
     LOG_LEVEL_FILE, LOG_LEVEL_CONSOLE,
     LOG_DUPLICATE_THRESHOLD, LOG_SUPPRESS_HTTP_SUCCESS,
-    LOG_FILE_PATH,
+    LOG_FILE_PATH, KYOSHIN_LOG_LEVEL,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -56,6 +56,29 @@ class _RateLimitedHandler(logging.Handler):
             cutoff = now - self._threshold * 10
             self._cache = {k: v for k, v in self._cache.items() if v > cutoff}
         self._inner.emit(record)
+
+
+class _KyoshinLogFilter(logging.Filter):
+    """強震モニタ・揺れ検知（kyoshin*.py）のログのうち、指定レベル未満を抑制するフィルター。
+
+    強震モニタ系のモジュールはすべて同じロガー "QTLBot" を使うため、ロガー名ではなく
+    ログの発生元ファイル名（kyoshin_monitor.py / kyoshin_detector.py など）で判定する。
+    """
+
+    def __init__(self, min_level: int):
+        super().__init__()
+        self._min_level = min_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+            record.filename.startswith("kyoshin") and record.levelno < self._min_level
+        )
+
+
+def _parse_level(name: str, default: int = logging.INFO) -> int:
+    """ログレベル名（"WARNING" など）を数値へ。未知の値は default。"""
+    level = getattr(logging, str(name).strip().upper(), None)
+    return level if isinstance(level, int) else default
 
 
 class _SuppressHttpSuccessFilter(logging.Filter):
@@ -152,6 +175,14 @@ def setup_logging() -> None:
     logger.addHandler(console_handler)
     logger.setLevel(logging.DEBUG)  # ハンドラー側でフィルタリング
     logger.propagate = False        # ルートロガーへの伝播を止める（重複出力防止の安全策）
+
+    # 揺れ検知（kyoshin*.py）のログだけ別の最低レベルで絞る。setup_logging() を
+    # 再度呼んでもフィルターが重複しないよう、既存分を外してから付ける。
+    for f in [f for f in logger.filters if isinstance(f, _KyoshinLogFilter)]:
+        logger.removeFilter(f)
+    kyoshin_level = _parse_level(KYOSHIN_LOG_LEVEL)
+    if kyoshin_level > logging.INFO:
+        logger.addFilter(_KyoshinLogFilter(kyoshin_level))
 
     if LOG_SUPPRESS_HTTP_SUCCESS:
         access_logger = logging.getLogger("aiohttp.access")
