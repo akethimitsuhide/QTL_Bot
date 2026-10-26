@@ -62,6 +62,7 @@ def _cancel_cog(monkeypatch):
     cog.eew_channel = cog.p2p_eew_channel = cog.channel = object()
     cog.recent_eews, cog.recent_eews_max_size = {}, 50
     cog.eew_state, cog._eew_state_max_size = {}, 50
+    cog._last_eew_report = {}
     cog.monitored_event_id = None
     cog.eew_monitor_timeout_task = None
 

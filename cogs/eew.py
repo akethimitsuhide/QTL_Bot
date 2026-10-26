@@ -159,6 +159,10 @@ class EewCog(commands.Cog, AudioClientMixin):
         #   縮小することはなく、常に「今までで一番広い範囲」を保持する。
         self.eew_state: dict[str, dict] = {}
         self._eew_state_max_size = 50
+        # 【2026-10-27追加】EventIDごとの「直近の（キャンセル報ではない）報」の震源要素。
+        # キャンセル報の地図描画用。recent_eews / eew_state は300秒で破棄され、
+        # recent_eews はキャンセル報のdataで上書きもされるため、別に保持する。
+        self._last_eew_report: dict[str, dict] = {}
         self.monitored_event_id = None
         # 【2026-10-05】EEW発表中の強震モニタ・振動レベル通知は KyoshinMonitorCog に集約した
         # （monitored_event_id を見て通知する）。このタスクは、最終報・キャンセル報が届かない場合に
@@ -356,6 +360,41 @@ class EewCog(commands.Cog, AudioClientMixin):
         """
         return extract_alert_regions(data, REGION_MAP)
 
+    # キャンセル報の地図に使う「直近の報」を保持する時間（秒）。recent_eews の300秒より長く取り、
+    # キャンセル報がやや遅れて届いても震源を描けるようにする。
+    _LAST_REPORT_TTL_SEC = 1800
+
+    def _remember_last_eew_report(self, event_id, data: dict, serial: int, now: float) -> None:
+        """
+        キャンセル報ではない報を受けるたびに、EventIDごとの直近の震源要素を保持する。
+        Serial が保持中のものより小さい（順序が前後して届いた）報では上書きしない。
+        """
+        if not event_id:
+            return
+        self._last_eew_report = {
+            eid: v for eid, v in self._last_eew_report.items()
+            if now - v["at"] < self._LAST_REPORT_TTL_SEC
+        }
+        prev = self._last_eew_report.get(event_id)
+        if prev is not None and serial < prev["serial"]:
+            return
+        while event_id not in self._last_eew_report and len(self._last_eew_report) >= self.recent_eews_max_size:
+            oldest = min(self._last_eew_report, key=lambda eid: self._last_eew_report[eid]["at"])
+            del self._last_eew_report[oldest]
+
+        lat = data.get("Latitude", -200)
+        lon = data.get("Longitude", -200)
+        has_coord = (
+            isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+            and lat != -200 and lon != -200
+        )
+        self._last_eew_report[event_id] = {
+            "serial": serial,
+            "at": now,
+            "lonlat": (lon, lat) if has_coord else None,
+            "is_plum": bool(data.get("isAssumption", False)),
+        }
+
     def _update_cumulative_warn_areas(self, event_id: str, data: dict, now: float) -> set:
         """
         EventIDごとに、警報対象地域の「これまでで一番広い範囲」を保持・更新する。
@@ -441,6 +480,8 @@ class EewCog(commands.Cog, AudioClientMixin):
                 del self.eew_state[oldest_eid]
 
             cumulative_warn_areas = self._update_cumulative_warn_areas(event_id, data, now)
+            if not is_cancel:
+                self._remember_last_eew_report(event_id, data, serial, now)
 
             if start_monitor and serial == 1 and self.monitored_event_id is None and ENABLE_KYOSHIN:
                 self.monitored_event_id = event_id
@@ -461,7 +502,23 @@ class EewCog(commands.Cog, AudioClientMixin):
                 embed.description = f"{origin_line}先程の緊急地震速報はキャンセルされました。"
                 if is_test:
                     embed.set_footer(text="※これはテスト通知です。")
-                await send_with_retry(channel, _label="EEW", embed=embed)
+
+                # 【2026-10-27追加】同じEventIDの直近の報（キャンセル報の直前に発表された報）の
+                # 震源要素で、震源のバツ印（PLUM法はドーナツ）だけの地図を描画する。
+                # 地域ごとの予想震度・警報地域の塗りつぶしは行わない（取り消された速報の
+                # 塗り分けを残すと誤解を招くため）。保持している報が無い（起動前の報・
+                # 保持期限切れ）、または震源の座標が無い場合は、地図なしで通知する。
+                gis_images = []
+                last_report = self._last_eew_report.get(event_id)
+                if last_report and last_report["lonlat"]:
+                    gis_images.append(await asyncio.to_thread(
+                        render_shindo_map,
+                        region_shindo=None,
+                        hypocenter_lonlat=last_report["lonlat"],
+                        is_plum=last_report["is_plum"],
+                        enlarge_hypocenter_mark=True,
+                    ))
+                await send_with_retry(channel, _label="EEW", **build_gis_message_kwargs(gis_images, embed))
                 if not is_test:
                     record_delivery(True, "EEW")
                     record_notification("EEW", title, data.get("Hypocenter", ""))
