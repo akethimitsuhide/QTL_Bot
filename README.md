@@ -337,7 +337,9 @@ python3 bot.py
 | `KYOSHIN_DEBUG_SAVE_IMAGE` | false | イベント確定時の元画像をローカル保存するか（事後検証用） |
 | `KYOSHIN_DEBUG_IMAGE_DIR` | ./kyoshin_debug_images | デバッグ画像の保存先ディレクトリ |
 | `KYOSHIN_SLOW_FETCH_THRESHOLD_SEC` | 0.5 | 画像のデコード＋観測点サンプリングの所要時間がこの秒数を超えたらWARNINGログを出す（Raspberry Pi等でのCPU負荷の把握用） |
-| `KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC` | 300 | 画像デコード失敗（想定内の一時的事象）のログをこの秒数ごとに件数集約して1回だけWARNINGに出す（詳細は毎回DEBUGに出る） |
+| `KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC` | 300 | 不正な画像（配信元が返す0バイト・途中で切れたGIF。実測で約1%）の集計ウィンドウ（秒）。このウィンドウ内の「不正件数/取得件数」が下の2つの閾値を満たしたときだけWARNINGを出す（それ未満はDEBUGの集計1行のみ。1件ごとの詳細は常にDEBUG） |
+| `KYOSHIN_DECODE_FAILURE_WARN_RATIO` | 0.2 | WARNINGを出す不正画像の割合（0.0〜1.0）。通常の散発では出ず、配信停止・仕様変更など連続的な異常のときだけ出る |
+| `KYOSHIN_DECODE_FAILURE_WARN_MIN_COUNT` | 5 | WARNINGを出す最小の不正件数（取得件数が少ないウィンドウでの誤警告防止） |
 | `KYOSHIN_DETECT_VIBRATION_SOUND` | true | 強震モニタの揺れ検知の通知時に、EEW発表時の通知と同じ振動レベル音（`lv100`/`lv1000`/`lv2000`）を鳴らすか（EEW発表時の通知では常に鳴らす）。判定基準は`core.kyoshin_shared.vibration_tier`で共通化している。既に音声再生待ちがある間は積み増さない。音は振動レベルの受信1回につき1回（`KYOSHIN_RECV_VIBRATION_INTERVAL_SEC` の間隔）で、通知ループの間隔には従わない |
 
 ### 強震モニタ 誤検知対策の調整値（`.env.kyoshin`）

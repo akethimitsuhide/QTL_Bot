@@ -113,6 +113,7 @@ from core.config import (
     KYOSHIN_SLOW_FETCH_THRESHOLD_SEC,
     KYOSHIN_PATCH_RADIUS, KYOSHIN_PATCH_AGGREGATION,
     KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC,
+    KYOSHIN_DECODE_FAILURE_WARN_RATIO, KYOSHIN_DECODE_FAILURE_WARN_MIN_COUNT,
     KYOSHIN_DETECT_VIBRATION_SOUND,
 )
 from core.audio import AudioClientMixin
@@ -124,7 +125,7 @@ from core.kyoshin_stations import (
 )
 from core.kyoshin_shared import (
     DualImageFetcher, fetch_vibration_level, shindo_to_color, vibration_to_color,
-    vibration_tier, VIBRATION_TIER_MP3,
+    vibration_tier, VIBRATION_TIER_MP3, describe_image_problem,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -227,15 +228,15 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         # 遅延をINFOログに1回だけ出すための管理（_on_event_endedで削除）。
         self._notified_events: dict[str, float] = {}
 
-        # 【2026-09-09 追加】画像デコード失敗ログの集約カウンタ。
-        # _log_decode_failure 参照。1秒間隔ポーリングでは画像が生成
-        # 途中のタイミングで捕まることがあり、想定内の一時的事象として
-        # 比較的頻繁に発生しうる。毎回WARNINGを出すとログノイズになり、
-        # 本当に見るべき異常（強震モニタの誤検知やWebSocket切断等）を
-        # 埋もれさせるリスクがあるため、一定間隔で件数をまとめて
-        # 1回だけWARNINGを出す方式にした（詳細は毎回DEBUGに出す）。
-        self._decode_failure_count_in_window = 0
-        self._decode_failure_window_start_mono: float | None = None
+        # 【2026-09-09 追加／2026-10-27 変更】不正な画像の集計ウィンドウ。
+        # _record_decode_result 参照。配信元(NIED)は HTTP 200 のまま0バイトや
+        # 途中で切れたGIFを散発的に返す（実測で約1%）。毎回WARNINGを出すと
+        # ログノイズになるため、ウィンドウ内の「不正件数/取得件数」を集計し、
+        # 閾値を超えたとき（＝連続的な異常のとき）だけWARNINGを出す。
+        self._decode_window_start_mono: float | None = None
+        self._decode_window_attempts = 0
+        self._decode_window_failures = 0
+        self._decode_window_last_reason = ""
 
         # !status / /qtl_status・Web Dashboard から他Cogと統一的に参照
         # できるよう、他の受信系Cogと同じ _last_recv / _recv_count の
@@ -443,35 +444,47 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
     # ===============================
     # 画像取得・解析（検知パイプライン）
     # ===============================
-    def _log_decode_failure(self, exc: Exception) -> None:
+    def _record_decode_result(self, failure: str | None) -> None:
         """
-        画像デコード失敗（KYOSHIN_RECV_IMAGE_INTERVAL_SEC間隔で発生しうる、
-        想定内の一時的事象）のログを、KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC
-        秒ごとに1回だけWARNINGへ集約して出す。ウィンドウ内の詳細は
-        毎回DEBUGへ出すため、DEBUGログを有効にすれば従来通り1件ずつ
-        確認できる。
+        画像1枚ぶんのデコード結果（failure=None なら成功、文字列なら失敗理由）を記録し、
+        KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC 秒ごとのウィンドウで集計する。
+
+        【2026-10-27変更】配信元(NIED)は HTTP 200 のまま0バイトや途中で切れた GIF を
+        散発的に返す（実測で約1%。再取得しても直らない配信元側の事象）。散発は想定内なので
+        1件ごとはDEBUGのみ。ウィンドウ末に「不正件数 >= WARN_MIN_COUNT かつ
+        不正割合 >= WARN_RATIO」のときだけWARNINGを出す（配信停止・仕様変更など連続的な
+        異常の検知用）。それ未満はDEBUGの集計1行のみ。
         """
         now_mono = time.monotonic()
-        self._decode_failure_count_in_window += 1
+        if self._decode_window_start_mono is None:
+            self._decode_window_start_mono = now_mono
+        self._decode_window_attempts += 1
+        if failure is not None:
+            self._decode_window_failures += 1
+            self._decode_window_last_reason = failure
+            logger.debug(f"KyoshinMonitorCog: 画像が不正です: {failure}")
 
-        window_elapsed = (
-            None if self._decode_failure_window_start_mono is None
-            else now_mono - self._decode_failure_window_start_mono
-        )
-        if window_elapsed is None or window_elapsed >= KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC:
-            count = self._decode_failure_count_in_window
-            if count > 1:
-                logger.warning(
-                    f"KyoshinMonitorCog: 画像デコードに失敗しました（直近"
-                    f"{KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC}秒間で{count}回、"
-                    f"最新のエラー: {exc}）"
-                )
+        if now_mono - self._decode_window_start_mono < KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC:
+            return
+
+        attempts = self._decode_window_attempts
+        failures = self._decode_window_failures
+        if failures:
+            ratio = failures / attempts
+            summary = (
+                f"KyoshinMonitorCog: 直近{KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC}秒で"
+                f"画像{attempts}枚中{failures}枚（{ratio:.1%}）が不正でした。"
+                f"最新の理由: {self._decode_window_last_reason}"
+            )
+            if (failures >= KYOSHIN_DECODE_FAILURE_WARN_MIN_COUNT
+                    and ratio >= KYOSHIN_DECODE_FAILURE_WARN_RATIO):
+                logger.warning(summary + "（配信元の障害が続いている可能性があります）")
             else:
-                logger.warning(f"KyoshinMonitorCog: 画像デコードに失敗しました: {exc}")
-            self._decode_failure_window_start_mono = now_mono
-            self._decode_failure_count_in_window = 0
-        else:
-            logger.debug(f"KyoshinMonitorCog: 画像デコードに失敗しました（集約中）: {exc}")
+                logger.debug(summary)
+        self._decode_window_start_mono = now_mono
+        self._decode_window_attempts = 0
+        self._decode_window_failures = 0
+        self._decode_window_last_reason = ""
 
     async def _fetch_current_shindo_map(self) -> dict[str, float]:
         """
@@ -533,11 +546,20 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
             return {}
 
         t_decode_start = time.perf_counter()
-        try:
-            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except Exception as e:
-            self._log_decode_failure(e)
+        # 【2026-10-27】デコード前に「0バイト」「GIFでない」を理由付きで検出する。
+        # 末尾欠け等は Pillow の例外に任せ、受信サイズと終端の有無を理由に添える。
+        failure = describe_image_problem(image_bytes)
+        img = None
+        if failure is None:
+            try:
+                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            except Exception as e:
+                tail = "GIF終端あり" if image_bytes.endswith(b";") else "GIF終端なし（末尾が欠けています）"
+                failure = f"{e}（受信{len(image_bytes)}バイト、{tail}）"
+        if failure is not None:
+            self._record_decode_result(f"{failure} url={url}")
             return {}
+        self._record_decode_result(None)
 
         pixels = img.load()
         w, h = img.size

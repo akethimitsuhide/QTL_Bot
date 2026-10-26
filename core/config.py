@@ -655,14 +655,18 @@ KYOSHIN_DEBUG_IMAGE_DIR      = os.getenv("KYOSHIN_DEBUG_IMAGE_DIR", "./kyoshin_d
 # 気づきやすいWARNINGレベルでも出す、という2段構えにしている。
 KYOSHIN_SLOW_FETCH_THRESHOLD_SEC = float(os.getenv("KYOSHIN_SLOW_FETCH_THRESHOLD_SEC", "0.5"))
 
-# 【2026-09-09 追加】画像デコード失敗（Image.open()の例外）のログを
-# 集約する間隔（秒）。1秒間隔ポーリングでは、配信元の画像が生成途中の
-# タイミングで捕まり一時的にデコードへ失敗することが想定内の頻度で
-# 起こりうる。毎回WARNINGを出すとログノイズになり、本当に見るべき
-# 異常を埋もれさせるリスクがあるため、この秒数ごとに件数をまとめて
-# 1回だけWARNINGを出す（詳細は毎回DEBUGに出る。
-# cogs/kyoshin_monitor.py._log_decode_failure 参照）。
+# 【2026-09-09 追加／2026-10-27 変更】不正な画像（0バイト・途中で切れたGIF等）の
+# 集計ウィンドウ（秒）。配信元(NIED)は HTTP 200 のまま不正な画像を散発的に
+# 返す（実測で約1%、再取得しても直らない）。毎回WARNINGを出すとログノイズで
+# 本当の異常が埋もれるため、このウィンドウ内の「不正件数 / 取得件数」を集計し、
+# 下記の閾値を超えたときだけWARNINGを出す（それ未満はDEBUGの集計1行のみ。
+# 1件ごとの詳細は常にDEBUG。cogs/kyoshin_monitor.py._record_decode_result 参照）。
 KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC = _env_int("KYOSHIN_DECODE_FAILURE_LOG_INTERVAL_SEC", 300)
+# WARNINGを出す不正画像の割合（0.0〜1.0）。既定0.2＝ウィンドウ内の2割以上。
+# 通常の散発（約1〜4%）では出ず、配信停止・仕様変更など連続的な異常のときだけ出る。
+KYOSHIN_DECODE_FAILURE_WARN_RATIO = max(0.0, min(1.0, _env_float("KYOSHIN_DECODE_FAILURE_WARN_RATIO", 0.2)))
+# WARNINGを出す最小の不正件数（取得件数が少ないウィンドウでの誤警告防止）。
+KYOSHIN_DECODE_FAILURE_WARN_MIN_COUNT = max(1, _env_int("KYOSHIN_DECODE_FAILURE_WARN_MIN_COUNT", 5))
 
 # ===============================
 # EEW / API エラー挙動設定

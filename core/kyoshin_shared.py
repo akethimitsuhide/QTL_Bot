@@ -93,6 +93,24 @@ _shindo_estimator = KyoshinImageAnalyzer(
 )
 
 
+def describe_image_problem(data: bytes) -> str | None:
+    """
+    強震モニタ画像(GIF)の受信バイト列を、デコード前に簡易検査する。
+
+    【2026-10-27追加】配信元(NIED)が HTTP 200 のまま「0バイトの本体」や、途中で
+    切れた GIF を返すことが実測で確認された（再取得しても直らない）。従来は
+    Pillow の例外メッセージ（"cannot identify image file <_io.BytesIO object at 0x..>"）
+    しか残らず、原因が分からなかった。ここでは「空」「GIFでない」だけを確実な
+    異常として理由付きで返す。末尾欠け等の判定は Pillow に任せる（有効な GIF を
+    誤って弾かないため）。正常と思われる場合は None。
+    """
+    if not data:
+        return "0バイトの応答（配信元が空の本体を返しました）"
+    if not data.startswith(b"GIF8"):
+        return f"GIF形式ではありません（{len(data)}バイト、先頭={data[:4]!r}）"
+    return None
+
+
 def estimate_max_shindo_from_image(image_bytes: bytes) -> float | None:
     """
     jma_s画像のバイト列から、画面内の最大実震度を推定する。
