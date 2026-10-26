@@ -407,6 +407,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
 
                 self._tsunami_observation_initialized = True
 
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            # 【2026-10-26修正】回線の一時断・DNS遅延などのネットワークエラーは、次の周期で
+            # 自然に回復する想定内の事象。従来は下の汎用 except に落ちて ERROR（全文トレース）
+            # となり、管理者チャンネルへの誤エラー通知も起きていた。USGS・火山と同様に
+            # WARNING（トレースなし）で記録する。
+            logger.warning(f"Fetch Tsunami Observation: ネットワークエラー（次回の周期で再試行します）: {type(e).__name__}: {e}")
         except Exception:
             logger.error(f"Fetch Tsunami Observation エラー:\n{traceback.format_exc()}")
 

@@ -221,6 +221,12 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                     self.last_long_period_id = event_id
                     await self.notify_long_period(latest)
 
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            # 【2026-10-26修正】回線の一時断・DNS遅延などのネットワークエラーは、次の周期で
+            # 自然に回復する想定内の事象。従来は下の汎用 except に落ちて ERROR（全文トレース）
+            # となり、管理者チャンネルへの誤エラー通知も起きていた。USGS・火山と同様に
+            # WARNING（トレースなし）で記録する。
+            logger.warning(f"Fetch Long-Period: ネットワークエラー（次回の周期で再試行します）: {type(e).__name__}: {e}")
         except Exception:
             logger.error(f"Fetch Long-Period エラー:\n{traceback.format_exc()}")
 
@@ -291,6 +297,12 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
                 self._quake_advisory_initialized = True
 
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            # 【2026-10-26修正】回線の一時断・DNS遅延などのネットワークエラーは、次の周期で
+            # 自然に回復する想定内の事象。従来は下の汎用 except に落ちて ERROR（全文トレース）
+            # となり、管理者チャンネルへの誤エラー通知も起きていた。USGS・火山と同様に
+            # WARNING（トレースなし）で記録する。
+            logger.warning(f"Fetch Quake Advisory: ネットワークエラー（次回の周期で再試行します）: {type(e).__name__}: {e}")
         except Exception:
             logger.error(f"Fetch Quake Advisory エラー:\n{traceback.format_exc()}")
 
