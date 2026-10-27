@@ -83,6 +83,7 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 - **リソース監視**: 既定で1時間ごとに CPU・メモリ・ディスク使用率を記録し、ディスク使用率が80%以上で WARNING、90%以上で ERROR を出す。
 - **配信成功率**: 各 Cog の `channel.send()` の成否を記録し、直近24時間の成功率を `!status`・`GET /status` で確認できる。
 - **週間／月間ダイジェスト**: `DIGEST_ENABLED=true` で、先週／先月の通知件数を指定の曜日・時刻（または毎月1日）に投稿する。
+- **日次・週次の地震サマリー**: `QUAKE_SUMMARY_DAILY_ENABLE` / `QUAKE_SUMMARY_WEEKLY_ENABLE` で、前日（または直前7日）の地震の中身を要約して投稿する（国内の地震の件数・最大震度・最大M・震度別件数・主な地震・津波注意報以上を伴った地震・遠地地震の件数。週次は日別の推移も）。集計元は `qtlbot.log` の `QUAKE_RECORD_V1`（`core/quake_history_log.py`）で、**QTL_Bot が通知した地震のみ**が対象。ログのローテーションで集計期間のログが残っていない場合は、Embed の末尾にその旨を注記する。上のダイジェスト（通知種別ごとの件数）とは独立して動く。1つの地震の複数回の通知（震度速報→震源→各地の震度）は発生時刻でまとめて1件に数える。Bot が投稿時刻に停止していた回は投稿しない。
 - **APM（Mackerel 連携、既定無効）**: `APM_ENABLED=true` で OpenTelemetry（OTLP）経由で aiohttp の全 HTTP リクエストをトレースする。想定内の `TimeoutError`／`CancelledError` はエラー扱いにしない。実際のエンドポイント・ヘッダー名は [Mackerel 公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python)で必ず確認すること。
 - **通知履歴**: 地震情報・EEW・通知履歴は `qtlbot.log` に機械可読な1行（`QUAKE_RECORD_V1`／`EEW_RECORD_V1`／`NOTIF_RECORD_V1`）として記録し、再起動後も `GET /status/quake_history`・`/status/eew_history`・`/status/notifications`・`/quake_map` から閲覧できる（`LOG_BACKUP_COUNT` 世代分）。記録前の過去分は `python3 bot.py --backfill_quake_history` で P2P API から遡って補完できる。
 
@@ -300,6 +301,13 @@ python3 bot.py
 | `DIGEST_WEEKDAY` | 0 | weekly時のみ使用。投稿曜日（0=月曜〜6=日曜） |
 | `DIGEST_HOUR` | 9 | 投稿時刻（24時間制、0〜23） |
 | `DIGEST_CHANNEL_ID` | CHANNEL_ID | ダイジェスト投稿先チャンネル |
+| `QUAKE_SUMMARY_DAILY_ENABLE` | false | 日次の地震サマリー（前日1日分）を投稿する |
+| `QUAKE_SUMMARY_WEEKLY_ENABLE` | false | 週次の地震サマリー（直前7日分）を投稿する |
+| `QUAKE_SUMMARY_TIME` | 00:05 | 投稿時刻（`HH:MM`）。形式不正は 00:05。日次エラーサマリー（00:00）と重ならない既定 |
+| `QUAKE_SUMMARY_WEEKLY_WEEKDAY` | 0 | 週次の投稿曜日（0=月曜〜6=日曜）。範囲外は月曜 |
+| `QUAKE_SUMMARY_TOP_N` | 5 | 「主な地震」に載せる件数（1〜10） |
+| `QUAKE_SUMMARY_SKIP_EMPTY` | true | 日次で、通知した国内の地震が0件の日は投稿しない（週次は0件でも投稿する） |
+| `QUAKE_SUMMARY_CHANNEL_ID` | QUAKE_CHANNEL_ID → CHANNEL_ID | 地震サマリーの投稿先チャンネル |
 
 ### EWS（緊急警報放送）設定
 | 変数名 | 既定値 | 説明 |

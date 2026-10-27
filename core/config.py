@@ -269,6 +269,7 @@ ADMIN_CHANNEL_IDS     = _channel_ids("ADMIN_CHANNEL_ID")
 VOLCANO_CHANNEL_IDS   = _channel_ids("VOLCANO_CHANNEL_ID", "CHANNEL_ID")
 USGS_CHANNEL_IDS      = _channel_ids("USGS_CHANNEL_ID", "QUAKE_CHANNEL_ID", "CHANNEL_ID")
 DIGEST_CHANNEL_IDS    = _channel_ids("DIGEST_CHANNEL_ID", "CHANNEL_ID")
+QUAKE_SUMMARY_CHANNEL_IDS = _channel_ids("QUAKE_SUMMARY_CHANNEL_ID", "QUAKE_CHANNEL_ID", "CHANNEL_ID")
 
 EEW_CHANNEL_ID       = _first(EEW_CHANNEL_IDS)
 QUAKE_CHANNEL_ID     = _first(QUAKE_CHANNEL_IDS)
@@ -280,6 +281,7 @@ ADMIN_CHANNEL_ID     = _first(ADMIN_CHANNEL_IDS)
 VOLCANO_CHANNEL_ID   = _first(VOLCANO_CHANNEL_IDS)
 USGS_CHANNEL_ID      = _first(USGS_CHANNEL_IDS)
 DIGEST_CHANNEL_ID    = _first(DIGEST_CHANNEL_IDS)
+QUAKE_SUMMARY_CHANNEL_ID = _first(QUAKE_SUMMARY_CHANNEL_IDS)
 
 # ===============================
 # USGS 地震情報設定
@@ -959,6 +961,24 @@ DIGEST_INTERVAL = os.getenv("DIGEST_INTERVAL", "weekly")
 DIGEST_WEEKDAY  = _env_int("DIGEST_WEEKDAY", 0)
 # 投稿時刻（24時間制、0〜23）。monthly時は毎月1日のこの時刻に投稿する
 DIGEST_HOUR     = _env_int("DIGEST_HOUR", 9)
+
+# ===============================
+# 日次・週次の地震サマリー（2026-10-27〜）
+# ===============================
+# 地震の中身（最大震度・主な地震・震度別件数・日別の推移）を要約する。上のダイジェスト（通知種別ごとの
+# 件数）とは独立。集計元は qtlbot.log の QUAKE_RECORD_V1（core/quake_history_log.py）。
+# 日次は前日1日分、週次は直前の7日分（どちらも暦日の区切り）。既定は無効。
+QUAKE_SUMMARY_DAILY_ENABLE  = _env_bool("QUAKE_SUMMARY_DAILY_ENABLE", False)
+QUAKE_SUMMARY_WEEKLY_ENABLE = _env_bool("QUAKE_SUMMARY_WEEKLY_ENABLE", False)
+# 投稿時刻（"HH:MM"）。形式不正は 00:05。日次エラーサマリー（00:00）と重ならない既定にしている
+QUAKE_SUMMARY_TIME          = os.getenv("QUAKE_SUMMARY_TIME", "00:05")
+# 週次の投稿曜日（0=月曜 〜 6=日曜）。範囲外は月曜
+_quake_summary_weekday      = _env_int("QUAKE_SUMMARY_WEEKLY_WEEKDAY", 0)
+QUAKE_SUMMARY_WEEKLY_WEEKDAY = _quake_summary_weekday if 0 <= _quake_summary_weekday <= 6 else 0
+# 「主な地震」に載せる件数（1〜10）
+QUAKE_SUMMARY_TOP_N         = max(1, min(10, _env_int("QUAKE_SUMMARY_TOP_N", 5)))
+# 日次で、通知した国内の地震が0件の日は投稿しない（週次は0件でも投稿する）
+QUAKE_SUMMARY_SKIP_EMPTY    = _env_bool("QUAKE_SUMMARY_SKIP_EMPTY", True)
 
 # ===============================
 # P2P地震感知情報（code=9611）設定（2026-08〜）

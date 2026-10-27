@@ -427,6 +427,11 @@ async def main():
             await bot.add_cog(OtherInfoCog(bot))
             logger.info("OtherInfoCog を登録しました")
 
+            # ── 日次・週次の地震サマリー（QUAKE_SUMMARY_*_ENABLE が無効なら何もしない） ──
+            from cogs.quake_summary import QuakeSummaryCog
+            await bot.add_cog(QuakeSummaryCog(bot))
+            logger.info("QuakeSummaryCog を登録しました")
+
             # ── Step5: System Cog（!status・Web Dashboard・エラー監視） ──
             from cogs.system import SystemCog
             await bot.add_cog(SystemCog(bot))
