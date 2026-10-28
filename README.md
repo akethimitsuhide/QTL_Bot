@@ -767,6 +767,7 @@ python3 -m pytest tests/ -q
 | `test_doctor.py` | `--doctor`（起動前の自己診断） |
 | `test_yomiage.py`・`test_eew_yomiage_integration.py`・`test_quake_yomiage_integration.py`・`test_tsunami_yomiage.py`・`test_yomiage_other_cogs.py` | 読み上げテンプレートの展開・検証・EEW／地震情報の読み上げが従来と同じ文言になること |
 | `test_gis_overseas_switch.py` | 遠地地震向け地図への自動切り替え |
+| `test_gis_station_star.py` | 震度分布の地図で観測点名の「＊」の有無（気象庁HP JSON／P2P）に関わらず描画できること |
 | `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
