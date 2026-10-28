@@ -1193,10 +1193,17 @@ def render_shindo_map(
 
         stations = _get_stations()
         matched_stations = {}
+        # 【2026-10-29修正】照合は _station_latlon（「＊」の有無を無視）で行うため、
+        # 座標もここで解決した値を使う。以前は後段で stations[name] と厳密一致で
+        # 引き直していたため、気象庁HP JSON 由来の「横芝光町宮川＊」等で KeyError となり、
+        # 震度分布の地図が丸ごと添付されなかった。
+        station_latlon = {}
         if station_shindo:
             for name, code in station_shindo.items():
-                if _station_latlon(stations, name) is not None:
+                latlon = _station_latlon(stations, name)
+                if latlon is not None:
                     matched_stations[name] = code
+                    station_latlon[name] = latlon
 
         hypo_points = _hypocenter_point(hypocenter_lonlat)
 
@@ -1217,7 +1224,7 @@ def render_shindo_map(
         station_points_all = []
         station_points_strong = []
         for name, code in matched_stations.items():
-            lat, lon = stations[name]
+            lat, lon = station_latlon[name]
             station_points_all.append((lon, lat))
             if code >= _STATION_ZOOM_MIN_SHINDO:
                 station_points_strong.append((lon, lat))
