@@ -25,8 +25,11 @@ core.p2p_ws_hub.P2PWebSocketHub の code=9611 ディスパッチャ
 embed最下部（set_image）に配置する。
 
 【閾値によるフィルタリング】
-- JISHIN_KANCHI_MAX_LEVEL: 通知する最大レベル（数値が大きいほど
-  信頼度が低い）。既定4=全レベル通知。
+- JISHIN_KANCHI_MIN_LEVEL: 通知する最小レベル（数値が大きいほど信頼度が
+  高い）。既定1=全レベル通知。信頼度の低い感知情報を抑制したいときに使う。
+- JISHIN_KANCHI_MAX_LEVEL: 通知する最大レベル。既定4=全レベル通知。
+  （2026-10-27訂正: 従来は「数値が大きいほど信頼度が低い」と逆に書かれて
+  いた。実際は大きいほど高い。低い値を指定すると高信頼度が抑制される）
 - JISHIN_KANCHI_MIN_COUNT: 通知する最小件数（count）。
 
 【音声読み上げ・効果音】
@@ -45,7 +48,7 @@ from core.channels import resolve_channels
 from core.config import (
     YOMI_OTHER_KANCHI,
     CHANNEL_IDS, JISHIN_KANCHI_CHANNEL_IDS, JISHIN_KANCHI_ENABLE,
-    JISHIN_KANCHI_MAX_LEVEL, JISHIN_KANCHI_MIN_COUNT,
+    JISHIN_KANCHI_MAX_LEVEL, JISHIN_KANCHI_MIN_LEVEL, JISHIN_KANCHI_MIN_COUNT,
     JISHIN_KANCHI_SPEECH_ENABLE, JISHIN_KANCHI_SOUND_ENABLE,
     JISHIN_KANCHI_SOUND_FILE,
     JISHIN_KANCHI_EVENT_STATE_TTL_SEC,
@@ -147,8 +150,15 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin):
         else:
             logger.info(
                 f"JishinKanchiCog: on_ready 完了 "
-                f"(最大レベル={JISHIN_KANCHI_MAX_LEVEL}, 最小件数={JISHIN_KANCHI_MIN_COUNT})"
+                f"(レベル={JISHIN_KANCHI_MIN_LEVEL}〜{JISHIN_KANCHI_MAX_LEVEL}, "
+                f"最小件数={JISHIN_KANCHI_MIN_COUNT})"
             )
+            if JISHIN_KANCHI_MIN_LEVEL > JISHIN_KANCHI_MAX_LEVEL:
+                logger.warning(
+                    f"JishinKanchiCog: JISHIN_KANCHI_MIN_LEVEL({JISHIN_KANCHI_MIN_LEVEL}) が "
+                    f"JISHIN_KANCHI_MAX_LEVEL({JISHIN_KANCHI_MAX_LEVEL}) を超えているため、"
+                    f"どのレベルも通知されません。設定を確認してください"
+                )
 
         # 効果音ファイル名をAudioCogへ動的登録する（JISHIN_KANCHI_SOUND_FILE
         # で管理者が任意のmp3ファイル名に変更できるようにするため。
@@ -287,7 +297,14 @@ class JishinKanchiCog(commands.Cog, AudioClientMixin):
                 )
                 return
 
-            # 閾値フィルタ: レベルが指定値より低精度（数値が大きい）場合は抑制
+            # 閾値フィルタ: レベルが範囲（MIN_LEVEL〜MAX_LEVEL）外なら抑制。
+            # 数値が大きいほど信頼度が高い（1が最低・4が最高）。
+            if level < JISHIN_KANCHI_MIN_LEVEL:
+                logger.debug(
+                    f"地震感知情報: レベル{level} < JISHIN_KANCHI_MIN_LEVEL"
+                    f"({JISHIN_KANCHI_MIN_LEVEL}) のため通知をスキップします"
+                )
+                return
             if level > JISHIN_KANCHI_MAX_LEVEL:
                 logger.debug(
                     f"地震感知情報: レベル{level} > JISHIN_KANCHI_MAX_LEVEL"

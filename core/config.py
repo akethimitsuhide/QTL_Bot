@@ -984,14 +984,22 @@ QUAKE_SUMMARY_SKIP_EMPTY    = _env_bool("QUAKE_SUMMARY_SKIP_EMPTY", True)
 # P2P地震感知情報（code=9611）設定（2026-08〜）
 # ===============================
 # JMA発表の公式情報ではなく、P2P地震情報が独自に「体感報告の集積」等から
-# 推定する非公式な速報値。信頼度（レベル1〜4）が低い場合は誤報の
-# 可能性があるため、閾値で通知を絞れるようにしている。
+# 推定する非公式な速報値。信頼度（レベル1〜4。数値が大きいほど信頼度が高い。
+# 1が最も低く、4が最も高い）が低い場合は誤報の可能性があるため、閾値で
+# 通知を絞れるようにしている。
 JISHIN_KANCHI_ENABLE = _env_bool("JISHIN_KANCHI_ENABLE", False)
 JISHIN_KANCHI_CHANNEL_IDS = _channel_ids("JISHIN_KANCHI_CHANNEL_ID", "QUAKE_CHANNEL_ID", "CHANNEL_ID")
 JISHIN_KANCHI_CHANNEL_ID = _first(JISHIN_KANCHI_CHANNEL_IDS)
-# 通知する最大レベル（数値が大きいほど信頼度が低い）。この値以下の
-# レベルのみ通知する。例: 2を指定するとレベル1・2のみ通知し、
-# レベル3・4（信頼度が低い）は抑制する。1〜4で指定（既定4=全レベル通知）。
+# 通知する最小レベル（数値が大きいほど信頼度が高い）。この値以上の
+# レベルのみ通知する。例: 3を指定するとレベル3・4のみ通知し、
+# レベル1・2（信頼度が低い）は抑制する。1〜4で指定（既定1=全レベル通知）。
+# 【2026-10-27追加】信頼度の低い感知情報を抑制する用途の設定はこちら。
+_jishin_kanchi_min_level = _env_int("JISHIN_KANCHI_MIN_LEVEL", 1)
+JISHIN_KANCHI_MIN_LEVEL = max(1, min(4, _jishin_kanchi_min_level))
+# 通知する最大レベル。この値以下のレベルのみ通知する（既定4=全レベル通知）。
+# 【2026-10-27訂正】従来の説明は「数値が大きいほど信頼度が低い」と逆に書かれていた
+# （実際は大きいほど高い）。このため、低い値（例: 2）を指定すると信頼度の高い
+# レベル3・4が抑制される。通常は既定の4のまま使い、信頼度で絞るなら MIN_LEVEL を使う。
 JISHIN_KANCHI_MAX_LEVEL = _env_int("JISHIN_KANCHI_MAX_LEVEL", 4)
 # 通知する最小件数（count）。ノイズ的な少数件の感知報告を抑制したい
 # 場合に引き上げる。
