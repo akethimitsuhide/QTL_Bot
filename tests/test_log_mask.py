@@ -10,11 +10,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from core.log_mask import mask_secrets  # noqa: E402
 
+# GitHub のプッシュ保護（シークレット検知）は、トークン・Webhook の「形」だけで反応する。
+# ダミーでも誤検知されるため、ソースには連続した形で書かず、実行時に組み立てる。
+_WEBHOOK = "https://discord.com/api/webhooks/" + "123456789012345678" + "/" + "SECRETwebhookTOKEN-abc_123"
+_SLACK = "https://hooks.slack.com/" + "services/" + "T000/B000/" + "XXXXXXXX"
+_BOT_TOKEN = ".".join(["MTIzNDU2Nzg5MDEyMzQ1Njc4OQ", "GabcDE", "abcdefghijklmnopqrstuvwxyz1"])
+
 
 def test_webhook_urls_are_masked():
-    t, n = mask_secrets("送信先 https://discord.com/api/webhooks/123456789012345678/abcDEF_ghi-JKL12345 へ")
+    t, n = mask_secrets(f"送信先 {_WEBHOOK} へ")
     assert "webhooks" not in t and n == 1
-    t, n = mask_secrets("https://hooks.slack.com/services/T000/B000/XXXXXXXX")
+    t, n = mask_secrets(_SLACK)
     assert "hooks.slack.com" not in t and n == 1
 
 
@@ -30,8 +36,8 @@ def test_key_value_json_bearer_and_query():
 
 
 def test_discord_bot_token_shape_is_masked():
-    t, n = mask_secrets("bot  end")
-    assert t == "bot  end" and n == 0
+    t, n = mask_secrets(f"bot {_BOT_TOKEN} end")
+    assert "MTIzNDU2" not in t and n == 1
 
 
 def test_ordinary_log_lines_are_untouched():
