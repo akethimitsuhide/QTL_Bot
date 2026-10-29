@@ -85,7 +85,7 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 - **週間／月間ダイジェスト**: `DIGEST_ENABLED=true` で、先週／先月の通知件数を指定の曜日・時刻（または毎月1日）に投稿する。
 - **日次・週次の地震サマリー**: `QUAKE_SUMMARY_DAILY_ENABLE` / `QUAKE_SUMMARY_WEEKLY_ENABLE` で、前日（または直前7日）の地震の中身を要約して投稿する（国内の地震の件数・最大震度・最大M・震度別件数・主な地震・津波注意報以上を伴った地震・遠地地震の件数。週次は日別の推移も）。集計元は `qtlbot.log` の `QUAKE_RECORD_V1`（`core/quake_history_log.py`）で、**QTL_Bot が通知した地震のみ**が対象。ログのローテーションで集計期間のログが残っていない場合は、Embed の末尾にその旨を注記する。上のダイジェスト（通知種別ごとの件数）とは独立して動く。1つの地震の複数回の通知（震度速報→震源→各地の震度）は発生時刻でまとめて1件に数える。Bot が投稿時刻に停止していた回は投稿しない。
 - **APM（Mackerel 連携、既定無効）**: `APM_ENABLED=true` で OpenTelemetry（OTLP）経由で aiohttp の全 HTTP リクエストをトレースする。想定内の `TimeoutError`／`CancelledError` はエラー扱いにしない。実際のエンドポイント・ヘッダー名は [Mackerel 公式ドキュメント](https://mackerel.io/ja/docs/entry/tracing/installations/python)で必ず確認すること。
-- **通知履歴**: 地震情報・EEW・通知履歴は `qtlbot.log` に機械可読な1行（`QUAKE_RECORD_V1`／`EEW_RECORD_V1`／`NOTIF_RECORD_V1`）として記録し、再起動後も `GET /status/quake_history`・`/status/eew_history`・`/status/notifications`・`/quake_map` から閲覧できる（`LOG_BACKUP_COUNT` 世代分）。記録前の過去分は `python3 bot.py --backfill_quake_history` で P2P API から遡って補完できる。
+- **通知履歴**: 地震情報・EEW・通知履歴は `qtlbot.log` に機械可読な1行（`QUAKE_RECORD_V1`／`EEW_RECORD_V1`／`NOTIF_RECORD_V1`）として記録し、再起動後も `GET /status/quake_history`・`/status/eew_history`・`/status/notifications`・`/quake_map` から閲覧できる（圧縮済みログを含め、`LOG_KEEP_DAYS` 日分または `LOG_BACKUP_COUNT` 世代分）。記録前の過去分は `python3 bot.py --backfill_quake_history` で P2P API から遡って補完できる。
 
 ---
 
@@ -339,7 +339,7 @@ python3 bot.py
 | `KYOSHIN_NOTIFY_ENABLE` | true | 強震モニタの通知機能の有効化。通知間隔＝有効な受信のうち最短の受信間隔 |
 | `KYOSHIN_NOTIFY_ON_EEW` | true | EEW発表時（第一報〜最終報・キャンセル報、最長300秒）に通知するか。通知中は検知による通知を中断する（検知は継続） |
 | `KYOSHIN_NOTIFY_ON_DETECT` | true | 揺れ検知時（画像解析・振動レベル）に通知するか。検知が終わるまで通知を続ける |
-| `KYOSHIN_EVENT_TIMEOUT_SEC` | 45.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
+| `KYOSHIN_EVENT_TIMEOUT_SEC` | 25.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く（2026-10-29 に既定を 45 から 25 に短縮。`.env` に値を書いている場合はそちらが優先される） |
 | `KYOSHIN_MIN_NOTIFY_PHASE` | Weak | 通知を送信する最小フェーズ（Weak＝弱い揺れ < Medium＝揺れ < Strong＝強い揺れ < Stronger＝非常に強い揺れ。旧設定の `Weaker` は `Weak` と同じ扱い） |
 | `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 揺れの強さが「弱い揺れ」（Weak）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 揺れの強さが「揺れ」（Medium）以上の場合に通知に必要な最小検出観測点数 |
@@ -431,7 +431,8 @@ python3 bot.py
 | `LOG_LEVEL_CONSOLE` | LOG_LEVEL | コンソールへの出力ログレベル |
 | `LOG_FILE_PATH` | （空＝プロジェクトルート/qtlbot.log） | ログファイルの出力先パス。未設定時は `bot.py` と同じディレクトリの `qtlbot.log`（実行時のカレントディレクトリに依存しない） |
 | `LOG_MAX_BYTES` | 10485760 | ログファイルの最大サイズ（バイト、デフォルト 10MB） |
-| `LOG_BACKUP_COUNT` | 7 | ローテーション保持ファイル数 |
+| `LOG_BACKUP_COUNT` | 7 | 圧縮済みログ（`.gz`）を残す世代数。再起動1回・ローテーション1回でそれぞれ1世代増える。`0` なら世代数では削除しない |
+| `LOG_KEEP_DAYS` | 0 | 圧縮済みログを残す日数。1以上なら日数で削除し、`LOG_BACKUP_COUNT` は見ない。履歴（地震情報・EEW・通知）はログから復元するため、長く残したいときはこちらを設定する（例: 30） |
 | `LOG_DUPLICATE_THRESHOLD` | 60 | 同一メッセージの重複抑制時間（秒）。ERROR 以上は常に出力 |
 | `LOG_SUPPRESS_HTTP_SUCCESS` | true | aiohttp.access の 2xx 成功ログを抑制 |
 | `KYOSHIN_LOG_LEVEL` | INFO | 強震モニタ・揺れ検知のログだけの最低レベル。`WARNING` で INFO（イベントのマージ・初回通知など）を出さない。他のログには影響しない |
@@ -542,6 +543,15 @@ WEBHOOK_URLS_TSUNAMI=https://hooks.slack.com/services/T/B/zzz      # 津波だ�
 | `STATUS_SHOW_DISK` | true | !status / /qtl_status でディスク使用率を表示 |
 | `STATUS_SHOW_UPTIME` | true | !status / /qtl_status で稼働時間を表示 |
 
+#### ログの圧縮保存（`core/log_archive.py`）
+- **起動のたび**に、起動前に残っていたログ（`qtlbot.log` と旧方式の `qtlbot.log.1` 〜）をすべて `qtlbot.log.<YYYYmmdd-HHMMSS>.gz` に圧縮し、元のファイルは消す。起動後は新しい `qtlbot.log` から書き始める。`<日時>` はそのログの最終更新時刻。
+- 実行中に `LOG_MAX_BYTES` に達したときも、同じように `.gz` にする。
+- 圧縮は**別スレッド**で行う。ログの書き込み側は、ファイル名を変えるだけ（一瞬）で先へ進む。圧縮の途中で電源が切れても `qtlbot.log.<日時>.pending` が残り、次の起動で続きから圧縮される。
+- `LOG_KEEP_DAYS`（日数）または `LOG_BACKUP_COUNT`（世代数）を超えた古い `.gz` は自動で削除される。
+- 地震情報・EEW・通知の履歴、`/quake_map`、日次サマリーは `.gz` もそのまま読む。
+- 起動時の圧縮は、**通常起動で、かつ他に稼働中のプロセスがいないとき**だけ行う（`--test_*` や `--backfill_quake_history` などの CLI、二重起動中は、稼働中のプロセスのログを動かさないよう行わない）。
+- ログの表示は Web ダッシュボードの `/logs` と Discord の `/qtl_logs`（下記）。表示のときは Webhook URL・トークンらしき文字列を伏せ字にする（`core/log_mask.py`。ログファイル自体は書き換えない）。
+
 ### !status / /qtl_status の実行権限
 | 変数名 | 既定値 | 説明 |
 | :--- | :--- | :--- |
@@ -549,6 +559,8 @@ WEBHOOK_URLS_TSUNAMI=https://hooks.slack.com/services/T/B/zzz      # 津波だ�
 | `QTL_STATUS_ROLE_IDS` | （空） | `role` モードで許可するロール ID（カンマ区切り） |
 | `QTL_STATUS_HISTORY_ACCESS` | admin | `/qtl_status history:...`（履歴表示）を実行できる範囲。上記とは独立して設定できる |
 | `QTL_STATUS_HISTORY_ROLE_IDS` | （空） | 履歴表示で `role` モードのとき許可するロール ID |
+| `QTL_LOGS_ACCESS` | admin | `/qtl_logs`（ログの末尾の表示）を実行できる範囲。ログには内部の情報が含まれるため、`all` や `role` にするときは範囲を慎重に決める |
+| `QTL_LOGS_ROLE_IDS` | （空） | `/qtl_logs` で `role` モードのとき許可するロール ID |
 
 - `role` モードでも管理者は常に実行できる。`role` なのにロール ID が未設定の場合や、不正な値の場合は、警告ログを出して `admin` として扱う。
 - 履歴オプションを指定したときは `QTL_STATUS_HISTORY_ACCESS` だけで判定する（`QTL_STATUS_ACCESS` が `admin` でも、履歴だけ全員に許可できる）。
@@ -637,6 +649,9 @@ python3 bot.py --audit_deps
 | `GET /status/notifications` | 実際に送信した通知の履歴（`?limit=N`。`qtlbot.log` にも記録され再起動後も残る） |
 | `GET /status/quake_history`・`/status/eew_history` | `qtlbot.log` ベースの地震情報・EEW の履歴（座標つき） |
 | `GET /quake_map` | 地震情報・EEW の履歴を地図（Leaflet）と表で閲覧（日付・震度で絞り込み。国境・区域データ `GET /status/gis_countries`・`/status/gis_local_areas` を背景に使う。経度は日本を中心に太平洋側へ連続させた座標系（西経30度〜東経330度）で扱い、日付変更線をまたいでも陸地・震源が途切れない。背景データは geometry のみ・座標4桁に丸めて gzip し、プロセス内にキャッシュして配信する） |
+| `GET /logs` | ログの閲覧画面（ファイル一覧・末尾N件・レベルとキーワードで絞り込み・`.gz` のダウンロード）。Webhook URL・トークンらしき文字列は伏せ字にして表示する |
+| `GET /status/logs`・`/status/logs/view?file=&tail=&level=&q=` | 上の画面が使う JSON。`file` は一覧にあるファイル名との完全一致のみ（パスは入力から組み立てない） |
+| `GET /logs/download?file=` | 圧縮済み（`.gz`）ログのダウンロード。伏せ字にはしない（元のファイルそのもの）。現在のログ・圧縮待ちは対象外 |
 | `GET /dashboard` | 上記を可視化する HTML ページ（ステータス、推移グラフ、通知履歴、CSV ダウンロード） |
 | `GET /assets/<ファイル>` | 画面用の CSS・JS（許可リストのファイルのみ。下記） |
 
@@ -646,7 +661,7 @@ curl http://localhost:8080/health/full | jq
 ```
 
 ### 画面（`web/`）・テーマ・スマホ対応
-`/dashboard`・`/quake_map` の HTML・CSS・JS は `web/` フォルダの別ファイル（`web/*.html`・`web/css/`・`web/js/`・`web/vendor/`）。`git pull` で `web/` ごと更新されるので、`cogs/system.py` を触らずに見た目を変えられる。
+`/dashboard`・`/quake_map`・`/logs` の HTML・CSS・JS は `web/` フォルダの別ファイル（`web/*.html`・`web/css/`・`web/js/`・`web/vendor/`）。`git pull` で `web/` ごと更新されるので、`cogs/system.py` を触らずに見た目を変えられる。
 
 - **テーマ**: ダーク／ライト／自動（OS の設定に従う）。ページ右上の「テーマ」ボタンで切り替え、選択はそのブラウザにだけ保存される。色は `web/css/common.css` の CSS 変数だけで決まり、グラフ（Chart.js）・地図（Leaflet）もこの変数に連動する。
 - **スマホ対応**: 画面幅 640px 以下で、1 列表示・タップしやすい大きさのボタン（44px）・表の横スクロールと重要でない列の非表示・ノッチ付き端末の余白に対応。非表示のタブでは自動更新を止め、Raspberry Pi への無駄なアクセスを減らす。
@@ -669,6 +684,7 @@ curl http://localhost:8080/health/full | jq
 | `/qtl_status` | スラッシュ | `QTL_STATUS_ACCESS`（既定: 管理者） | `!status` と同じ内容 |
 | `/qtl_status history:地震情報の履歴` | スラッシュ | `QTL_STATUS_HISTORY_ACCESS`（既定: 管理者） | 直近の地震情報を表示（`count` で 1〜10 件、既定 5 件）。実行者本人にのみ表示 |
 | `/qtl_status history:緊急地震速報(EEW)の履歴` | スラッシュ | `QTL_STATUS_HISTORY_ACCESS`（既定: 管理者） | 直近の EEW を表示（同一イベントは最新の報にまとめる）。実行者本人にのみ表示 |
+| `/qtl_logs` | スラッシュ | `QTL_LOGS_ACCESS`（既定: 管理者） | ログの末尾を表示（`lines` 1〜200・`level`・`keyword`・`generation`: 0=現在、1=ひとつ前の圧縮済み…）。Webhook URL・トークンらしき文字列は伏せ字。長いときは `.txt` で添付。実行者本人にのみ表示 |
 | `/qtl_config list` | スラッシュ | 管理者のみ | 再起動なしで変更できる設定と現在値を表示（実行者本人にのみ表示） |
 | `/qtl_config set` | スラッシュ | 管理者のみ | 設定を変更し `.env` に保存する。再起動は不要（実行者本人にのみ表示） |
 
@@ -786,6 +802,10 @@ python3 -m pytest tests/ -q
 | `test_runtime_settings.py` | 再起動不要の設定変更（入力解釈・保存失敗時・再起動後の読み戻し）と `/qtl_config` コマンド |
 | `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
 | `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
+| `test_log_archive.py` | ログの圧縮保存（起動時の退避・別スレッド圧縮・保持の日数/世代数・壊れた `.gz`・履歴を `.gz` から読めること） |
+| `test_log_mask.py` | 表示時の秘密情報の伏せ字（Webhook URL・トークン・`名前=値`・誤検知しないこと） |
+| `test_dashboard_logs.py` | `/logs`・`/status/logs*`・`/logs/download` を実際に起動して確認（絞り込み・伏せ字・パス探索の拒否・認証） |
+| `test_qtl_logs_command.py` | `/qtl_logs` の権限・伏せ字・長文のファイル添付 |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
 | `test_status_history_view.py` | `/qtl_status` 履歴オプションの表示整形 |
 | `test_error_notify_handler.py` | ERROR ログの管理者通知（対象レベル・再帰防止・スレッド・例外抽出） |
@@ -848,7 +868,7 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 2. 観測点データの取得を確認する: `grep -i KyoshinStations qtlbot.log`（取得に一度も成功していないとキャッシュ `KYOSHIN_STATIONS_CACHE_PATH` も無く、検知が実質無効になる。ネットワークと `KYOSHIN_STATIONS_SOURCE_URL` の到達性を確認）。
 3. 検知の状態を確認する: `grep -i kyoshin qtlbot.log`。イベントが生成されているのに通知が来ない場合は `KYOSHIN_MIN_STATIONS_SHINDO0`／`SHINDO1`・`KYOSHIN_MIN_NOTIFY_PHASE` を確認する。特定の観測点の警告が繰り返し出るときは、機器異常としてブラックリスト化されている可能性がある（「ブラックリスト化しました」で検索）。
 4. 通知設定を確認する: `KYOSHIN_NOTIFY_ENABLE`・`KYOSHIN_NOTIFY_ON_DETECT`・`KYOSHIN_NOTIFY_ON_EEW`、`KYOSHIN_RECV_*` が1つ以上有効か。EEW 通知中は検知通知が中断される。
-5. 誤検知・未検知を後から確認したいときは `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` の画像を見る。通知が続く時間は `KYOSHIN_EVENT_TIMEOUT_SEC`（既定45）で調整する。
+5. 誤検知・未検知を後から確認したいときは `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` の画像を見る。通知が続く時間は `KYOSHIN_EVENT_TIMEOUT_SEC`（既定25）で調整する。
 
 ### メモリ・ネットワーク
 - メモリ使用量は `/status` の `memory_usage_mb` や `!status` で確認できる（目安は 80〜100MB 程度。大きく超える場合は要調査）。
@@ -891,7 +911,10 @@ QTL_Bot/
 │   ├── env_audit.py          --check_env
 │   ├── doctor.py             --doctor（起動前の自己診断）
 │   ├── test_runner.py        --test_*（CLI テスト）
-│   ├── logging_setup.py      ログ設定（ローテーション・重複抑制）
+│   ├── logging_setup.py      ログ設定（起動時・ローテーション時の圧縮保存・重複抑制）
+│   ├── log_archive.py        ログの圧縮（.gz）・保持（日数/世代数）・圧縮済みの読み出し
+│   ├── log_mask.py           ログ表示時の秘密情報の伏せ字
+│   ├── log_view.py           ログの一覧・末尾N件・絞り込み（/logs と /qtl_logs が共用）
 │   ├── command_access.py        !status / /qtl_status の実行権限判定
 │   ├── dashboard_auth.py        Web ダッシュボードのトークン認証（Bearer・ログイン・クッキー）
 │   ├── discord_send.py          Discord 送信の再送ヘルパー（一時的な失敗のみ再送）
@@ -904,7 +927,7 @@ QTL_Bot/
 │   ├── dependency_audit.py      --audit_deps（版ずれ確認・脆弱性照合）
 │   ├── status_history_view.py   /qtl_status 履歴オプションの表示整形
 │   ├── error_notify_handler.py  ERROR ログ → 管理者チャンネル通知のログハンドラー
-│   ├── qtlbot_log_files.py   qtlbot.log とローテーション世代の列挙
+│   ├── qtlbot_log_files.py   qtlbot.log と圧縮済み・圧縮待ちの列挙
 │   ├── pid_guard.py          二重起動の防止
 │   ├── cog_utils.py          Cog 共通のユーティリティ
 │   ├── helpers.py            共通ヘルパー（時刻整形・震度変換など）
