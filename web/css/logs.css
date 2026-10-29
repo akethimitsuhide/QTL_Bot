@@ -1,0 +1,18 @@
+/* /logs（ログ閲覧）専用のスタイル。色は common.css の変数を使う（ライト/ダーク両対応）。 */
+.logs-card { margin-bottom: 16px; }
+.log-controls { margin-bottom: 8px; }
+.log-input {
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--surface-2);
+  border-radius: 6px; padding: 5px 10px; font-size: 0.85em; min-width: 220px;
+}
+.log-view {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+  font-size: 0.78em; line-height: 1.45; max-height: 70vh; overflow: auto;
+  background: var(--surface-2); border-radius: 6px; padding: 8px 10px;
+}
+.log-entry { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1px 0; border-bottom: 1px solid transparent; }
+.log-entry.level-warning { color: var(--warn); }
+.log-entry.level-error, .log-entry.level-critical { color: var(--danger); }
+.log-entry.level-debug { color: var(--text-muted); }
+.file-row-selected { background: var(--surface-2); }
+.log-empty { color: var(--text-muted); padding: 8px 0; }

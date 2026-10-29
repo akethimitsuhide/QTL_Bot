@@ -58,6 +58,7 @@ _MAX_FILE_BYTES = 5 * 1024 * 1024      # 想定外に大きなファイルは配
 PAGES: dict[str, str] = {
     "/dashboard": "dashboard.html",
     "/quake_map": "quake_map.html",
+    "/logs": "logs.html",
 }
 _HTML = "text/html; charset=utf-8"
 _CSS = "text/css; charset=utf-8"
@@ -68,10 +69,12 @@ ASSETS: dict[str, str] = {
     "css/common.css": _CSS,
     "css/dashboard.css": _CSS,
     "css/quake_map.css": _CSS,
+    "css/logs.css": _CSS,
     "js/theme.js": _JS,
     "js/common.js": _JS,
     "js/dashboard.js": _JS,
     "js/quake_map.js": _JS,
+    "js/logs.js": _JS,
     "vendor/chart.umd.min.js": _JS,
     "vendor/leaflet.js": _JS,
     "vendor/leaflet.css": _CSS,

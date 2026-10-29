@@ -47,6 +47,7 @@ from discord.ext import commands
 import aiohttp
 
 from core.config import (
+    LOG_KEEP_DAYS, LOG_BACKUP_COUNT,
     CHANNEL_IDS, ADMIN_CHANNEL_IDS,
     EEW_CHANNEL_IDS, P2P_EEW_CHANNEL_IDS, QUAKE_CHANNEL_IDS, TSUNAMI_CHANNEL_IDS,
     OTHER_CHANNEL_IDS, VOLCANO_CHANNEL_IDS, KYOSHIN_CHANNEL_IDS, USGS_CHANNEL_IDS,
@@ -66,6 +67,7 @@ from core.config import (
     GIS_MAP_ENABLE,
     QTL_STATUS_ACCESS, QTL_STATUS_ROLE_IDS,
     QTL_STATUS_HISTORY_ACCESS, QTL_STATUS_HISTORY_ROLE_IDS,
+    QTL_LOGS_ACCESS, QTL_LOGS_ROLE_IDS,
 )
 from core.constants import INT_MAP
 from core.command_access import ACCESS_ADMIN, is_allowed
@@ -80,6 +82,7 @@ from core.notification_log import load_notification_history
 from core.error_notify_handler import AdminErrorLogHandler, SKIP_ATTR
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
+from core.log_view import list_log_files, find_log_file, read_entries, parse_level, LEVELS, MAX_TAIL
 from core.eew_history_log import load_eew_history, display_record as display_eew_record
 from core import gis_data
 from core import test_runner as _test_runner_module
@@ -157,6 +160,19 @@ def _status_default_permissions(func):
     なるため付けない。実際の可否は常にコマンド内で判定する。
     """
     if QTL_STATUS_ACCESS == ACCESS_ADMIN and QTL_STATUS_HISTORY_ACCESS == ACCESS_ADMIN:
+        return discord.app_commands.default_permissions(administrator=True)(func)
+    return func
+
+
+def _can_use_logs(user) -> bool:
+    is_admin, role_ids = _member_access_info(user)
+    return is_allowed(QTL_LOGS_ACCESS, QTL_LOGS_ROLE_IDS,
+                      is_admin=is_admin, member_role_ids=role_ids)
+
+
+def _logs_default_permissions(func):
+    """QTL_LOGS_ACCESS が admin（既定）のときだけ、Discord 側の既定権限を管理者に限定する。"""
+    if QTL_LOGS_ACCESS == ACCESS_ADMIN:
         return discord.app_commands.default_permissions(administrator=True)(func)
     return func
 
@@ -1069,6 +1085,70 @@ class SystemCog(commands.Cog):
             return
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @discord.app_commands.command(name="qtl_logs", description="QTL_Bot のログの末尾を表示します（秘密情報は伏せ字）")
+    @discord.app_commands.describe(
+        lines="表示する件数（1〜200、既定30）",
+        level="このレベル以上だけ表示する",
+        keyword="含まれる文字列で絞り込む（大文字小文字は区別しません）",
+        generation="0=現在のログ、1=ひとつ前（圧縮済み）、2=その前…",
+    )
+    @discord.app_commands.choices(level=[
+        discord.app_commands.Choice(name="INFO 以上", value="INFO"),
+        discord.app_commands.Choice(name="WARNING 以上", value="WARNING"),
+        discord.app_commands.Choice(name="ERROR 以上", value="ERROR"),
+    ])
+    @_logs_default_permissions
+    async def slash_qtl_logs(
+        self,
+        interaction: discord.Interaction,
+        lines: discord.app_commands.Range[int, 1, 200] = 30,
+        level: Optional[str] = None,
+        keyword: Optional[discord.app_commands.Range[str, 1, 100]] = None,
+        generation: discord.app_commands.Range[int, 0, 99] = 0,
+    ):
+        """ログの末尾を、実行者本人にだけ見える形（ephemeral）で返す。実行可否は QTL_LOGS_ACCESS。"""
+        if not _can_use_logs(interaction.user):
+            await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            files = await asyncio.to_thread(list_log_files)
+            if generation >= len(files):
+                await interaction.followup.send(
+                    f"その世代のログはありません（現在あるのは 0〜{max(len(files) - 1, 0)}）。", ephemeral=True
+                )
+                return
+            target = files[generation]
+            result = await asyncio.to_thread(
+                read_entries, target.path, lines, parse_level(level), keyword or ""
+            )
+        except Exception:
+            logger.error(f"/qtl_logs の処理に失敗:\n{traceback.format_exc()}")
+            await interaction.followup.send("ログの取得に失敗しました。", ephemeral=True)
+            return
+
+        entries = result["entries"]
+        header = f"**{target.name}**（{len(entries)} 件"
+        if result["masked"]:
+            header += f"／秘密情報らしき文字列 {result['masked']} 箇所を伏せ字"
+        header += "）"
+        if not entries:
+            await interaction.followup.send(header + "\n該当するログがありません。", ephemeral=True)
+            return
+        body = "\n".join(e["text"] for e in entries)
+        if len(body) <= 1800:
+            fence = "`" * 3
+            await interaction.followup.send(
+                f"{header}\n{fence}\n{body.replace(fence, chr(39) * 3)}\n{fence}", ephemeral=True
+            )
+        else:
+            import io
+            await interaction.followup.send(
+                header + "\n長いためファイルで送ります。",
+                file=discord.File(io.BytesIO(body.encode("utf-8")), filename="qtlbot_log_tail.txt"),
+                ephemeral=True,
+            )
+
     async def _build_history_embed(self, kind: str, count: int) -> discord.Embed:
         """履歴 Embed を組み立てる。ログ全体のスキャンは TTL キャッシュ＋別スレッドで行う。"""
         if kind == "eew":
@@ -1599,6 +1679,76 @@ class SystemCog(commands.Cog):
                 return web.json_response({"error": "countries.geojson not cached yet"}, status=404)
             return _gis_payload_response(request, payload)
 
+        # ---- ログの閲覧（2026-10-29追加。core/log_view.py）----
+        # 画面（/logs）から使う。認証・IP許可リストは他の /status/* と同じ middleware がかかる。
+        # ファイルは「一覧にある名前との完全一致」だけで解決する（パスは入力から作らない）。
+        # 同時に重い読み込み（圧縮ログの展開を含む）が重なって Raspberry Pi が詰まらないよう、
+        # 同時実行は2件までに絞る。
+        _log_read_sem = asyncio.Semaphore(2)
+
+        async def logs_list_handler(request):
+            """GET /status/logs - ログファイルの一覧（現在のログ・圧縮済み・圧縮待ち）。"""
+            files = await asyncio.to_thread(list_log_files)
+            return web.json_response({
+                "files": [
+                    {
+                        "name": f.name,
+                        "kind": f.kind,
+                        "size": f.size,
+                        "mtime": datetime.fromtimestamp(f.mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "compressed": f.compressed,
+                        "downloadable": f.kind == "archive",
+                    }
+                    for f in files
+                ],
+                "keep_days": LOG_KEEP_DAYS,
+                "keep_count": LOG_BACKUP_COUNT,
+                "levels": list(LEVELS),
+                "max_tail": MAX_TAIL,
+            }, headers={"Cache-Control": "no-store"})
+
+        async def logs_view_handler(request):
+            """
+            GET /status/logs/view?file=<名前>&tail=<件数>&level=<最低レベル>&q=<キーワード>
+            ログの末尾（新しい側）N 件。Webhook URL・トークンらしき文字列は伏せ字にして返す。
+            """
+            target = await asyncio.to_thread(find_log_file, request.query.get("file", ""))
+            if target is None:
+                return web.json_response({"error": "file not found"}, status=404)
+            try:
+                tail = int(request.query.get("tail", "200"))
+            except ValueError:
+                return web.json_response({"error": "tail must be an integer"}, status=400)
+            level_raw = request.query.get("level", "")
+            level = parse_level(level_raw)
+            if level_raw and level is None:
+                return web.json_response({"error": "unknown level"}, status=400)
+            async with _log_read_sem:
+                result = await asyncio.to_thread(
+                    read_entries, target.path, tail, level, request.query.get("q", "")
+                )
+            result["file"] = target.name
+            return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+        async def logs_download_handler(request):
+            """
+            GET /logs/download?file=<名前> - 圧縮済み（.gz）ログをそのままダウンロードする。
+            ※ 閲覧と違って伏せ字にはしない（元のファイルそのもの）。認証済みの利用者向け。
+            """
+            target = await asyncio.to_thread(find_log_file, request.query.get("file", ""))
+            if target is None or target.kind != "archive":
+                return web.json_response({"error": "file not found"}, status=404)
+            import re as _re
+            safe_name = _re.sub(r"[^\w.\-]", "_", target.name)
+            return web.FileResponse(
+                target.path,
+                headers={
+                    "Content-Type": "application/gzip",
+                    "Content-Disposition": f'attachment; filename="{safe_name}"',
+                    "Cache-Control": "no-store",
+                },
+            )
+
         try:
             # security_headers_middleware は最も外側（認証・IP制限の拒否応答にもセキュリティヘッダーを付ける）
             _middlewares = [security_headers_middleware, ip_allowlist_middleware]
@@ -1612,6 +1762,9 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status/notifications", notifications_handler)
             self._web_app.router.add_get("/status/quake_history", quake_history_handler)
             self._web_app.router.add_get("/status/eew_history", eew_history_handler)
+            self._web_app.router.add_get("/status/logs", logs_list_handler)
+            self._web_app.router.add_get("/status/logs/view", logs_view_handler)
+            self._web_app.router.add_get("/logs/download", logs_download_handler)
             self._web_app.router.add_get("/status/gis_local_areas", gis_local_areas_handler)
             self._web_app.router.add_get("/status/gis_countries", gis_countries_handler)
             # 画面（/dashboard・/quake_map）と /assets/*（web/ の静的ファイル。許可リスト方式）

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>QTL_Bot ログ</title>
+<script src="/assets/js/theme.js"></script>
+<link rel="stylesheet" href="/assets/css/common.css">
+<link rel="stylesheet" href="/assets/css/logs.css">
+<script src="/assets/js/common.js" defer></script>
+<script src="/assets/js/logs.js" defer></script>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <h1>QTL_Bot ログ</h1>
+      <div class="subtitle">現在のログと圧縮済み（.gz）のログを表示します。Webhook URL・トークンらしき文字列は伏せ字にして表示します（ダウンロードする .gz は元のファイルそのままです）。</div>
+    </div>
+    <button class="btn-link" id="themeBtn" type="button">テーマ</button>
+  </div>
+
+  <div class="toolbar">
+    <a class="btn-link" href="/dashboard">ダッシュボード</a>
+    <a class="btn-link" href="/quake_map">地震情報履歴（地図・表）</a>
+    <button class="btn-link" id="reloadListBtn" type="button">一覧を更新</button>
+  </div>
+
+  <div class="card logs-card">
+    <h2>ログファイル</h2>
+    <div class="table-wrap" id="fileList"><div class="notif-empty">読み込み中...</div></div>
+    <div class="status-line" id="retentionLine"></div>
+  </div>
+
+  <div class="card logs-card">
+    <h2 id="viewTitle">内容</h2>
+    <div class="toolbar log-controls">
+      <label>レベル
+        <select class="notif-filter" id="levelSel" aria-label="最低レベル"></select>
+      </label>
+      <label>キーワード
+        <input class="log-input" id="keywordInput" type="search" maxlength="100" placeholder="部分一致（大文字小文字は区別しません）" aria-label="キーワード">
+      </label>
+      <label>件数
+        <select class="notif-filter" id="tailSel" aria-label="表示件数">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+      </label>
+      <button class="btn-link" id="applyBtn" type="button">表示</button>
+      <button class="btn-link" id="downloadBtn" type="button" disabled>この .gz をダウンロード</button>
+    </div>
+    <div class="status-line" id="viewInfo" role="status" aria-live="polite">上の一覧からファイルを選んでください。</div>
+    <div class="log-view" id="logView"></div>
+  </div>
+
+  <noscript><div class="error">このページの表示には JavaScript が必要です。</div></noscript>
+</body>
+</html>
