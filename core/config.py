@@ -785,6 +785,14 @@ QTL_STATUS_HISTORY_ACCESS = effective_mode(
     QTL_STATUS_HISTORY_ROLE_IDS, "QTL_STATUS_HISTORY_ACCESS",
 )
 
+# /qtl_logs（ログの表示）。ログには内部の情報が含まれるため、既定は管理者のみ。
+# 表示時は Webhook URL・トークンらしき文字列を伏せ字にするが、ロールの範囲は慎重に決めること。
+QTL_LOGS_ROLE_IDS = parse_role_ids(os.getenv("QTL_LOGS_ROLE_IDS"), "QTL_LOGS_ROLE_IDS")
+QTL_LOGS_ACCESS = effective_mode(
+    parse_access_mode(os.getenv("QTL_LOGS_ACCESS"), "QTL_LOGS_ACCESS"),
+    QTL_LOGS_ROLE_IDS, "QTL_LOGS_ACCESS",
+)
+
 # ===============================
 # 外部 API エンドポイント
 # ===============================
