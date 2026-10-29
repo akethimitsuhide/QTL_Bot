@@ -13,7 +13,8 @@ def _clean_env(monkeypatch):
     for key in list(os.environ):
         if key in ("BOT_TOKEN", "CHANNEL_ID", "TTS_ENGINE", "AQUESTALK_PATH", "AUDIO_PLAYER", "GIS_MAP_ENABLE",
                    "GIS_MAP_DATA_DIR", "WEB_DASHBOARD_ENABLED", "WEB_DASHBOARD_PORT", "WEB_DASHBOARD_HOST",
-                   "WEB_DASHBOARD_TOKEN", "WEB_DASHBOARD_ALLOWED_IPS") or key.startswith("YOMI_"):
+                   "WEB_DASHBOARD_TOKEN", "WEB_DASHBOARD_ALLOWED_IPS") or key.startswith("YOMI_") \
+                or key.endswith("_CHANNEL_ID"):   # 実機の .env が core.config の import で os.environ に入っていることがある
             monkeypatch.delenv(key, raising=False)
 
 

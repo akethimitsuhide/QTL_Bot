@@ -125,8 +125,22 @@ def test_group_requires_channels():
 
 
 # ---------- config ----------
+def _isolate_channel_env(monkeypatch):
+    """実機の .env・環境変数に左右されないようにする（config を reload するテスト用）。
+
+    reload のたびに core.config は .env を読み直し、読み込み済みの環境変数も残る。
+    実機では P2P_EEW_CHANNEL_ID などが入っているため、フォールバックの検証が崩れる。
+    """
+    import core.env_loader
+    for key in list(os.environ):
+        if key.endswith("_CHANNEL_ID"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(core.env_loader, "load_env_files", lambda *a, **k: [])
+
+
 def test_config_parses_multiple_channel_ids(monkeypatch):
     import importlib
+    _isolate_channel_env(monkeypatch)
     monkeypatch.setenv("CHANNEL_ID", "111, 222")
     monkeypatch.setenv("EEW_CHANNEL_ID", "333;444")
     monkeypatch.setenv("TSUNAMI_CHANNEL_ID", "")
@@ -148,6 +162,7 @@ def test_config_parses_multiple_channel_ids(monkeypatch):
 def test_config_rejects_invalid_channel_id(monkeypatch):
     import importlib
     import core.config as cfg
+    _isolate_channel_env(monkeypatch)
     monkeypatch.setenv("CHANNEL_ID", "12x")
     with pytest.raises(SystemExit):
         importlib.reload(cfg)
