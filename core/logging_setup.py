@@ -1,27 +1,30 @@
 """
 core/logging_setup.py
 ======================
-ロギングハンドラーのセットアップ、ログローテーション不整合の修正、
+ロギングハンドラーのセットアップ、ログの圧縮保存（起動時・ローテーション時）、
 重複ログ抑制、aiohttp成功ログ抑制を提供するモジュール。
 
 【bot.py からの移行元】
 元 bot.py の _RateLimitedHandler / _SuppressHttpSuccessFilter /
-_align_logfiles_on_startup / setup_logging() 定義（旧ファイル末尾付近）。
+setup_logging() 定義（旧ファイル末尾付近）。起動時の「最新ログを書き込み先へ並べ替える」
+処理（_align_logfiles_on_startup）は、起動時に全ログを .gz へ退避する方式に置き換えたため廃止。
 
 【使い方】
     from core.logging_setup import setup_logging
     setup_logging()   # main() の最初に1回だけ呼ぶ
 """
-import os
 import time
 import logging
-from logging.handlers import RotatingFileHandler
 
 from core.config import (
-    LOG_MAX_BYTES, LOG_BACKUP_COUNT,
+    LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_KEEP_DAYS,
     LOG_LEVEL_FILE, LOG_LEVEL_CONSOLE,
     LOG_DUPLICATE_THRESHOLD, LOG_SUPPRESS_HTTP_SUCCESS,
     LOG_FILE_PATH, KYOSHIN_LOG_LEVEL,
+)
+
+from core.log_archive import (
+    ArchivingRotatingFileHandler, stage_existing_logs, start_background_archive,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -92,45 +95,14 @@ class _SuppressHttpSuccessFilter(logging.Filter):
         return True
 
 
-def _align_logfiles_on_startup(base: str, backup_count: int) -> None:
+def setup_logging(archive_existing: bool = False) -> None:
     """
-    起動・再起動時に base 〜 base.{backup_count} の中で
-    最も mtime が新しいファイルを base の位置（書き込み先）に持ってくる。
+    ロギングハンドラーをセットアップする（ローテーション対応 + ログ肥大化対策）。
 
-    RotatingFileHandler は常に base に書き込むため、このまま起動すると
-    ローテーション直後に作られた空の base に書き込みが始まってしまう。
-    この関数を setup_logging() の先頭で呼ぶことで
-    「最新ファイルに追記」の挙動を実現する。
+    archive_existing=True（通常起動）: 起動前に残っていたログをすべて .gz に圧縮して元を消す
+    （改名だけ先に行い、圧縮は別スレッド。core/log_archive.py）。CLI モードや、他に稼働中の
+    プロセスがある場合は False にして、稼働中プロセスのログを動かさない。
     """
-    candidates: dict[str, float] = {}
-    for path in [base] + [f"{base}.{i}" for i in range(1, backup_count + 1)]:
-        if os.path.exists(path):
-            candidates[path] = os.path.getmtime(path)
-
-    if not candidates:
-        return
-
-    newest = max(candidates, key=candidates.__getitem__)
-    if newest == base:
-        return
-
-    sorted_files = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
-    positions    = [base] + [f"{base}.{i}" for i in range(1, backup_count + 1)]
-
-    tmp_map: dict[str, str] = {}
-    for src, _ in sorted_files:
-        tmp = src + ".__qtlbot_align_tmp__"
-        os.rename(src, tmp)
-        tmp_map[src] = tmp
-
-    for (src, _), dst in zip(sorted_files, positions):
-        os.rename(tmp_map[src], dst)
-
-    print(f"[LogAlign] 最新ログファイル {newest} → {base} に再配置しました", flush=True)
-
-
-def setup_logging() -> None:
-    """ロギングハンドラーをセットアップする（ローテーション対応 + ログ肥大化対策）。"""
     # 【2026-08-29 修正】従来は "qtlbot.log" という相対パスを直接
     # 埋め込んでいたため、systemdサービス化等で WorkingDirectory の
     # 設定を誤ると意図しないディレクトリにログが書かれる（最悪、
@@ -140,8 +112,8 @@ def setup_logging() -> None:
     # 上書きできるようにしたもの（ログの出力先を変えたい運用にも対応）。
     log_path = LOG_FILE_PATH
 
-    # 起動時: mtime が最新のログファイルを log_path に持ってきてから handler を生成
-    _align_logfiles_on_startup(log_path, LOG_BACKUP_COUNT)
+    # 起動時: 前回までのログを圧縮待ちへ改名（一瞬）。圧縮そのものは handler を作った後に別スレッドで行う
+    staged = stage_existing_logs(log_path) if archive_existing else 0
 
     file_level    = getattr(logging, LOG_LEVEL_FILE.upper(), logging.DEBUG)
     console_level = getattr(logging, LOG_LEVEL_CONSOLE.upper(), logging.INFO)
@@ -152,10 +124,11 @@ def setup_logging() -> None:
     )
 
     # ── ファイルハンドラー（詳細・ローテーション）──
-    _file_inner = RotatingFileHandler(
+    _file_inner = ArchivingRotatingFileHandler(
         log_path,
         maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
+        keep_count=LOG_BACKUP_COUNT,
+        keep_days=LOG_KEEP_DAYS,
         encoding="utf-8",
     )
     _file_inner.setLevel(file_level)
@@ -188,8 +161,14 @@ def setup_logging() -> None:
         access_logger = logging.getLogger("aiohttp.access")
         access_logger.addFilter(_SuppressHttpSuccessFilter())
 
+    keep_note = f"{LOG_KEEP_DAYS}日" if LOG_KEEP_DAYS > 0 else f"{LOG_BACKUP_COUNT}世代"
     logger.info(
         f"ロギングをセットアップしました "
         f"(path={log_path}, FILE={LOG_LEVEL_FILE}/CONSOLE={LOG_LEVEL_CONSOLE}, "
-        f"maxSize={LOG_MAX_BYTES}bytes, dup抑制={LOG_DUPLICATE_THRESHOLD}s)"
+        f"maxSize={LOG_MAX_BYTES}bytes, dup抑制={LOG_DUPLICATE_THRESHOLD}s, 圧縮ログの保持={keep_note})"
     )
+    if archive_existing:
+        # 前回までのログの圧縮・期限切れの削除（別スレッド。通常運用の処理を待たせない）
+        if staged:
+            logger.info(f"前回までのログ {staged} 件を .gz に圧縮します（バックグラウンド）")
+        start_background_archive(log_path, LOG_BACKUP_COUNT, LOG_KEEP_DAYS)

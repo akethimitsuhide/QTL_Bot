@@ -156,6 +156,10 @@ def _env_hex_color(key: str, default: int) -> int:
 # ===============================
 LOG_MAX_BYTES             = int(os.getenv("LOG_MAX_BYTES", "10485760"))   # 10 MB
 LOG_BACKUP_COUNT          = int(os.getenv("LOG_BACKUP_COUNT", "7"))
+# 圧縮済みログ（.gz）を残す日数。1以上なら日数で消し、世代数（LOG_BACKUP_COUNT）は見ない。
+# 0（既定）なら従来どおり世代数で消す。履歴機能（地震情報・EEW・通知）はログから読むため、
+# 履歴を長く残したいときはこちらを設定する（core/log_archive.py）。
+LOG_KEEP_DAYS             = max(0, int(os.getenv("LOG_KEEP_DAYS", "0")))
 LOG_LEVEL                 = os.getenv("LOG_LEVEL", "INFO")
 LOG_LEVEL_FILE            = os.getenv("LOG_LEVEL_FILE", LOG_LEVEL)
 LOG_LEVEL_CONSOLE         = os.getenv("LOG_LEVEL_CONSOLE", LOG_LEVEL)

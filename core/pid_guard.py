@@ -61,6 +61,25 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
+def another_instance_alive(is_test_mode: bool = False) -> bool:
+    """
+    PIDファイルに、自分以外の「生きているプロセス」が記録されているか。
+    ログの圧縮・退避は、他のプロセスが同じログへ書き込んでいる最中に行うと
+    そのプロセスのログを失わせるため、この関数が False のときだけ行う。
+    判定できない場合（読み取り失敗など）は True（安全側＝退避しない）を返す。
+    """
+    path = _TEST_PID_FILE_PATH if is_test_mode else _PID_FILE_PATH
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        pid = int(text) if text else None
+    except (ValueError, OSError):
+        return True
+    return pid is not None and pid != os.getpid() and _pid_is_alive(pid)
+
+
 def check_and_write_pid(is_test_mode: bool = False) -> None:
     """
     起動時に呼び出す。既存のPIDファイルが有効な（=生きている）プロセスを

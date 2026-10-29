@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 import discord
 
 from core.constants import INT_MAP, SHINDO_COLORS
+from core.log_archive import iter_log_lines
 from core.qtlbot_log_files import discover_qtlbot_log_paths
 
 WEEKDAY_NAMES = "月火水木金土日"
@@ -160,12 +161,11 @@ def oldest_log_time(base_path: str | None = None) -> datetime | None:
     """qtlbot.log* のうち最も古い世代の先頭行の時刻（ログが残っている最古の時点）。無ければ None。"""
     for path in discover_qtlbot_log_paths(base_path):
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    m = _LOG_TIME_RE.match(line)
-                    if m:
-                        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-                    break
+            for line in iter_log_lines(path):
+                m = _LOG_TIME_RE.match(line)
+                if m:
+                    return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                break
         except OSError:
             continue
         return None   # 最古のファイルが読めた（行が無い）場合はそれ以上遡らない

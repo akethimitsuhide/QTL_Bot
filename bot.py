@@ -325,10 +325,11 @@ if _test_target is not None:
             await bot.close()  # 二重呼び出しは無害（既に閉じていれば即return）
 
 async def main():
-    setup_logging()
-
-    from core.pid_guard import check_and_write_pid
+    from core.pid_guard import another_instance_alive, check_and_write_pid
     is_test_mode = _test_target is not None
+    # 起動前に残っていたログを .gz に圧縮・退避するのは、通常起動で、かつ他に稼働中の
+    # プロセスがいないときだけ（CLIテストや二重起動中に、稼働中プロセスのログを奪わないため）
+    setup_logging(archive_existing=not is_test_mode and not another_instance_alive())
     check_and_write_pid(is_test_mode=is_test_mode)
 
     if _test_target is not None:

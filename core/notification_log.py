@@ -38,6 +38,7 @@ from collections import deque
 from datetime import datetime
 from typing import Iterator
 
+from core.log_archive import iter_log_lines
 from core.qtlbot_log_files import discover_qtlbot_log_paths
 
 logger = logging.getLogger("QTLBot")
@@ -122,11 +123,10 @@ def parse_notification_record_log_line(line: str) -> dict | None:
 
 def _iter_notification_records_from_file(path: str) -> Iterator[dict]:
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                record = parse_notification_record_log_line(line)
-                if record is not None:
-                    yield record
+        for line in iter_log_lines(path):
+            record = parse_notification_record_log_line(line)
+            if record is not None:
+                yield record
     except FileNotFoundError:
         return
     except OSError as e:

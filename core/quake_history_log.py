@@ -51,6 +51,7 @@ import logging
 from typing import Iterator
 
 from core.helpers import format_jma_time
+from core.log_archive import iter_log_lines
 from core.qtlbot_log_files import discover_qtlbot_log_paths
 
 logger = logging.getLogger("QTLBot")
@@ -132,11 +133,10 @@ def parse_quake_record_log_line(line: str) -> dict | None:
 def iter_quake_records_from_file(path: str) -> Iterator[dict]:
     """指定したログファイルを1行ずつ読み、地震情報レコードのみを順に返す。"""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                record = parse_quake_record_log_line(line)
-                if record is not None:
-                    yield record
+        for line in iter_log_lines(path):
+            record = parse_quake_record_log_line(line)
+            if record is not None:
+                yield record
     except FileNotFoundError:
         return
     except OSError as e:
