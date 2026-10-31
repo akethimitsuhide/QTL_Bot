@@ -85,6 +85,14 @@ world countries.geojson（datasets/geo-countries、258カ国）を陸地色で
 None を返す（呼び出し側＝各Cogは、Noneの場合は地図添付をスキップする
 だけでよい。例外は投げない設計とし、地図描画の失敗が通知本体の送信を
 妨げないようにする）。
+
+【P波・S波の円（予報円。2026-10-30追加）】
+EEWの3つの描画関数（render_eew_warn_map / render_shindo_map / render_overseas_map）は、
+任意引数 wave_overlay（core.eew_wave.WaveOverlay）が渡されると、震源を中心とする
+P波・S波の円と左下の注記を描く。円の大きさは呼び出し側（cogs/eew.py）が走時表から
+求めて渡す。表示範囲は円がすべて収まるまで広げる（_expand_viewport_for_circles。
+日本全体の枠を超える場合は枠の外まで広げる）。海外向け地図への切り替え判定は、円で
+広げる前の表示範囲で行う（円の大きさで通常地図／海外向け地図が変わらないように）。
 """
 import colorsys
 import io
@@ -100,11 +108,12 @@ from PIL import Image, ImageDraw, ImageFont
 from core.config import (
     GIS_MAP_ENABLE, GIS_MAP_WARNING_COLOR, GIS_MAP_THEME,
     GIS_ICON_CORNER_RADIUS_RATIO, GIS_ICON_BORDER_RATIO, GIS_ICON_BORDER_SATURATION,
-    GIS_ICON_TEXT_COLORS,
+    GIS_ICON_TEXT_COLORS, EEW_WAVE_P_COLOR, EEW_WAVE_S_COLOR,
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
     TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
 )
 from core.constants import SHINDO_COLORS, LG_COLORS
+from core.eew_wave import WaveOverlay, circle_ring
 from core.helpers import shindo_short_label
 from core import gis_data
 from core import runtime_settings as _rs
@@ -247,6 +256,14 @@ _EEW_MARK_SCALE_MAX = 2.0
 _PLUM_OUTER_R = 14                        # PLUM法ドーナツの外半径（px）
 _PLUM_INNER_R = 7                         # PLUM法ドーナツの内半径（px）
 _PLUM_HALO_PAD = 4                        # ドーナツの白フチの余白（px）
+# EEWのP波・S波の円（予報円。2026-10-30追加。core/eew_wave.py）
+_WAVE_CIRCLE_WIDTH = 3                    # 円の線の太さ（px）
+_WAVE_CIRCLE_HALO_PAD = 2                 # 白フチの片側の太さ（px）。地図の上でも線が見えるように
+_WAVE_RING_STEPS = 120                    # 描画用の円周の分割数
+_WAVE_VIEWPORT_STEPS = 36                 # 表示範囲の計算用の円周の分割数
+_WAVE_VIEWPORT_PAD_RATIO = 0.08           # 円の外接範囲に足す余白の比率
+_WAVE_LABEL_SIZE = 18                     # 円に添える「P」「S」の文字サイズ（px）
+_WAVE_CAPTION_SIZE = 16                   # 左下の注記（時刻・経過秒数）の文字サイズ（px）
 _OVERSEAS_STATION_MARKER_SIZE = 16         # 海外向け地図（広域）での観測点マーカーの一辺（px）。日本全体を含む広い範囲のため通常より小さくする
 _STATION_MARKER_SIZE = 24                 # 観測点マーカー（正方形）の一辺（px）。
                                            # 2026-09-16: 「小さくて見づらい」との
@@ -800,6 +817,76 @@ def _zoom_mark_scale(viewport: _BBox) -> float:
     return _EEW_MARK_SCALE_MIN + (_EEW_MARK_SCALE_MAX - _EEW_MARK_SCALE_MIN) * t
 
 
+def _wave_ring_points(center: Optional[tuple], wave_overlay: Optional[WaveOverlay],
+                      steps: int = _WAVE_VIEWPORT_STEPS) -> list:
+    """P波・S波の円周上の頂点（表示範囲の計算用）。円が無ければ空。"""
+    if not center or wave_overlay is None or not wave_overlay.circles:
+        return []
+    lon, lat = center
+    points: list = []
+    for _kind, radius_km in wave_overlay.circles:
+        points.extend(circle_ring(lon, lat, radius_km, steps))
+    return points
+
+
+def _expand_viewport_for_circles(viewport: _BBox, ring_points: list) -> _BBox:
+    """
+    表示範囲を、P波・S波の円がすべて収まるまで広げる（円の大きさに合わせたズームアウト）。
+    _compute_viewport は結果を日本全体の範囲でクランプするため、円が日本の枠より大きくなる
+    ときはここで枠の外まで広げる（枠の外は海色の背景になる）。円が無ければそのまま返す。
+    """
+    if not ring_points:
+        return viewport
+    lons = [p[0] for p in ring_points]
+    lats = [p[1] for p in ring_points]
+    lon_lo, lon_hi = min(lons), max(lons)
+    lat_lo, lat_hi = min(lats), max(lats)
+    pad_lon = (lon_hi - lon_lo) * _WAVE_VIEWPORT_PAD_RATIO
+    pad_lat = (lat_hi - lat_lo) * _WAVE_VIEWPORT_PAD_RATIO
+    return _BBox(
+        min(viewport.lon_min, lon_lo - pad_lon),
+        max(viewport.lon_max, lon_hi + pad_lon),
+        max(-85.0, min(viewport.lat_min, lat_lo - pad_lat)),
+        min(85.0, max(viewport.lat_max, lat_hi + pad_lat)),
+    )
+
+
+def _draw_wave_overlay(draw: ImageDraw.ImageDraw, center: Optional[tuple],
+                       wave_overlay: Optional[WaveOverlay], projector: _Projector) -> None:
+    """
+    P波・S波の円（白フチ付きの線）、円の真北に添える「P」「S」、左下の注記（時刻・経過秒数）を描く。
+    震源のバツ印・震度マーカーより下に描くため、呼び出し側は先にこの関数を呼ぶこと。
+    """
+    if not center or wave_overlay is None or not wave_overlay.circles:
+        return
+    lon, lat = center
+    colors = {"P": EEW_WAVE_P_COLOR, "S": EEW_WAVE_S_COLOR}
+    line_w = _px(_WAVE_CIRCLE_WIDTH)
+    halo_w = _px(_WAVE_CIRCLE_WIDTH + 2 * _WAVE_CIRCLE_HALO_PAD)
+    # 大きい円から描く（小さい円の線が大きい円の白フチに隠れないように）
+    drawn = []
+    for kind, radius_km in sorted(wave_overlay.circles, key=lambda c: -c[1]):
+        pts = projector.project_ring(circle_ring(lon, lat, radius_km, _WAVE_RING_STEPS))
+        closed = pts + [pts[0]]
+        rgba = _rgb_to_rgba(colors.get(kind, EEW_WAVE_S_COLOR))
+        draw.line(closed, fill=_HALO_COLOR, width=halo_w, joint="curve")
+        draw.line(closed, fill=rgba, width=line_w, joint="curve")
+        drawn.append((kind, pts[0], rgba))   # pts[0] は円の真北の点
+
+    font = _font(_WAVE_LABEL_SIZE)
+    stroke = _px(2)
+    for kind, (x, y), rgba in drawn:
+        if 0 <= x < projector.width and 0 <= y < projector.height:   # 円の北端が画面外なら文字は省く
+            draw.text((x, y), kind, fill=rgba, font=font, anchor="mm",
+                      stroke_width=stroke, stroke_fill=_HALO_COLOR)
+
+    if wave_overlay.caption:
+        cap_font = _font(_WAVE_CAPTION_SIZE)
+        draw.text((_px(8), projector.height - _px(8)), wave_overlay.caption,
+                  fill=(40, 40, 40, 255), font=cap_font, anchor="lb",
+                  stroke_width=stroke, stroke_fill=_HALO_COLOR)
+
+
 def _icon_border_rgb(rgb: tuple) -> tuple:
     """アイコンの縁の色。アイコン色と同じ色相・明度のまま、彩度だけ GIS_ICON_BORDER_SATURATION 倍にする。"""
     h, sat, v = colorsys.rgb_to_hsv(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255)
@@ -1056,6 +1143,7 @@ def render_eew_warn_map(
     warn_region_names: set,
     hypocenter_lonlat: Optional[tuple[float, float]] = None,
     is_plum: bool = False,
+    wave_overlay: Optional[WaveOverlay] = None,
 ) -> Optional[bytes]:
     """
     緊急地震速報（警報）向け：発表地域（強い揺れが予想される地域。
@@ -1068,6 +1156,7 @@ def render_eew_warn_map(
         （core.eew_convert.extract_alert_regions() 等の出力をそのまま渡せる）
     hypocenter_lonlat  : (経度, 緯度)。震源不明の場合は None
     is_plum            : PLUM法（仮定震源要素）の場合 True
+    wave_overlay       : P波・S波の円（core.eew_wave.WaveOverlay）。None なら描かない
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -1103,8 +1192,11 @@ def render_eew_warn_map(
             return render_overseas_map(
                 hypo_points[0],
                 warn_region_names={n for n in warn_region_names if n in shapes},
+                wave_overlay=wave_overlay,
             )
 
+        center = hypo_points[0] if hypo_points else None
+        viewport = _expand_viewport_for_circles(viewport, _wave_ring_points(center, wave_overlay))
         width, height = _dimensions_for_bbox(viewport)
 
         with _supersampled():
@@ -1120,6 +1212,8 @@ def render_eew_warn_map(
             border_rgb = _darken_rgb(_rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3])
             for shape in matched_shapes:
                 _fill_area(draw, shape, projector, fill_rgba, border_rgb)
+
+            _draw_wave_overlay(draw, center, wave_overlay, projector)
 
             if hypo_points:
                 lon, lat = hypo_points[0]
@@ -1140,6 +1234,7 @@ def render_shindo_map(
     show_region_icons: bool = False,
     station_zoom_priority: bool = True,
     enlarge_hypocenter_mark: bool = False,
+    wave_overlay: Optional[WaveOverlay] = None,
 ) -> Optional[bytes]:
     """
     緊急地震速報（予報）・地震情報向け：地域ごとの震度色分け塗りつぶし、
@@ -1172,6 +1267,8 @@ def render_shindo_map(
         1.5〜2.0倍に拡大する（_zoom_mark_scale。2026-09-22追加。EEWの
         地図用。地震情報の地図は従来の大きさのままとするため既定は
         False）。
+    wave_overlay : P波・S波の円（core.eew_wave.WaveOverlay。2026-10-30追加。EEW用）。
+        None なら描かない。円がすべて収まるまで表示範囲を広げる。
 
     GIS_MAP_ENABLE=false、または外部データ未取得の場合は None を返す。
     """
@@ -1249,8 +1346,11 @@ def render_shindo_map(
                 region_shindo={name: code for name, code in (region_shindo or {}).items()
                                if name in shapes},
                 station_shindo=matched_stations or None,
+                wave_overlay=wave_overlay,
             )
 
+        center = hypo_points[0] if hypo_points else None
+        viewport = _expand_viewport_for_circles(viewport, _wave_ring_points(center, wave_overlay))
         width, height = _dimensions_for_bbox(viewport)
 
         with _supersampled():
@@ -1268,6 +1368,8 @@ def render_shindo_map(
                 fill_rgba = (*fill_rgb, _FILL_ALPHA)
                 border_rgb = _darken_rgb(fill_rgb)
                 _fill_area(draw, shape, projector, fill_rgba, border_rgb)
+
+            _draw_wave_overlay(draw, center, wave_overlay, projector)
 
             if show_region_icons and matched_regions:
                 _draw_region_icons(draw, matched_regions, projector)
@@ -1705,6 +1807,7 @@ def render_overseas_map(
     region_shindo: Optional[dict] = None,
     warn_region_names: Optional[set] = None,
     station_shindo: Optional[dict] = None,
+    wave_overlay: Optional[WaveOverlay] = None,
 ) -> Optional[bytes]:
     """
     震源が日本国外の場合向け：世界の国境データ（間引き済み・日本を除く。
@@ -1743,6 +1846,9 @@ def render_overseas_map(
         情報」で発覚）。表示範囲は日本全体＋震源で、観測点は日本国内にあるため
         表示範囲の計算には影響しない。
 
+    wave_overlay      : （2026-10-30追加）P波・S波の円（core.eew_wave.WaveOverlay）。
+        円がすべて収まるまで表示範囲を広げる。
+
     GIS_MAP_ENABLE=false、または外部データ（細分区域・国境データ等）
     未取得の場合は None を返す。
     """
@@ -1758,7 +1864,6 @@ def render_overseas_map(
 
     try:
         viewport = _compute_overseas_viewport((lon, lat))
-        width, height = _dimensions_for_bbox(viewport)
 
         # 日付変更線をまたぐ表示範囲では、震源の経度をviewportと同じ
         # ±360シフトで正規化してから投影する（正規化を怠ると震源が表示
@@ -1770,6 +1875,11 @@ def render_overseas_map(
             if viewport.lon_min <= candidate <= viewport.lon_max:
                 draw_lon = candidate
                 break
+
+        # P波・S波の円がすべて収まるまで表示範囲を広げる（円が無ければ変わらない）。
+        # 広げた範囲は元の範囲を含むため、上で選んだ draw_lon は範囲内のまま。
+        viewport = _expand_viewport_for_circles(viewport, _wave_ring_points((draw_lon, lat), wave_overlay))
+        width, height = _dimensions_for_bbox(viewport)
 
         with _supersampled():
             render_w, render_h = _px(width), _px(height)
@@ -1804,6 +1914,9 @@ def render_overseas_map(
                     shape = eew.get(region_name)
                     if shape is not None:
                         _fill_area(draw, shape, projector, warn_fill, warn_border)
+
+            # 3.5 P波・S波の円（観測点マーカー・震源のバツ印より下に描く）
+            _draw_wave_overlay(draw, (draw_lon, lat), wave_overlay, projector)
 
             # 4. 観測点ごとの震度マーカー（震源のバツ印より下に描く）
             if station_shindo:
