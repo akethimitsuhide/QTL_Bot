@@ -915,6 +915,28 @@ def _parse_icon_text_colors(raw: str) -> dict:
 
 GIS_ICON_TEXT_COLORS = _parse_icon_text_colors(os.getenv("GIS_ICON_TEXT_COLORS", ""))
 
+# 【2026-10-30追加】EEW地図のP波・S波の円（予報円）。デフォルト無効（実際のEEWで確認してから有効化）。
+# 震源の深さと発生からの経過秒数を JMA2001 走時表（core/travel_time.py）に当てはめ、
+# P波・S波の到達距離を円で描く（core/eew_wave.py）。仮定震源要素（PLUM法）・震源不明・
+# 深さ不明・経過秒数が上限超えの場合は描かない。GIS_MAP_ENABLE=true が前提。
+#   EEW_WAVE_CIRCLE_ENABLE          : 有効にする
+#   EEW_WAVE_CIRCLE_TIME_BASE       : 経過秒数の基準時刻。render=地図を描く時刻（既定）／
+#                                     announce=気象庁の発表時刻（得られなければ render で代用）
+#   EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC : これを超えた経過秒数では円を描かない（既定180秒）
+#   EEW_WAVE_TABLE_FILE             : 走時表ファイル（標高0m）。既定 data/tjma/tjma2001h/tjma2001h.+00000
+#   EEW_WAVE_P_COLOR / EEW_WAVE_S_COLOR : 円の色
+EEW_WAVE_CIRCLE_ENABLE = _env_bool("EEW_WAVE_CIRCLE_ENABLE", False)
+EEW_WAVE_CIRCLE_TIME_BASE = (_getenv_nonempty("EEW_WAVE_CIRCLE_TIME_BASE", "render") or "render").strip().lower()
+if EEW_WAVE_CIRCLE_TIME_BASE not in ("render", "announce"):
+    EEW_WAVE_CIRCLE_TIME_BASE = "render"
+EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC = max(10.0, _env_float("EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC", 180.0))
+EEW_WAVE_TABLE_FILE = _getenv_nonempty(
+    "EEW_WAVE_TABLE_FILE",
+    os.path.join(_PROJECT_ROOT_DIR, "data", "tjma", "tjma2001h", "tjma2001h.+00000"),
+)
+EEW_WAVE_P_COLOR = _env_hex_color("EEW_WAVE_P_COLOR", 0x1E78FF)
+EEW_WAVE_S_COLOR = _env_hex_color("EEW_WAVE_S_COLOR", 0xFF6A00)
+
 # ===============================
 # 地震情報 履歴（qtlbot.logベース、地図・表での閲覧機能）
 # ===============================
