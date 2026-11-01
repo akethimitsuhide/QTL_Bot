@@ -77,7 +77,7 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 - **P波・S波の円（予報円。`EEW_WAVE_CIRCLE_ENABLE=true`）**: EEWの全画像（発表地域・地域ごとの予想震度・海外向け地図）に、震源を中心とするP波（青）・S波（橙）の円と、左下に基準時刻・経過秒数（例: `12:00:25 JST  +25s`）を重ねる。円の半径は、震源の深さと経過秒数（基準時刻 − `OriginTime`）を**気象庁のJMA2001走時表**に当てはめて求める（`core/travel_time.py`・`core/eew_wave.py`）。
   - **走時表の配置**: [気象庁の走時表のページ](https://ds.data.jma.go.jp/eqev/data/bulletin/catalog/appendix/trtime/trt_j.html)から JMA2001 の標高別ファイルを入手し、標高0mのファイルが `data/tjma/tjma2001h/tjma2001h.+00000`（`EEW_WAVE_TABLE_FILE` で変更可）になるよう置く。`data/tjma/` は `.gitignore` 登録済みでリポジトリに含まれない。読み込めない場合は警告を1回出して円なしで通知する（置いた後は再起動が必要）。形式の確認は `python3 -m core.travel_time` で行える。
   - **基準時刻**: `EEW_WAVE_CIRCLE_TIME_BASE=render`（既定。地図を描く時刻）または `announce`（気象庁の発表時刻 `AnnouncedTime`。得られなければ `render` で代用）。
-  - **描かない場合**: PLUM法（仮定震源要素）、震源・深さ・`OriginTime` が不明、経過秒数が `EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC`（既定180秒）超え、波がまだ地表に届いていない（深い地震の発生直後）、走時表の範囲外（震央距離2000km超・深さ700km超）。テスト通知（`--test_eew`）は、発表時刻−発生時刻（無ければ20秒）を経過秒数にして描く。
+  - **描かない場合**: PLUM法（仮定震源要素）、震源・深さ・`OriginTime` が不明、地震発生から現在まで、または経過秒数が `EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC`（既定180秒）超え（`announce` 基準でも発生から現在までで判定するため、過去のEEWの再送・再生では描かない）、波がまだ地表に届いていない（深い地震の発生直後）、走時表の範囲外（震央距離2000km超・深さ700km超）。テスト通知（`--test_eew`）は、発表時刻−発生時刻（無ければ20秒）を経過秒数にして描く。
   - **ズーム**: 表示範囲は円がすべて収まるまで広がる（日本全体の枠を超える場合は枠の外まで広がる）。通常地図と海外向け地図の切り替えは、円で広げる前の範囲で判断する。
 - **自動ズーム・見た目**: 描画対象に合わせて表示範囲を自動で決め、2倍で描いてBOXフィルタで縮小するアンチエイリアスをかける（PNGは標準の圧縮レベル。LANCZOS＋最高圧縮に比べ、描画時間は約1/3、ファイルサイズは約1/3）。投影は簡易正距円筒図法で、`shapely` などの追加依存は使わない。`GIS_MAP_THEME`（`light`／`dark`／`highlight`）で配色を切り替えられ、震度アイコンの角丸・縁取り・文字色も設定できる。
 - **描画はワーカースレッドで実行する**: 各 `render_*` は CPU を使う同期処理（Raspberry Pi では1枚あたり数百ms〜1秒超）のため、`await asyncio.to_thread(...)` 経由で呼ぶ。描画倍率（`_scale`）はスレッドごとの値（`threading.local`）なので、同時に描画しても混ざらない。
@@ -266,7 +266,7 @@ python3 bot.py
 | `GIS_ICON_BORDER_SATURATION` | `0.6` | 縁の色＝アイコン色の彩度に掛ける係数（0〜1。小さいほど灰色寄り。1=アイコンと同じ彩度） |
 | `EEW_WAVE_CIRCLE_ENABLE` | false | EEWの地図にP波・S波の円を描くか（`GIS_MAP_ENABLE=true` が前提。JMA2001走時表が必要） |
 | `EEW_WAVE_CIRCLE_TIME_BASE` | `render` | 経過秒数の基準時刻。`render`＝地図を描く時刻／`announce`＝気象庁の発表時刻。不正な値は`render` |
-| `EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC` | `180` | これを超えた経過秒数では円を描かない（下限10） |
+| `EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC` | `180` | 地震発生からこの秒数を超えた情報には円を描かない（下限10。`announce` 基準でも、発生から現在までで判定する） |
 | `EEW_WAVE_TABLE_FILE` | `<プロジェクトルート>/data/tjma/tjma2001h/tjma2001h.+00000` | JMA2001走時表（標高0m）のファイル |
 | `EEW_WAVE_P_COLOR` / `EEW_WAVE_S_COLOR` | `0x1E78FF` / `0xFF6A00` | P波・S波の円の色 |
 | `GIS_ICON_TEXT_COLORS` | （空） | 震度ごとの文字色。`震度:RRGGBB`をカンマ区切り（震度は`0,1,2,3,4,5-,5+,6-,6+,7`）。例: `6-:FFFFFF,6+:FFFFFF,7:FFFFFF`。 |
@@ -1023,5 +1023,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-01
+**最終更新**: 2026-11-02
 **対応 Python**: 3.11+

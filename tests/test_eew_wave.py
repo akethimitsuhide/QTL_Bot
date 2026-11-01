@@ -220,3 +220,37 @@ def test_serial_updates_straddling_midnight_each_get_their_own_elapsed(table):
         assert ov is not None
         elapsed.append(float(ov.caption.rsplit("+", 1)[1].rstrip("s")))
     assert elapsed == [7.0, 16.0, 26.0]
+
+
+# ---------- announce 基準でも古い情報は描かない ----------
+def test_announce_basis_does_not_draw_stale_events(table):
+    """過去のEEWの再送・再生（発表時刻−発生時刻は小さいが、発生から現在まで長い）では描かない。"""
+    now = ORIGIN + timedelta(minutes=10)
+    assert ew.build_wave_overlay(_eew(), table, basis="announce", now=now) is None
+    assert ew.build_wave_overlay(_eew(), table, basis="render", now=now) is None
+    month_old = datetime.now(JST) - timedelta(days=30)
+    old = _eew(OriginTime=month_old.strftime("%Y/%m/%d %H:%M:%S"),
+               AnnouncedTime=(month_old + timedelta(seconds=8)).strftime("%Y/%m/%d %H:%M:%S"))
+    assert ew.build_wave_overlay(old, table, basis="announce") is None
+
+
+def test_announce_basis_boundary_follows_max_elapsed(table):
+    assert ew.build_wave_overlay(_eew(), table, basis="announce", max_elapsed=60,
+                                 now=ORIGIN + timedelta(seconds=60)) is not None
+    assert ew.build_wave_overlay(_eew(), table, basis="announce", max_elapsed=60,
+                                 now=ORIGIN + timedelta(seconds=61)) is None
+
+
+def test_announce_basis_without_announced_time_and_stale_is_none(table):
+    now = ORIGIN + timedelta(minutes=10)
+    assert ew.build_wave_overlay(_eew(AnnouncedTime=""), table, basis="announce", now=now) is None
+
+
+def test_announce_basis_fresh_event_still_uses_announced_time(table):
+    ov = ew.build_wave_overlay(_eew(), table, basis="announce", now=ORIGIN + timedelta(seconds=40))
+    assert ov is not None and ov.caption == "12:00:10 JST  +10s"
+
+
+def test_test_mode_is_not_affected_by_the_staleness_check(table):
+    old = _eew(OriginTime="2020/01/01 00:00:00", AnnouncedTime="2020/01/01 00:00:15")
+    assert ew.build_wave_overlay(old, table, basis="announce", test_mode=True) is not None

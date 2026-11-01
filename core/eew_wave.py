@@ -15,7 +15,9 @@ EEW地図に重ねるP波・S波の円（予報円）の材料を作る純関数
 
 【描かない場合】 仮定震源要素（PLUM法 = isAssumption）／震源不明／深さ不明／OriginTime が
   解釈できない／経過秒数が負（時計のずれの許容 CLOCK_SKEW_TOLERANCE_SEC を超える）または
-  上限（max_elapsed）超え（古いデータや過去のサンプルで巨大な円を描かないため）。
+  上限（max_elapsed）超え／地震発生から現在までが上限（max_elapsed）超え。
+  最後の条件は基準時刻が "announce" でも判定する（過去のEEWの再送・再生で、発表時点の小さな
+  円がもっともらしく描かれるのを防ぐ。通常の運用では発生から現在まで数十秒以内なので影響しない）。
   どちらの波も描けなければ None。
 """
 import logging
@@ -173,10 +175,15 @@ def build_wave_overlay(
             elapsed = TEST_DEFAULT_ELAPSED_SEC
         ref = datetime.now(JST)
     else:
-        elapsed = elapsed_seconds(data, basis=basis, now=now)
-        if elapsed is None:
+        origin = parse_eew_time(data.get("OriginTime"))
+        if origin is None:
             return None
-        ref = now or datetime.now(JST)
+        now_dt = now or datetime.now(JST)
+        # 基準時刻が announce でも、地震発生から「今」までが上限を超えた古い情報は描かない
+        if (now_dt - origin).total_seconds() > max_elapsed:
+            return None
+        elapsed = elapsed_seconds(data, basis=basis, now=now_dt)
+        ref = now_dt
         if basis == "announce":
             announced = parse_eew_time(data.get("AnnouncedTime"))
             if announced is not None:

@@ -72,6 +72,9 @@ def cog(monkeypatch, tmp_path):
     monkeypatch.setattr(eew_mod, "ENABLE_KYOSHIN", False)
     monkeypatch.setattr(eew_mod.rs, "get", lambda key, *a, **k: True, raising=False)
     monkeypatch.setattr(eew_mod, "EEW_WAVE_CIRCLE_ENABLE", True)
+    # .env の値（EEW_WAVE_CIRCLE_TIME_BASE=announce など）に左右されないよう、既定値に固定する
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_CIRCLE_TIME_BASE", "render")
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC", 180.0)
     monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_FILE", write_table(tmp_path / "table"))
     yield c
     travel_time.reset_for_tests()
@@ -124,3 +127,12 @@ def test_computation_error_does_not_stop_the_notification(cog, monkeypatch):
     monkeypatch.setattr(eew_mod.EewCog, "_build_wave_overlay", staticmethod(boom))
     _run(cog, _report())
     assert cog.sent and all(kw["wave_overlay"] is None for _k, kw in cog.render_calls)
+
+
+def test_announce_basis_fresh_draws_and_stale_does_not(cog, monkeypatch):
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_CIRCLE_TIME_BASE", "announce")
+    _run(cog, _report())
+    assert cog.render_calls and all(kw["wave_overlay"] is not None for _k, kw in cog.render_calls)
+    assert all(kw["wave_overlay"].caption.endswith("+8s") for _k, kw in cog.render_calls)
+    _run(cog, _report(origin=datetime.now(JST) - timedelta(days=30)))   # 再送・再生された古いEEW
+    assert cog.render_calls and all(kw["wave_overlay"] is None for _k, kw in cog.render_calls)

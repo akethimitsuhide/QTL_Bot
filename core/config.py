@@ -922,7 +922,8 @@ GIS_ICON_TEXT_COLORS = _parse_icon_text_colors(os.getenv("GIS_ICON_TEXT_COLORS",
 #   EEW_WAVE_CIRCLE_ENABLE          : 有効にする
 #   EEW_WAVE_CIRCLE_TIME_BASE       : 経過秒数の基準時刻。render=地図を描く時刻（既定）／
 #                                     announce=気象庁の発表時刻（得られなければ render で代用）
-#   EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC : これを超えた経過秒数では円を描かない（既定180秒）
+#   EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC : 地震発生からこの秒数を超えた情報には円を描かない（既定180秒。
+#                                     announce 基準でも、発生から現在までで判定する）
 #   EEW_WAVE_TABLE_FILE             : 走時表ファイル（標高0m）。既定 data/tjma/tjma2001h/tjma2001h.+00000
 #   EEW_WAVE_P_COLOR / EEW_WAVE_S_COLOR : 円の色
 EEW_WAVE_CIRCLE_ENABLE = _env_bool("EEW_WAVE_CIRCLE_ENABLE", False)
