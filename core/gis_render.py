@@ -262,7 +262,6 @@ _WAVE_CIRCLE_HALO_PAD = 2                 # 白フチの片側の太さ（px）�
 _WAVE_RING_STEPS = 120                    # 描画用の円周の分割数
 _WAVE_VIEWPORT_STEPS = 36                 # 表示範囲の計算用の円周の分割数
 _WAVE_VIEWPORT_PAD_RATIO = 0.08           # 円の外接範囲に足す余白の比率
-_WAVE_LABEL_SIZE = 18                     # 円に添える「P」「S」の文字サイズ（px）
 _WAVE_CAPTION_SIZE = 16                   # 左下の注記（時刻・経過秒数）の文字サイズ（px）
 _OVERSEAS_STATION_MARKER_SIZE = 16         # 海外向け地図（広域）での観測点マーカーの一辺（px）。日本全体を含む広い範囲のため通常より小さくする
 _STATION_MARKER_SIZE = 24                 # 観測点マーカー（正方形）の一辺（px）。
@@ -854,7 +853,8 @@ def _expand_viewport_for_circles(viewport: _BBox, ring_points: list) -> _BBox:
 def _draw_wave_overlay(draw: ImageDraw.ImageDraw, center: Optional[tuple],
                        wave_overlay: Optional[WaveOverlay], projector: _Projector) -> None:
     """
-    P波・S波の円（白フチ付きの線）、円の真北に添える「P」「S」、左下の注記（時刻・経過秒数）を描く。
+    P波・S波の円（白フチ付きの線。P波=EEW_WAVE_P_COLOR、S波=EEW_WAVE_S_COLOR）と、
+    左下の注記（時刻・経過秒数）を描く。円そのものには「P」「S」などの文字を添えない（色で区別する）。
     震源のバツ印・震度マーカーより下に描くため、呼び出し側は先にこの関数を呼ぶこと。
     """
     if not center or wave_overlay is None or not wave_overlay.circles:
@@ -864,27 +864,17 @@ def _draw_wave_overlay(draw: ImageDraw.ImageDraw, center: Optional[tuple],
     line_w = _px(_WAVE_CIRCLE_WIDTH)
     halo_w = _px(_WAVE_CIRCLE_WIDTH + 2 * _WAVE_CIRCLE_HALO_PAD)
     # 大きい円から描く（小さい円の線が大きい円の白フチに隠れないように）
-    drawn = []
     for kind, radius_km in sorted(wave_overlay.circles, key=lambda c: -c[1]):
         pts = projector.project_ring(circle_ring(lon, lat, radius_km, _WAVE_RING_STEPS))
         closed = pts + [pts[0]]
         rgba = _rgb_to_rgba(colors.get(kind, EEW_WAVE_S_COLOR))
         draw.line(closed, fill=_HALO_COLOR, width=halo_w, joint="curve")
         draw.line(closed, fill=rgba, width=line_w, joint="curve")
-        drawn.append((kind, pts[0], rgba))   # pts[0] は円の真北の点
-
-    font = _font(_WAVE_LABEL_SIZE)
-    stroke = _px(2)
-    for kind, (x, y), rgba in drawn:
-        if 0 <= x < projector.width and 0 <= y < projector.height:   # 円の北端が画面外なら文字は省く
-            draw.text((x, y), kind, fill=rgba, font=font, anchor="mm",
-                      stroke_width=stroke, stroke_fill=_HALO_COLOR)
 
     if wave_overlay.caption:
-        cap_font = _font(_WAVE_CAPTION_SIZE)
         draw.text((_px(8), projector.height - _px(8)), wave_overlay.caption,
-                  fill=(40, 40, 40, 255), font=cap_font, anchor="lb",
-                  stroke_width=stroke, stroke_fill=_HALO_COLOR)
+                  fill=(40, 40, 40, 255), font=_font(_WAVE_CAPTION_SIZE), anchor="lb",
+                  stroke_width=_px(2), stroke_fill=_HALO_COLOR)
 
 
 def _icon_border_rgb(rgb: tuple) -> tuple:

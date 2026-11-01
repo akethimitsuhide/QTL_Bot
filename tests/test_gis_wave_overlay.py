@@ -96,6 +96,27 @@ def test_eew_warn_map_draws_p_and_s_circles(fake_gis):
     assert _count_color(with_ov, S_RGB) > 30
 
 
+def test_no_p_s_letters_are_drawn_on_the_circles(fake_gis, monkeypatch):
+    """円の上に「P」「S」の文字は描かない（色で区別する）。左下の注記だけが文字として描かれる。"""
+    texts = []
+    original = g.ImageDraw.ImageDraw.text
+
+    def spy(self, xy, text, *args, **kwargs):
+        texts.append(text)
+        return original(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(g.ImageDraw.ImageDraw, "text", spy)
+    for render in (
+        lambda: g.render_eew_warn_map({"テスト県"}, HYPO, wave_overlay=_overlay()),
+        lambda: g.render_shindo_map(region_shindo={"テスト地方": 50}, hypocenter_lonlat=HYPO, wave_overlay=_overlay()),
+        lambda: g.render_overseas_map((121.5, 24.0), wave_overlay=_overlay(p=400.0, s=250.0)),
+    ):
+        texts.clear()
+        assert render() is not None
+        assert "P" not in texts and "S" not in texts
+        assert "12:00:20 JST  +20s" in texts
+
+
 def test_shindo_map_draws_circles(fake_gis):
     png = g.render_shindo_map(region_shindo={"テスト地方": 50}, hypocenter_lonlat=HYPO,
                               enlarge_hypocenter_mark=True, wave_overlay=_overlay())
