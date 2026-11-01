@@ -7,7 +7,7 @@ core/eew_wave.py（EEW地図のP波・S波の円の材料づくり）のテス�
 import math
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -185,3 +185,38 @@ def test_overlay_wolfx_numeric_depth_and_string_depth_equivalent(table):
     a = ew.build_wave_overlay(_eew(Depth=10), table, now=now)
     b = ew.build_wave_overlay(_eew(Depth="10km"), table, now=now)
     assert a == b
+
+
+# ---------- 日付をまたぐ（0時前後の更新報） ----------
+@pytest.mark.parametrize("origin,announced,now,expected_elapsed", [
+    ("2026/10/31 23:59:50", "2026/11/01 00:00:03", datetime(2026, 11, 1, 0, 0, 10, tzinfo=JST), 20.0),   # 日付をまたぐ
+    ("2026/12/31 23:59:55", "2027/01/01 00:00:02", datetime(2027, 1, 1, 0, 0, 5, tzinfo=JST), 10.0),     # 年をまたぐ
+    ("2028/02/28 23:59:58", "2028/02/29 00:00:05", datetime(2028, 2, 29, 0, 0, 8, tzinfo=JST), 10.0),    # 閏日
+    ("2026/10/31 23:59:50", "2026/11/01 00:00:03",
+     datetime(2026, 10, 31, 15, 0, 10, tzinfo=timezone.utc), 20.0),                                      # now が UTC でも同じ
+])
+def test_elapsed_is_correct_across_midnight(table, origin, announced, now, expected_elapsed):
+    data = _eew(OriginTime=origin, AnnouncedTime=announced)
+    assert ew.elapsed_seconds(data, basis="render", now=now) == expected_elapsed
+    ov = ew.build_wave_overlay(data, table, now=now)
+    assert ov is not None and {k for k, _ in ov.circles} == {"P", "S"}
+    assert ov.caption.endswith(f"+{expected_elapsed:.0f}s")
+
+
+def test_midnight_caption_uses_jst_wall_clock_and_announce_basis(table):
+    data = _eew(OriginTime="2026/10/31 23:59:50", AnnouncedTime="2026/11/01 00:00:03")
+    now = datetime(2026, 10, 31, 15, 0, 10, tzinfo=timezone.utc)      # = 2026-11-01 00:00:10 JST
+    assert ew.build_wave_overlay(data, table, now=now).caption == "00:00:10 JST  +20s"
+    assert ew.build_wave_overlay(data, table, basis="announce", now=now).caption == "00:00:03 JST  +13s"
+
+
+def test_serial_updates_straddling_midnight_each_get_their_own_elapsed(table):
+    """23:59台に発生し、0時をまたいで届く複数の更新報。報ごとに OriginTime が変わっても経過秒数は連続している。"""
+    elapsed = []
+    for serial, (origin, sec_after_midnight) in enumerate(
+            [("2026/10/31 23:59:48", -5), ("2026/10/31 23:59:48", 4), ("2026/10/31 23:59:46", 12)], start=1):
+        now = datetime(2026, 11, 1, 0, 0, 0, tzinfo=JST) + timedelta(seconds=sec_after_midnight)
+        ov = ew.build_wave_overlay(_eew(OriginTime=origin, Serial=serial), table, now=now)
+        assert ov is not None
+        elapsed.append(float(ov.caption.rsplit("+", 1)[1].rstrip("s")))
+    assert elapsed == [7.0, 16.0, 26.0]
