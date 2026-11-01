@@ -56,6 +56,8 @@ from core.config import (
     EEW_REGION_COLLAPSE_THRESHOLD,
     YOMI_EEW_FIRST_WARN, YOMI_EEW_FIRST_FORECAST, YOMI_EEW_UPDATE_WARN,
     YOMI_EEW_UPDATE_INTENSITY, YOMI_EEW_UPDATE_HYPO, YOMI_EEW_CANCEL,
+    EEW_WAVE_CIRCLE_ENABLE, EEW_WAVE_CIRCLE_TIME_BASE, EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC,
+    EEW_WAVE_TABLE_FILE,
 )
 from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP, collapse_regions_if_needed
 from core.yomiage import EEW_DEFAULTS, EEW_TAGS, TemplateSet, build_eew_values
@@ -73,6 +75,8 @@ from core.eew_convert import (
     build_region_shindo_map, eew_warn_advisory_note, should_process_eew,
 )
 from core.gis_render import render_eew_warn_map, render_shindo_map, warmup_overseas_cache
+from core.eew_wave import build_wave_overlay
+from core.travel_time import get_table as get_travel_time_table
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 from core.ws_helpers import ws_connect_loop
@@ -417,6 +421,20 @@ class EewCog(commands.Cog, AudioClientMixin):
         state["cumulative_warn_areas"] |= current_regions
         return state["cumulative_warn_areas"]
 
+    @staticmethod
+    def _build_wave_overlay(data: dict, is_test: bool):
+        """
+        P波・S波の円（core.eew_wave.WaveOverlay）を作る。走時表が無い・円が描けない場合は None。
+        走時表の初回読み込みを含むため、asyncio.to_thread から呼ぶこと。
+        """
+        return build_wave_overlay(
+            data,
+            get_travel_time_table(EEW_WAVE_TABLE_FILE),
+            basis=EEW_WAVE_CIRCLE_TIME_BASE,
+            max_elapsed=EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC,
+            test_mode=is_test,
+        )
+
     async def notify_eew(self, data, is_test=False, channel_override=None,
                          start_monitor=True, source: str = "wolfx"):
         """
@@ -720,6 +738,19 @@ class EewCog(commands.Cog, AudioClientMixin):
                                         known_names=REGION_MAP)
                 if warn_areas else None
             )
+
+            # 【2026-10-30追加】P波・S波の円（予報円）。EEW_WAVE_CIRCLE_ENABLE=true のときだけ。
+            # 全EEW画像に同じ円を重ねる。仮定震源要素（PLUM法）・震源不明・深さ不明・
+            # 経過秒数が上限超え・走時表が無い場合は None（円なし）。走時表の初回読み込みと
+            # 計算はイベントループを止めないようスレッドで行う。計算の失敗で通知を止めない。
+            wave_overlay = None
+            if EEW_WAVE_CIRCLE_ENABLE and hypo_lonlat and not is_plum:
+                try:
+                    wave_overlay = await asyncio.to_thread(
+                        self._build_wave_overlay, data, is_test,
+                    )
+                except Exception:
+                    logger.error("EEW波面円の計算エラー（円なしで続行します）", exc_info=True)
             gis_images = []
             if data.get("isWarn"):
                 gis_images.append(await asyncio.to_thread(
@@ -727,6 +758,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                     warn_region_names=cumulative_warn_areas,
                     hypocenter_lonlat=hypo_lonlat,
                     is_plum=is_plum,
+                    wave_overlay=wave_overlay,
                 ))
                 # 地域別震度が無い場合、render_shindo_map は震源のみの地図に
                 # なり1枚目と重複するため、描画自体を行わない。
@@ -737,6 +769,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                         hypocenter_lonlat=hypo_lonlat,
                         is_plum=is_plum,
                         enlarge_hypocenter_mark=True,
+                        wave_overlay=wave_overlay,
                     ))
             else:
                 gis_images.append(await asyncio.to_thread(
@@ -745,6 +778,7 @@ class EewCog(commands.Cog, AudioClientMixin):
                     hypocenter_lonlat=hypo_lonlat,
                     is_plum=is_plum,
                     enlarge_hypocenter_mark=True,
+                    wave_overlay=wave_overlay,
                 ))
 
             try:

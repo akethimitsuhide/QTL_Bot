@@ -284,6 +284,10 @@ def convert_p2p_eew_to_wolfx(p2p_data: dict) -> dict | None:
             "isAssumption": is_plum,
             "isWarn":       has_warn,
             "OriginTime":   eq.get("originTime", ""),
+            # 発表時刻。P2Pの issue.time を使う（EEWのP波・S波の円の基準時刻 EEW_WAVE_CIRCLE_TIME_BASE=announce 用。
+            # Wolfx の AnnouncedTime に相当するが、P2P側の意味は仕様で未確認。無い・解釈できない場合は
+            # core/eew_wave.py が地図を描く時刻で代用する）。
+            "AnnouncedTime": issue.get("time", ""),
             "ArrivalTime":  eq.get("arrivalTime", ""),
             "Hypocenter":   hypo.get("name", "不明") or "不明",
             "Latitude":     safe_float(hypo.get("latitude",  -200)),
