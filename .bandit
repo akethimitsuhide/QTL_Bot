@@ -1,0 +1,4 @@
+[bandit]
+# テストコードの assert（B101）などは pytest の通常の書き方のため対象外にする。
+# 本体コード（bot.py / cogs/ / core/）だけを検査する。
+exclude = ./tests,./.git,./data,./web

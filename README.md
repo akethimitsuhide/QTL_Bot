@@ -29,7 +29,7 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
 
 - **接続の一元管理**: `core/p2p_ws_hub.py` の `P2PWebSocketHub` が WebSocket 接続を1本だけ保持し、code ごとに各 Cog へ配信する（551→地震情報、552→津波、556→EEW、9611→地震感知情報）。P2P の接続数上限（IP あたり2本）に対応するため。
 - **切り替え条件**（どちらか早い方）: 連続接続失敗が `P2P_FAILOVER_THRESHOLD`（既定5）回に達する、または接続できていない状態が `P2P_FAILOVER_DISCONNECT_SECONDS`（既定10）秒続く。
-- **取得元**（`QUAKE_FAILOVER_SOURCES`、既定 `quake_one,jma_json`。先頭から順に試す）: Quake.One（http のみの第三者配信のため入力を検証する。震度速報・震源に関する情報の段階は無く最終形のみ届く）、気象庁HPのJSON。気象庁防災情報XML（`jma_xml`）は既定の対象外で、指定すれば使える。取得した電文は P2P の JMAQuake（code=551）互換形式に変換し、通常と同じ通知処理を通す（フッターに「P2P地震情報の障害のため〇〇から取得」と表示）。
+- **取得元**（`QUAKE_FAILOVER_SOURCES`、既定 `quake_one,jma_json`。先頭から順に試す）: Quake.One（http のみの第三者配信のため入力を検証する。震度速報・震源に関する情報の段階は無く最終形のみ届く）、気象庁HPのJSON。気象庁防災情報XML（`jma_xml`）は既定の対象外で、指定すれば使える（XML は DTD/ENTITY 宣言・UTF-16/32・2MB 超を破棄してからパースする）。取得した電文は P2P の JMAQuake（code=551）互換形式に変換し、通常と同じ通知処理を通す（フッターに「P2P地震情報の障害のため〇〇から取得」と表示）。
 - **復旧**: WebSocket が `P2P_FAILOVER_RECOVERY_SECONDS`（既定60）秒以上連続して接続できたらフォールバックを停止する。WebSocket の再接続はフォールバック中も続ける。
 - **重複防止**（`QuakeContentDedupe`）: 震源要素（発生時刻±3分・震央地名・M・深さ）と震度分布の内容指紋で照合し、取得元をまたいでも同じ内容は通知しない（保持は最大200件・6時間）。
 - **起動時**: 各取得元の現在の一覧を既知として記録し、通知しない。発表が `P2P_FAILOVER_CATCHUP_MINUTES`（既定30）分より古い情報も通知しない。
@@ -645,6 +645,18 @@ python3 bot.py --audit_deps
 3. `python3 bot.py --audit_deps` で脆弱性が無いことを確認する。
 4. コミットする。
 
+### コードの静的セキュリティ解析（bandit）
+自作コード（`bot.py`・`cogs/`・`core/`）の危険な書き方を [bandit](https://bandit.readthedocs.io/) で点検できる（開発用。本番機には不要）。
+
+```bash
+pip install bandit
+bandit -r . --ini .bandit       # 指摘が 0 件なら "No issues identified."
+```
+
+- `.bandit` で `tests/` を対象外にしている（pytest の `assert`（B101）などは正しい書き方のため）。`--ini .bandit` を付けずに実行すると `tests/` も検査され、大量の B101 が出る。
+- 誤検知で、理由を説明できるものだけ、該当行に `# nosec Bxxx - 理由` を付けて除外している（`core/delivery_stats.py`・`core/notification_log.py` の記録失敗の握りつぶし、`core/dependency_audit.py` の固定引数での `subprocess`、`core/log_mask.py` の変数名の正規表現、`cogs/system.py` の `0.0.0.0` 判定）。新しく付けるときも理由を必ず書く。
+- 外部から取得した XML（気象庁防災情報XML）は `core/quake_failover.py` の `parse_xml_safe()` 経由でのみパースする。DTD／ENTITY 宣言（Billion laughs 等の資源枯渇攻撃）と UTF-16/32 の XML は破棄し、サイズは `XML_MAX_BYTES`（2MB）で制限する。追加依存（`defusedxml`）は使わない。
+
 ---
 
 ## Web Dashboard
@@ -799,7 +811,7 @@ python3 -m pytest tests/ -q
 | `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
-| `test_quake_failover.py` | P2P 障害時の代替取得 |
+| `test_quake_failover.py` | P2P 障害時の代替取得・取得した XML の安全確認（DTD/ENTITY・UTF-16/32 の拒否） |
 | `test_kyoshin_phase.py` | 強震モニタ検知の揺れの強さ（4段階）・`latest.json` の配信元 |
 | `test_quake_test_input.py` | `--test_quake` の気象庁JSON／Quake.One入力・観測点名の「＊」照合・代替取得の既定の取得元 |
 | `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
@@ -895,6 +907,7 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 QTL_Bot/
 ├── bot.py                    エントリーポイント（Cog 登録・起動）
 ├── requirements.txt
+├── .bandit                   bandit（静的セキュリティ解析）の設定（tests/ を除外）
 ├── .env.example / .env.kyoshin.example / .env.yomiage.example
 ├── region_map.json           EEWの警報地域名 → 表示用地域名
 ├── prefecture_map.json       区域名 → 都道府県名（震度速報の読み上げ等）
