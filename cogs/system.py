@@ -252,8 +252,9 @@ class SystemCog(commands.Cog):
             import psutil as _psutil_init
             self._status_psutil_proc = _psutil_init.Process(os.getpid())
             self._status_psutil_proc.cpu_percent(interval=None)  # 基準値をプライミング
-        except Exception:
-            pass
+        except Exception as e:
+            # psutil が無い・取得できない環境では CPU 使用率を出さないだけ（動作は続ける）
+            logger.debug(f"psutil の初期化をスキップしました: {type(e).__name__}: {e}")
 
         # -- ヘルスチェックキャッシュ --
         self.health_check_cache = None
@@ -539,8 +540,8 @@ class SystemCog(commands.Cog):
                 event_manager = getattr(monitor, "event_manager", None)
                 if event_manager is not None:
                     active_event_ids = list(getattr(event_manager, "events", {}).keys())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"強震モニタの検知中イベントを取得できません: {type(e).__name__}: {e}")
         return {
             "enabled": ENABLE_KYOSHIN,
             "active_event_count": len(active_event_ids),
@@ -851,8 +852,8 @@ class SystemCog(commands.Cog):
                     return bool(task_obj.is_running())
                 if hasattr(task_obj, "done"):
                     return not task_obj.done()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"タスクの稼働状態を取得できません: {type(e).__name__}: {e}")
             return False
 
         p2p_hub_alive = self._p2p_hub_stats() is not None
@@ -1791,7 +1792,7 @@ class SystemCog(commands.Cog):
             logger.info(
                 f"Web ダッシュボード起動: http://{host}:{port}/status ({ip_note}／{auth_note})"
             )
-            if host == "0.0.0.0" and not allowed_ips and not dashboard_auth:
+            if host == "0.0.0.0" and not allowed_ips and not dashboard_auth:  # nosec B104 - バインドではなく、全アドレス指定への警告判定
                 logger.warning(
                     "Web Dashboard が 0.0.0.0（全アドレス）にバインドされ、"
                     "かつ WEB_DASHBOARD_ALLOWED_IPS・WEB_DASHBOARD_TOKEN も未設定です。"

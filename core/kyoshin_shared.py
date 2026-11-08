@@ -207,8 +207,9 @@ class DualImageFetcher:
                 async with session.head(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status == 200:
                         return url, ts
-            except Exception:
-                pass
+            except Exception as e:
+                # 画像が未公開・一時的な通信失敗は想定内。次の候補時刻を試す
+                logger.debug(f"強震モニタ画像の存在確認に失敗: {url}: {type(e).__name__}")
         return None, last_ts
 
     async def fetch_urls(self, session: aiohttp.ClientSession) -> tuple[str | None, str | None]:

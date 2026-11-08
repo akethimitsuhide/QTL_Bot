@@ -353,8 +353,8 @@ class VolcanoCog(commands.Cog, AudioMixin):
                         f"{dt.year}年{dt.month}月{dt.day}日"
                         f"{dt.hour}時{dt.minute:02d}分"
                     )
-                except Exception:
-                    pass
+                except (ValueError, TypeError):
+                    logger.debug(f"火山情報: 発表日時を整形できません（そのまま使用）: {report_datetime!r}")
 
             # 警戒レベルを抽出して色を決定
             alert_code = "00"

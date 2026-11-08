@@ -451,8 +451,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             if origin_time and "時" in origin_time and "分頃" in origin_time:
                 try:
                     time_speak = origin_time[origin_time.index("日") + 1:]
-                except Exception:
-                    pass
+                except ValueError:
+                    logger.debug(f"長周期地震動: 発生時刻から読み上げ用の時刻を取り出せません: {origin_time!r}")
 
             speak_text = _YOMI.render("OTHER_LONG_PERIOD", {
                 "発生時刻": time_speak, "震源": hypo_name,
@@ -504,8 +504,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                         depth_km = abs(depth_m) // 1000
                         if depth_km > 0:
                             depth_str = f"{depth_km}km"
-                    except Exception:
-                        pass
+                    except (ValueError, IndexError):
+                        logger.debug(f"震源要素更新: 深さを解釈できません: {coord!r}")
 
                 comment = body.get("Comments", {}).get("FreeFormComment", "")
 
@@ -588,8 +588,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                     try:
                         time_speak = origin_time[origin_time.index("日") + 1:].replace("頃", "")
                         # 例: "8時20分" → "8時20分"
-                    except Exception:
-                        pass
+                    except ValueError:
+                        logger.debug(f"震源要素更新: 発生時刻から読み上げ用の時刻を取り出せません: {origin_time!r}")
                 speak_text = _YOMI.render("OTHER_HYPO_UPDATE", {
                     "情報名": title_text, "発生時刻": time_speak, "震源": hypo_name,
                     "マグニチュード": str(magnitude), "深さ": depth_str,

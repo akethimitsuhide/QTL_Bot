@@ -166,8 +166,8 @@ async def _download(session: aiohttp.ClientSession, url: str, path: str) -> bool
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-        except Exception:
-            pass
+        except OSError as rm_err:
+            logger.debug(f"GISデータの一時ファイルを削除できません: {tmp_path}: {rm_err}")
         return False
 
 

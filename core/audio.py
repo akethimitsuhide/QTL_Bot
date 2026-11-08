@@ -230,8 +230,9 @@ class AudioMixin:
             finally:
                 try:
                     self.mp3_queue.task_done()
-                except Exception:
-                    pass
+                except ValueError:
+                    # task_done() の呼び出し過多（キューの管理がずれた場合）。再生は継続する
+                    logger.debug("play_mp3: task_done() が get() より多く呼ばれました")
 
     def _play_mp3_blocking(self, path: str, key: str):
         try:
@@ -325,8 +326,9 @@ class AudioMixin:
                     f"EWS PCMのチャンネル数（1ch, モノラル）と一致していません。"
                     f"再生速度・ピッチが意図しない値になる可能性があります。"
                 )
-        except Exception:
-            pass  # get_init() 自体の失敗は再生継続を優先し無視する
+        except Exception as e:
+            # get_init() 自体の失敗は再生継続を優先し、警告は出さない
+            logger.debug(f"play_ews_pcm: mixer 設定の確認に失敗しました: {type(e).__name__}: {e}")
 
         logger.info(f"play_ews_pcm: 再生開始 label={label} ({len(pcm_bytes)} bytes)")
         loop = asyncio.get_running_loop()
