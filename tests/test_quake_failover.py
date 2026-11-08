@@ -404,6 +404,29 @@ def test_xml_source_rejects_entity_declaration():
         asyncio.run(JmaXmlSource().list_items(_Session({JMA_XML_FEED_URL: _Resp(raw=evil)})))
 
 
+def test_ensure_xml_safe_rejects_unsafe_payloads():
+    import pytest
+    from core.quake_failover import ensure_xml_safe, parse_xml_safe
+    ok = b'<?xml version="1.0" encoding="UTF-8"?><feed><entry/></feed>'
+    ensure_xml_safe(ok)
+    assert parse_xml_safe(ok).tag == "feed"
+    # DOCTYPE が先頭4KBより後ろにあっても拒否する（コメントで押し出す回避策）
+    late = b'<?xml version="1.0"?><!--' + b"x" * 8000 + b'--><!doctype a [<!entity e "v">]><feed/>'
+    # 小文字でも拒否する
+    for bad in (late, b'<!doctype a><feed/>', b'<?xml version="1.0"?><!ENTITY a "b"><feed/>'):
+        with pytest.raises(RuntimeError):
+            ensure_xml_safe(bad)
+        with pytest.raises(RuntimeError):
+            parse_xml_safe(bad)
+    # UTF-16/32 は byte 列検査をすり抜けられるため拒否する
+    utf16 = '<?xml version="1.0"?><!DOCTYPE a [<!ENTITY e "v">]><feed/>'.encode("utf-16")
+    utf16le = '<feed/>'.encode("utf-16-le")
+    utf32 = '<feed/>'.encode("utf-32")
+    for bad in (utf16, utf16le, utf32):
+        with pytest.raises(RuntimeError):
+            ensure_xml_safe(bad)
+
+
 # ---------- QuakeInfoCog との結合（P2Pと代替取得の重複通知防止） ----------
 def test_cog_dedupes_across_p2p_and_failover():
     from unittest.mock import MagicMock

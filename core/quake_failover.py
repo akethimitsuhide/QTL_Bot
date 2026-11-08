@@ -64,7 +64,7 @@ import logging
 import re
 import time
 import traceback
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405 - 外部XMLは parse_xml_safe() 経由でのみパースする（DTD/ENTITY・巨大入力を拒否）
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -692,6 +692,33 @@ async def _read_body_limited(resp, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+
+def ensure_xml_safe(body: bytes) -> None:
+    """
+    外部から取得した XML を ElementTree へ渡す前の安全確認（2026-11-05 追加）。
+
+    気象庁の電文XML・フィードは DTD/ENTITY 宣言を使わない。実体参照の展開による
+    資源枯渇（Billion laughs 等）を避けるため、これらを含む XML は破棄する。
+    - <!DOCTYPE・<!ENTITY は、先頭だけでなく全体から（大文字小文字を区別せず）探す。
+    - UTF-16/32（BOM または NUL バイト）の XML は、上のバイト列検査をすり抜けられる
+      ため破棄する（電文は UTF-8）。
+    問題があれば RuntimeError を送出する。
+    """
+    if body[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff") or body[:2] in (b"\xff\xfe", b"\xfe\xff") \
+            or b"\x00" in body[:64]:
+        raise RuntimeError("UTF-8 以外（UTF-16/32）のXMLのため破棄しました")
+    upper = body.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise RuntimeError("DTD/ENTITY宣言を含むXMLのため破棄しました")
+
+
+def parse_xml_safe(raw: bytes) -> "ET.Element":
+    """ensure_xml_safe() を通した XML だけをパースする（外部XMLのパースはここに集約）。"""
+    ensure_xml_safe(raw)
+    # DTD/ENTITY を含まないこと・サイズ上限内であることを上で確認済み
+    return ET.fromstring(raw)  # nosec B314
+
+
 class JmaXmlSource(QuakeFallbackSource):
     """気象庁防災情報XML（随時フィード eqvol.xml と各電文XML）。"""
     name = "jma_xml"
@@ -703,12 +730,7 @@ class JmaXmlSource(QuakeFallbackSource):
             body = await _read_body_limited(resp, XML_MAX_BYTES)
         except RuntimeError:
             raise RuntimeError("XMLが想定より大きいため破棄しました")
-        # 気象庁の電文XML・フィードは DTD/ENTITY 宣言を使わない。外部からの
-        # 入力をパースするため、実体参照の展開による資源枯渇（Billion laughs
-        # 等）を避ける目的で、これらを含むXMLは安全のため破棄する。
-        head = body[:4096].upper()
-        if b"<!DOCTYPE" in head or b"<!ENTITY" in body.upper():
-            raise RuntimeError("DTD/ENTITY宣言を含むXMLのため破棄しました")
+        ensure_xml_safe(body)
         return body
 
     async def list_items(self, session) -> list[SourceItem]:
@@ -718,7 +740,7 @@ class JmaXmlSource(QuakeFallbackSource):
             if resp.status != 200:
                 raise RuntimeError(f"HTTP {resp.status}")
             raw = await self._read_limited(resp)
-        root = ET.fromstring(raw)
+        root = parse_xml_safe(raw)
         items = []
         for entry in root.iter():
             if not (isinstance(entry.tag, str) and entry.tag.rsplit("}", 1)[-1] == "entry"):
@@ -743,7 +765,7 @@ class JmaXmlSource(QuakeFallbackSource):
             if resp.status != 200:
                 raise RuntimeError(f"HTTP {resp.status}")
             raw = await self._read_limited(resp)
-        root = ET.fromstring(raw)
+        root = parse_xml_safe(raw)
         return jma_quake_to_p2p(_xml_to_dict(root), list_title=item.title, item_key=item.key)
 
 
