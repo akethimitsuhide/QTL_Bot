@@ -81,9 +81,8 @@ def record_notification(kind: str, title: str, detail: str = "") -> None:
         }
         _notification_log.append(record)
         logger.info(f"{NOTIF_RECORD_TAG} " + json.dumps(record, ensure_ascii=False))
-    except Exception:
-        # 通知記録の失敗で本来の通知フローを妨げないよう、ここで握りつぶす。
-        # （ロガーの呼び出し自体も失敗しうる状況を想定し、あえて何もしない）
+    except Exception:  # nosec B110 - 通知記録の失敗で本来の通知フローを妨げないよう、ここで握りつぶす
+        # （ロガーの呼び出し自体も失敗しうる状況を想定し、ここではログも出さない）
         pass
 
 

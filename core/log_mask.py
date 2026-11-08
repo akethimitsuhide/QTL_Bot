@@ -22,7 +22,7 @@ import re
 
 MASK = "***"
 
-_SECRET_NAME = r"(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|apikey|authorization|cookie|session[_-]?id|credential)"
+_SECRET_NAME = r"(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|apikey|authorization|cookie|session[_-]?id|credential)"  # nosec B105 - 秘密そのものではなく、マスク対象の変数名を表す正規表現
 
 # 1) Webhook URL（URL 全体を置き換える）
 _DISCORD_WEBHOOK = re.compile(

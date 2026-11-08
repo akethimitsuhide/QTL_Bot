@@ -19,7 +19,7 @@ core/dependency_audit.py
 import importlib.metadata as importlib_metadata
 import importlib.util
 import re
-import subprocess
+import subprocess  # nosec B404 - 固定の引数リストで pip-audit を実行するだけ（shell 不使用・外部入力なし）
 import sys
 from pathlib import Path
 from typing import Callable
@@ -134,7 +134,7 @@ def run_dependency_audit(lock_path: Path | str = DEFAULT_LOCK_PATH) -> int:
         "-r", str(lock_path), "--no-deps", "--disable-pip", "--progress-spinner", "off",
     ]
     try:
-        result = subprocess.run(cmd, timeout=_AUDIT_TIMEOUT_SEC)
+        result = subprocess.run(cmd, timeout=_AUDIT_TIMEOUT_SEC)  # nosec B603 - cmd は sys.executable と固定引数のみ
     except subprocess.TimeoutExpired:
         print(f"[Audit] pip-audit が{_AUDIT_TIMEOUT_SEC}秒でタイムアウトしました。")
         return 2
