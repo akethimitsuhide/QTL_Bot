@@ -3,21 +3,25 @@ bot.py
 ======
 QTL_Bot の起動専用エントリーポイント。
 
-【Step8 時点の状態: EEW/地震情報Cog分割 + 共通AudioCog導入】
-分割済みの Cog は以下の9つ:
+【現在の構成】
+登録している Cog は以下の12個（登録順。AudioCog は EewCog・QuakeInfoCog より前、
+ApmCog は全 Cog より前に登録する必要がある）:
   - ApmCog（Mackerel APM連携。デフォルト無効、全Cogより先に登録）
-  - AudioCog（音声読み上げ・MP3再生の実体。EewCog/QuakeInfoCogが共有）
+  - AudioCog（音声読み上げ・MP3再生の実体。EewCog/QuakeInfoCog/JishinKanchiCog/KyoshinMonitorCogが共有）
   - EewCog（緊急地震速報〈Wolfx/P2P EEW〉専用）
-  - QuakeInfoCog（地震情報〈震度速報・各地の震度等〉専用）
+  - QuakeInfoCog（地震情報〈震度速報・各地の震度等〉専用。P2P障害時の代替取得も担当）
   - TsunamiCog（津波・観測・予報・南海トラフ〈tsunami API経由〉）
+  - JishinKanchiCog（P2P地震感知情報〈code=9611〉。デフォルト無効）
   - VolcanoCog（火山情報・噴火速報・噴火警報）
   - UsgsCog（USGS海外地震情報）
   - OtherInfoCog（長周期地震動・気象庁その他情報〈quake API経由〉）
+  - QuakeSummaryCog（日次・週次の地震サマリー。デフォルト無効）
   - SystemCog（!status・Web Dashboard・エラー監視・リソース監視）
-  - KyoshinMonitorCog（強震モニタ画像の色相解析による揺れ検知。
-    グリッド分割による疑似観測点方式。Pillowが必要）
+  - KyoshinMonitorCog（強震モニタ・長周期地震動モニタ・振動レベルの受信と通知、
+    実観測点データ〈intensity-points.json〉に基づく画像解析での揺れ検知。Pillowが必要）
+津波・火山・USGS・その他の各Cogは、自分専用の音声キューを持つ（AudioMixin）。
 
-【Step8での変更点（令和8年熊本地震を受けて）】
+【Step8 での分割の経緯】
 令和8年熊本地震では、緊急地震速報と地震情報がほぼ同時に、かつ短時間に
 大量発生し、旧QuakeEewCogの単一音声キューでは片方の情報を読み上げ中に
 もう片方の重要な情報が来ても再生が遅れる問題があった。
