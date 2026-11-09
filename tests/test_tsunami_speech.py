@@ -138,6 +138,19 @@ def test_gate_escalation_rings_again_and_cancel_once():
     assert not gate.decide(AlertState(source="jma"), 320).speak  # 解除の二重読み上げなし
 
 
+def test_gate_first_cancel_without_state_is_spoken_once():
+    """状態を持たない（再起動直後など）ときの解除は第一報として読み、続く同じ解除は読まない。"""
+    gate = AlertGate()
+    d = gate.decide(AlertState(source="jma"), 0)
+    assert d.speak and not d.ews and d.change.kind == "cancel"
+    assert not gate.decide(AlertState(source="p2p"), 10).speak
+
+
+def test_grade_from_kind_code_73_is_forecast_despite_cancel_wording():
+    assert grade_from_kind_name("津波警報解除・津波予報", "73") == "Forecast"
+    assert grade_from_kind_name("津波警報解除", "50") is None
+
+
 def test_gate_state_expires():
     gate = AlertGate()
     w = AlertState(areas={"岩手県": "Warning"}, source="jma")

@@ -66,7 +66,13 @@ def grade_from_kind_name(kind_name: str, kind_code: str = "") -> Optional[str]:
     「大津波警報」は「津波警報」を部分文字列に含むため、必ず先に判定する。
     """
     name = kind_name or ""
-    if kind_code == "00" or "津波なし" in name or "解除" in name:
+    if kind_code == "00":
+        return None
+    # コード71〜73は津波予報。73（津波警報解除・津波予報への切替）のように名称に「解除」を
+    # 含むものがあるため、名称判定より先に見る（notify_tsunami_forecast の警報レベル表と同じ扱い）
+    if str(kind_code) in ("71", "72", "73"):
+        return "Forecast"
+    if "津波なし" in name or "解除" in name:
         return None
     if "大津波警報" in name:
         return "MajorWarning"
@@ -326,6 +332,12 @@ class AlertGate:
         if prev is not None and now - self._ts > ALERT_STATE_TTL_SEC:
             prev = None
         change = classify_change(prev, curr)
+
+        # 状態をまだ一度も保持していない（起動直後・TTL経過後）ときの解除は、
+        # 「変化なし」ではなく解除の第一報として読む（再起動後に届いた解除を無音にしない）。
+        # 状態は空で保持されるため、別情報源から続けて届く同じ解除は none になる。
+        if change.kind == "none" and prev is None and curr.empty:
+            change = Change("cancel")
 
         if change.kind == "none":
             self._merge(prev, curr, now)

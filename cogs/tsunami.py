@@ -48,10 +48,9 @@ P2PImageMixin）は、気象庁シェープファイル/GeoJSONベースの地�
 削除済み。
 
 【設計メモ】
-- Circuit Breaker（連続失敗時のバックオフ）は core.fetch_backoff.FetchBackoff
-  に共通化済み（quake.py 等で採用）。本Cogはfetch_tsunamiの旧ポーリング処理が
-  P2P津波情報WebSocket化により廃止されたため、そもそもCircuit Breakerを
-  使用していない（2026-08: 使われなくなっていた重複実装を削除した）。
+- 本Cogは Circuit Breaker（連続失敗時のバックオフ）を持たない。fetch_tsunamiの
+  旧ポーリング処理がP2P津波情報WebSocket化により廃止されたため
+  （2026-08: 使われなくなっていた重複実装を削除した）。
 - 音声再生（speak_local/play_mp3）は AudioMixin 経由で「自分自身の」
   speech_queue/mp3_queue/audio_files を使う設計のため、
   この Cog も __init__ で自前のキューを持つ
@@ -63,6 +62,7 @@ import aiohttp
 import asyncio
 import io
 import re
+import time
 import traceback
 from datetime import datetime
 from collections import defaultdict
@@ -83,9 +83,9 @@ from core.config import (
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.tsunami_speech import (
-    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, EventGate, StationHeightTracker,
-    build_offshore_observation_speech, build_tide_time_speech, obs_grade_from_height,
-    offshore_station_keys, state_from_jma_forecast,
+    GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, AlertGate, AlertState, EventGate,
+    StationHeightTracker, build_offshore_observation_speech, build_tide_time_speech,
+    obs_grade_from_height, offshore_station_keys, state_from_jma_forecast, state_from_p2p_tsunami,
 )
 from core.helpers import truncate_embed_description, format_jma_time
 from core.yomiage import TSUNAMI_DEFAULTS, TSUNAMI_TAGS, TemplateSet
@@ -149,20 +149,12 @@ class TsunamiCog(commands.Cog, AudioMixin):
         self.last_tsunami_observation_id = None
         self._tsunami_observation_initialized = False  # 初回ポーリングでは通知せずIDのみ記録
 
-        # 【2026-09-01 追加】EWS（緊急警報放送）信号音のイベント単位管理。
-        # 経緯: EWS信号音（core/ews_signal.py, core.audio.AudioMixin.
-        # play_ews_pcm）は、以前は cogs/quake.py の地震情報通知
-        # （domesticTsunamiフィールドがWarning/MajorWarningの場合）
-        # からのみ再生されており、津波情報そのもの（本Cogの
-        # notify_tsunami / notify_tsunami_forecast）が発表・更新
-        # されたタイミングでは一切再生されていなかった（実機テストで
-        # 「津波警報発表・更新時にEWSの音が再生されない」として報告
-        # された不具合）。cogs/quake.py._should_play_ews /
-        # _play_ews_signal と同じロジック（同一イベントでの警報区分の
-        # エスカレーション時のみ再度再生する）をここに移植する。
-        # キー: イベント識別子（津波情報のid、またはtsunami_forecast
-        # のEventID）、値: 直近に再生した際の警報区分（grade文字列）。
-        self._ews_last_grade_by_event: dict[str, str] = {}
+        # 【2026-11-09 変更】警報・注意報・予報の読み上げと EWS 信号音の重複防止は、
+        # 情報源（P2P地震情報・気象庁HP JSON）をまたいで1系統の AlertGate で判定する
+        # （core/tsunami_speech.py の AlertGate 参照）。以前は EWS だけを、情報源ごとに
+        # 別のID（P2Pの id / 気象庁の EventID）をキーにして判定していたため、同じ津波で
+        # 両方の経路から届くと読み上げ・EWS が2回鳴り得た。Embed 通知は常に送る。
+        self._alert_gate = AlertGate()
 
         # 【2026-09-28追加】満潮時刻・津波到達予想時刻情報の読み上げ重複防止。
         # 「最も早い到達予想の予報区・時刻」が変化し、かつ前回読み上げから
@@ -524,63 +516,24 @@ class TsunamiCog(commands.Cog, AudioMixin):
         """
         return format_tsunami_height_value(raw)
 
-    def _should_play_ews(self, event_key: str, grade: str) -> bool:
+    def _decide_alert(self, state: AlertState, is_test: bool) -> tuple[bool, bool]:
         """
-        【2026-09-01 追加】同一の津波イベントについて EWS 信号音を
-        再度鳴らすべきかを判定する（cogs/quake.py._should_play_ews
-        からの移植。判定ロジックは同一）。
+        警報・注意報・予報の通知について、(読み上げるか, EWS信号音を鳴らしてよいか) を返す。
 
-        経緯: EWS信号音（core/ews_signal.py, core.audio.AudioMixin.
-        play_ews_pcm）は、以前は cogs/quake.py の地震情報通知
-        （domesticTsunamiフィールドがWarning/MajorWarningの場合）
-        からのみ再生されており、津波情報そのもの（本Cogの
-        notify_tsunami / notify_tsunami_forecast）が発表・更新
-        されたタイミングでは一切再生されていなかった（実機テストで
-        「津波警報発表・更新時にEWSの音が再生されない」として報告
-        された不具合）。
-
-        quake.py版は真のイベント識別子が無いP2P地震情報形式に対する
-        近似キー（発生時刻+震源地名）を使っていたが、津波情報は
-        notify_tsunami側でP2Pの"id"、notify_tsunami_forecast側で
-        JMAの"EventID"という、より確実な識別子を呼び出し元から
-        受け取れるため、本メソッドではevent_keyを呼び出し元に
-        計算させる設計にしている（quake.py側のように内部で
-        eq/hypoから逆算しない）。
-
-        判定ルール:
-        - このキーで一度もEWSを鳴らしていなければ True（初回は必ず鳴らす）
-        - 既に鳴らした際の区分より今回の区分の方が深刻
-          （Warning → MajorWarning 等）であれば True
-        - それ以外（同一区分の繰り返し等）は False
+        情報源をまたいだ二重読み上げ・二重EWSの防止と、続報での不要な再読み上げの抑止
+        （最上位区分が同じで、注意報以上の予報区の追加も無い続報は読まない）を AlertGate で行う。
+        テスト通知は本番の状態を汚染しないよう、判定を経ずに (True, True) を返す
+        （EWS は呼び出し側が警報区分でも絞る）。
         """
-        prev_grade = self._ews_last_grade_by_event.get(event_key)
-
-        if prev_grade is None:
-            self._ews_last_grade_by_event[event_key] = grade
-            return True
-
-        try:
-            prev_rank = TSUNAMI_GRADE_ORDER.index(prev_grade)
-            curr_rank = TSUNAMI_GRADE_ORDER.index(grade)
-        except ValueError:
-            # 未知の区分値の場合は安全側に倒して鳴らす
-            self._ews_last_grade_by_event[event_key] = grade
-            return True
-
-        if curr_rank < prev_rank:
-            # 順位が若いほど深刻（MajorWarning=0 < Warning=1）
-            self._ews_last_grade_by_event[event_key] = grade
+        if is_test:
+            return True, True
+        decision = self._alert_gate.decide(state, time.time())
+        if not decision.speak:
             logger.info(
-                f"EWS: 同一津波イベント({event_key})で警報区分がエスカレーション "
-                f"({prev_grade} → {grade}) のため再度信号音を再生します"
+                f"津波: 読み上げ・EWSをスキップします（前回から変化なし、または別の情報源で通知済み）"
+                f" source={state.source} change={decision.change.kind}"
             )
-            return True
-
-        logger.debug(
-            f"EWS: 同一津波イベント({event_key})・区分据え置き "
-            f"({prev_grade} → {grade}) のため信号音の再生をスキップします"
-        )
-        return False
+        return decision.speak, decision.ews
 
     async def _play_ews_signal(self, grade: str) -> None:
         """
@@ -611,11 +564,6 @@ class TsunamiCog(commands.Cog, AudioMixin):
             cancelled = data.get("cancelled", False)
             areas = data.get("areas", [])
             time_str = format_jma_time(data.get("issue", {}).get("time", "不明"))
-            # 画像URL生成・重複判定用のID。P2P地震情報WebSocket APIは
-            # メッセージによって "id" ではなく "_id" を使うことがあるため
-            # 両対応する（quake.py側と同じ理由）。
-            tsunami_id = data.get("id") or data.get("_id")
-
             source = data.get("issue", {}).get("source", "P2P地震情報")
 
             # cancelled=True のときも読み上げブロックから安全に参照できるよう、
@@ -806,7 +754,9 @@ class TsunamiCog(commands.Cog, AudioMixin):
             else:
                 speak_text = _YOMI.render("TSUNAMI_P2P_ISSUED_PLAIN", {"情報名": title})
 
-            await self.speak_local(speak_text)
+            speak_ok, ews_ok = self._decide_alert(state_from_p2p_tsunami(data), is_test)
+            if speak_ok:
+                await self.speak_local(speak_text)
             # 【2026-09-06 修正】以前は grade に応じて vxse51/52/53/5c の
             # MP3（元々は震度速報等・地震情報向けに用意されたチャイム）を
             # ここで再生していたが、津波情報の発表時に地震情報用のチャイムが
@@ -824,10 +774,8 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # _should_play_ews / _play_ews_signal のdocstring参照）。
             # is_test時は本番のEWS状態（_ews_last_grade_by_event）を
             # 汚染しないよう、判定を経ずに毎回鳴らす。
-            if EWS_ENABLE and not cancelled and max_grade in ("Warning", "MajorWarning"):
-                event_key = str(tsunami_id or f"{data.get('issue', {}).get('time', '')}")
-                if is_test or self._should_play_ews(event_key, max_grade):
-                    await self._play_ews_signal(max_grade)
+            if EWS_ENABLE and not cancelled and max_grade in ("Warning", "MajorWarning") and ews_ok:
+                await self._play_ews_signal(max_grade)
         except Exception as e:
             record_delivery(False, "津波情報", str(e))
             logger.error(f"notify_tsunami エラー: {e}")
@@ -1935,13 +1883,15 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # 【2026-09-06 修正】notify_tsunami と同じ理由で、地震情報用
             # チャイム（WARN_MP3: vxse51/52/5c）の再生を廃止した。津波情報
             # 発表時に鳴らす音声は「読み上げ」と「EWS警告音」のみとする。
-            if is_cancelled:
-                await self.speak_local(cancel_speech)
-            else:
-                speak_label = WARN_LABEL.get(max_level, "津波情報")
-                await self.speak_local(_YOMI.render("TSUNAMI_JMA_ISSUED", {
-                    "情報名": title, "区分": speak_label,
-                }))
+            speak_ok, ews_ok = self._decide_alert(state_from_jma_forecast(detail), is_test)
+            if speak_ok:
+                if is_cancelled:
+                    await self.speak_local(cancel_speech)
+                else:
+                    speak_label = WARN_LABEL.get(max_level, "津波情報")
+                    await self.speak_local(_YOMI.render("TSUNAMI_JMA_ISSUED", {
+                        "情報名": title, "区分": speak_label,
+                    }))
 
             # ── EWS（緊急警報放送）信号音 ──
             # 【2026-09-01 追加】notify_tsunami と同じ理由・同じ仕組みで
@@ -1952,10 +1902,8 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # よう、判定を経ずに毎回鳴らす。
             ews_grade_map = {5: "MajorWarning", 4: "Warning"}
             ews_grade = ews_grade_map.get(max_level)
-            if EWS_ENABLE and not is_cancelled and ews_grade:
-                event_key = str(head.get("EventID") or ttl)
-                if is_test or self._should_play_ews(event_key, ews_grade):
-                    await self._play_ews_signal(ews_grade)
+            if EWS_ENABLE and not is_cancelled and ews_grade and ews_ok:
+                await self._play_ews_signal(ews_grade)
 
         except Exception as e:
             record_delivery(False, "津波予報", str(e))
