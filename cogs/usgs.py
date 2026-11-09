@@ -26,9 +26,8 @@ cogs/usgs.py
   そのため本Cogでは「USGS_CHANNEL_ID → CHANNEL_ID」のフォールバックのみ行う。
   quake_channel と同じ値にしたい場合は .env で USGS_CHANNEL_ID を
   明示的に QUAKE_CHANNEL_ID と同じ値に設定すること。
-- Circuit Breaker（_fetch_backoff_is_active 等）は quake.py/tsunami.py と
-  同じロジックをこの Cog 内にも個別実装している
-  （Step5でSystemCog切り出し時に共通化を検討）。
+- Circuit Breaker（_fetch_backoff_is_active 等）は、この Cog 内に個別実装している
+  （他のCogは持たない。共通化用のモジュールは使われなかったため削除した）。
 """
 import discord
 from discord.ext import commands, tasks

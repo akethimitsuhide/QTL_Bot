@@ -36,7 +36,6 @@ code=551 のメッセージを受け取る方式に移行した（handle_p2p_qua
 - core.constants   : INT_MAP, SHINDO_COLORS, QUAKE_TYPE_MAP, TSUNAMI_MAP
 - core.helpers     : format_jma_time
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
-- core.fetch_backoff.FetchBackoff : Circuit Breaker（連続失敗時のバックオフ）
 - core.gis_render.render_shindo_map / is_outside_japan_bbox / render_overseas_map :
   GIS地図描画（試験導入、2026-09-13〜。GIS_MAP_ENABLE=false・外部データ
   未取得時はNoneを返すのでその場合は画像添付を省略するだけでよい）。

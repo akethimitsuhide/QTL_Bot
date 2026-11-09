@@ -27,7 +27,6 @@ cogs/quake.py の QuakeInfoCog が別Cogとして扱う。
 - core.helpers     : safe_int, safe_float, safe_bool, truncate_embed_description
 - core.audio.AudioClientMixin : speak_local, play_mp3（AudioCog に委譲）
 - core.ws_helpers  : ws_connect_loop（WebSocket自動再接続の共通ループ）
-- core.fetch_backoff.FetchBackoff : Circuit Breaker（未使用だが将来のfetch系拡張に備え保持）
 - core.kyoshin_shared : DualImageFetcher, fetch_vibration_level, shindo_to_color,
                         estimate_max_shindo_from_image（強震モニタ監視ループ用）
 - core.gis_render.render_eew_warn_map / render_shindo_map : GIS地図描画

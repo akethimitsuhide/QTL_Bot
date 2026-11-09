@@ -24,7 +24,7 @@ core.kyoshin_detector / core.kyoshin_image_monitor / core.kyoshin_stations を
 【方針転換の経緯（2026-07-22、画像ピクセルグリッド方式への転換）】
 当初はHSVマスクで抽出した「アクティブセル（絶対震度が閾値以上）」を
 8近傍の連結成分でクラスタリングし、複数フレーム持続を見る
-（core.kyoshin_cluster_tracker.ClusterTracker）方式だったが、これは
+（旧 core.kyoshin_cluster_tracker.ClusterTracker。現在は削除済み）方式だったが、これは
 「震度の絶対値が静的に隣接している」ことしか見ておらず、単一観測点
 由来のGIF圧縮ノイズが偶然2〜3セルにまたがるだけで誤検知に至る
 ケースが多発した。
