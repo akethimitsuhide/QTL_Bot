@@ -44,7 +44,9 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
   - 沖合の津波観測に関する情報（VTSE52、`notify_tsunami_observation_offshore`）: 観測点ごとに押し・引き・状態を表示し、新規追加の観測点を読み上げる。
   - 各地の満潮時刻・津波到達予想時刻に関する情報（`notify_tsunami_observation_tide`）。
   - 上記以外の観測系は汎用の `notify_tsunami_observation`。南海トラフ地震臨時情報・震源要素更新のお知らせは `OtherInfoCog` に委譲する。
-- 読み上げの文生成・状態変化の分類・二重読み上げ防止ゲートは `core/tsunami_speech.py`（純関数）。現在 `EventGate` による重複防止は満潮時刻・沖合観測の読み上げに配線済みで、`AlertGate`（警報状態の変化判定）と沿岸観測（VTSE51）の読み上げは未配線。
+- 読み上げの文生成・状態変化の分類・二重読み上げ防止ゲートは `core/tsunami_speech.py`（純関数）。
+  - **警報・注意報・予報**（P2P の `notify_tsunami`・気象庁の `notify_tsunami_forecast`）の読み上げと EWS 信号音は、`AlertGate` が情報源をまたいで判定する（予報区名と区分の「状態」を比較するため、P2P の id と気象庁の EventID が違っても同じ津波を二重に読まない）。読み上げるのは、新規発表・最上位区分の変化（切り上げ・切り下げ）・注意報以上の予報区の追加・解除のときだけで、高さの修正などの続報は読まない。EWS は新規発表と警報区分の切り上げ時だけ鳴る。Embed の通知は抑止しない。読み上げの文言は従来どおり `.env.yomiage` のテンプレート（`YOMI_TSUNAMI_*`）を使う。Bot 再起動後に最初に届いた解除は、状態が無くても第一報として読む。`--test_*` のテスト通知は判定を経ずに毎回読み上げ・再生する。
+  - `EventGate` は満潮時刻・沖合観測の読み上げの重複防止に使う。沿岸観測（VTSE51）の読み上げは未対応（`build_coastal_observation_speech` は未配線）。
 - 津波情報の発表時に MP3 は再生しない（読み上げと EWS 信号音のみ）。
 - **EWS（緊急警報放送）信号音**: `EWS_ENABLE=true`（既定 false）のとき、津波警報・大津波警報の発表・更新時（P2P・気象庁HPの両形式、および地震情報の `domesticTsunami` 経由）に、昭和60年郵政省告示第405号準拠の AFSK 信号音（第二種開始信号）を再生する。同一イベントの警報区分が上がったときだけ再度鳴らす。波形は `core/ews_signal.py` がメモリ上で合成し、`pygame.mixer.Sound(buffer=...)` で再生する（ミキサーは 44100Hz・モノラルで初期化）。CLI テストでは `EWS_ENABLE` に関わらず再生する。
 
@@ -797,6 +799,8 @@ Discord 接続や環境変数なしで動くテストが `tests/` にある（�
 python3 -m pytest tests/ -q
 ```
 
+引数なしの `python3 -m pytest` でも、`pytest.ini` の `testpaths` により `tests/` だけが対象になる（`core/test_runner.py` は CLI テスト用のモジュールで、pytest のテストではない）。
+
 | ファイル | 対象 |
 |:---|:---|
 | `test_apm_expected_errors.py` | APM の想定内エラー（Timeout／Cancelled）の扱い |
@@ -836,6 +840,7 @@ python3 -m pytest tests/ -q
 | `test_startup_guard.py` | 起動時の既存情報の扱い |
 | `test_test_runner_input.py` | CLI テストの入力 JSON・引数の扱い |
 | `test_tsunami_speech.py` | 津波の読み上げ文・二重読み上げ防止 |
+| `test_tsunami_alert_wiring.py` | 警報・注意報・予報の読み上げ／EWS が、P2P・気象庁の両経路から届いても二重にならないこと（実際の通知経路で確認） |
 | `test_usgs_dedupe.py` | USGS の重複通知防止・`--test_quake` の入力検証 |
 
 ---
@@ -907,6 +912,7 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 QTL_Bot/
 ├── bot.py                    エントリーポイント（Cog 登録・起動）
 ├── requirements.txt
+├── pytest.ini                pytest の設定（テスト対象を tests/ に限定）
 ├── .bandit                   bandit（静的セキュリティ解析）の設定（tests/ を除外）
 ├── .env.example / .env.kyoshin.example / .env.yomiage.example
 ├── region_map.json           EEWの警報地域名 → 表示用地域名
@@ -962,7 +968,6 @@ QTL_Bot/
 │   ├── ws_helpers.py         WebSocket 自動再接続の共通ループ
 │   ├── p2p_ws_hub.py         P2P WebSocket の一元接続・code 別配信
 │   ├── quake_failover.py     P2P 障害時の代替取得（気象庁JSON/XML・Quake.One）と重複防止
-│   ├── fetch_backoff.py      HTTP ポーリングの Circuit Breaker（現在どこからも使われていない）
 │   ├── startup_guard.py      起動時の「既存情報」判定の補助
 │   ├── eew_convert.py        P2P EEW → Wolfx 形式の変換、予想震度の整形（純関数）
 │   ├── travel_time.py        JMA2001走時表の読み込みと「経過秒数 → P波・S波の到達距離」の逆引き（純関数）
@@ -982,7 +987,6 @@ QTL_Bot/
 │   ├── kyoshin_stations.py   実観測点データの取得・K近傍・色→震度変換
 │   ├── kyoshin_image_analyzer.py   画像→震度変換（EEW 時の最大震度推定）
 │   ├── kyoshin_detector.py   揺れ検知イベントの状態機械（EventManager）
-│   ├── kyoshin_cluster_tracker.py  旧グリッド方式の連結成分解析・持続確認（現在どこからも使われていない）
 │   └── kyoshin_image_monitor.py    イベントと連動した画像監視ループ
 └── tests/                    pytest（上記「単体テスト」）
 ```
