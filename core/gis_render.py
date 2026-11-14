@@ -1655,6 +1655,108 @@ def render_long_period_map(
         return None
 
 
+def _draw_lg_region_icons(draw: ImageDraw.ImageDraw, matched_regions: list, projector: _Projector) -> None:
+    """
+    長周期地震動の細分区域塗りつぶしの各区域中央に、階級ラベル（"1"〜"4"）付きの
+    角丸四角を置く（_draw_region_icons の長周期版。階級が大きい区域ほど前面に描く）。
+    色は LG_COLORS（震度スケールとは別の尺度）。
+    """
+    size = _REGION_ICON_SIZE
+    half = _px(size) / 2
+    radius = _px(size) * GIS_ICON_CORNER_RADIUS_RATIO
+    border = _px(size) * GIS_ICON_BORDER_RATIO
+    font = _font(max(round(size), 11))
+    for shape, level in sorted(matched_regions, key=lambda item: item[1]):
+        centroid = _shape_main_centroid(shape)
+        if centroid is None:
+            continue
+        x, y = projector.project(*centroid)
+        rgb = _rgb_to_rgba(LG_COLORS.get(level, LG_COLORS["不明"]))[:3]
+        if border > 0:
+            draw.rounded_rectangle(
+                [x - half - border, y - half - border, x + half + border, y + half + border],
+                radius=radius + border, fill=_icon_border_rgb(rgb),
+            )
+        draw.rounded_rectangle([x - half, y - half, x + half, y + half], radius=radius, fill=rgb)
+        draw.text((x, y), level, fill=(20, 20, 20, 255), font=font, anchor="mm")
+
+
+def render_long_period_area_map(
+    region_lg: Optional[dict] = None,
+    hypocenter_lonlat: Optional[tuple[float, float]] = None,
+) -> Optional[bytes]:
+    """
+    長周期地震動に関する観測情報向け：細分区域ごとの最大長周期地震動階級
+    （"1"〜"4"）で区域を塗りつぶした地図を返す（2026-11-14追加）。
+
+    観測点マーカーの地図（render_long_period_map）と対になる地図で、観測情報JSONの
+    Body.Intensity.Observation.Pref[].Area[]（Name / MaxLgInt）をそのまま使う。
+    区域の照合は render_shindo_map の region_shindo と同じく、細分区域のGeoJSON
+    （AreaForecastLocalE_GIS）の区域名で行う（観測情報の Area.Name と一致することを
+    実データで確認済み。Area.Code もGeoJSONの code と一致する）。
+
+    region_lg         : {細分区域名: 階級文字列("1"〜"4")}。階級が「不明」・空の区域は渡さないこと
+    hypocenter_lonlat : (経度, 緯度)。震源不明の場合は None
+
+    GeoJSON上に見つかる区域が1件も無い場合は None を返す（震源だけの地図は呼び出し側が
+    別途描画する1枚目と重複するため作らない）。GIS_MAP_ENABLE=false、または外部データ
+    未取得の場合も None を返す。
+    """
+    if not _ready():
+        return None
+    try:
+        shapes = _local_areas.get()
+        if not shapes:
+            return None
+
+        matched = []
+        for name, level in (region_lg or {}).items():
+            level = str(level).strip()
+            if not level or level == "不明":
+                continue
+            shape = shapes.get(name)
+            if shape is None:
+                logger.debug(f"GIS地図(長周期・区域): 区域名 {name!r} がGeoJSON上に見つかりません")
+                continue
+            matched.append((shape, level))
+        if not matched:
+            return None
+
+        hypo_points = _hypocenter_point(hypocenter_lonlat)
+        viewport_points = list(hypo_points)
+        for shape, _level in matched:
+            for ring in shape.rings:
+                viewport_points.extend(ring)
+        viewport = _compute_viewport(viewport_points)
+        width, height = _dimensions_for_bbox(viewport)
+
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
+
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            _draw_land_fill(draw, _local_areas, projector, viewport)
+            _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+
+            # 階級の小さい区域から順に塗る（隣接区域の境界で大きい階級が隠れないように）
+            for shape, level in sorted(matched, key=lambda item: item[1]):
+                fill_rgb = _rgb_to_rgba(LG_COLORS.get(level, LG_COLORS["不明"]))[:3]
+                _fill_area(draw, shape, projector, (*fill_rgb, _FILL_ALPHA), _darken_rgb(fill_rgb))
+
+            _draw_lg_region_icons(draw, matched, projector)
+
+            if hypo_points:
+                lon, lat = hypo_points[0]
+                warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
+                _draw_hypocenter(draw, lon, lat, False, warn_rgb, projector)
+
+            return _finalize(canvas, (width, height))
+    except Exception:
+        logger.error("GIS地図(長周期地震動・区域)描画エラー", exc_info=True)
+        return None
+
+
 # ===============================
 # 遠地地震（震源が日本国外）向け描画（2026-09-26追加、地理院タイル廃止）
 # ===============================
