@@ -65,7 +65,8 @@ from core.notification_log import record_notification
 from core.delivery_stats import record_delivery
 from core.startup_guard import reported_since_start
 from core.gis_render import (
-    render_shindo_map, render_long_period_map, is_outside_japan_bbox, render_overseas_map,
+    render_shindo_map, render_long_period_map, render_long_period_area_map,
+    is_outside_japan_bbox, render_overseas_map,
 )
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
@@ -369,12 +370,15 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             # 1件も一致せず観測点が描画されなかった。観測情報JSONの
             # IntensityStation[]（Name/LgInt/latlon）から、座標ごと直接組み立てる。
             lg_stations = []
+            # 細分区域ごとの最大階級 {区域名: 階級}（区域塗りつぶし地図 render_long_period_area_map 用）
+            region_lg = {}
             for pref in intensity.get("Pref", []):
                 for area in pref.get("Area", []):
                     area_name = area.get("Name", "")
                     lg_int = area.get("MaxLgInt", "不明")
                     if lg_int != "不明" and area_name:
                         lg_groups[lg_int].append(area_name)
+                        region_lg[area_name] = str(lg_int)
                     for st in area.get("IntensityStation", []) or []:
                         latlon = st.get("latlon") or {}
                         st_lg = st.get("LgInt")
@@ -421,7 +425,9 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             # 1枚目: 震源のバツ印マップ（長周期地震動階級はSHINDO_COLORSの
             # 震度スケールとは別の尺度のため、震源マップ側には地域色分けを
             # 行わない）。震源が海外の場合は国土地理院タイルに自動切替。
-            # 2枚目: 観測情報JSON内の観測点座標（IntensityStation[].latlon）
+            # 2枚目: 細分区域（Area[]）ごとの最大長周期地震動階級で区域を塗りつぶした
+            # マップ（render_long_period_area_map、LG_COLORS使用。2026-11-14追加）。
+            # 3枚目: 観測情報JSON内の観測点座標（IntensityStation[].latlon）
             # を使って、観測点ごとの長周期地震動階級を色分けしたマップ
             # （render_long_period_map、LG_COLORS使用。2026-09-22に
             # stations.json 依存から変更）。いずれかが存在しない/
@@ -431,12 +437,18 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             hypo_map = await self._render_hypocenter_gis_map(hypo_lat, hypo_lon)
             if hypo_map:
                 gis_images.append(hypo_map)
+            hypo_lonlat = (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
+            area_map = await asyncio.to_thread(
+                render_long_period_area_map,
+                region_lg=region_lg,
+                hypocenter_lonlat=hypo_lonlat,
+            )
+            if area_map:
+                gis_images.append(area_map)
             station_map = await asyncio.to_thread(
                 render_long_period_map,
                 lg_stations=lg_stations,
-                hypocenter_lonlat=(
-                    (hypo_lon, hypo_lat) if hypo_lon is not None and hypo_lat is not None else None
-                ),
+                hypocenter_lonlat=hypo_lonlat,
             )
             if station_map:
                 gis_images.append(station_map)
