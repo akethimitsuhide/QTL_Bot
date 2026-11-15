@@ -7,8 +7,10 @@
 <meta name="referrer" content="no-referrer">
 <title>QTL_Bot 推計震度分布図</title>
 <script src="/assets/js/theme.js"></script>
+<link rel="stylesheet" href="/assets/vendor/leaflet.css">
 <link rel="stylesheet" href="/assets/css/common.css">
 <link rel="stylesheet" href="/assets/css/estimated.css">
+<script src="/assets/vendor/leaflet.js" defer></script>
 <script src="/assets/js/common.js" defer></script>
 <script src="/assets/js/estimated.js" defer></script>
 </head>
@@ -16,7 +18,7 @@
   <div class="page-header">
     <div>
       <h1>QTL_Bot 推計震度分布図</h1>
-      <div class="subtitle">気象庁が震度5弱以上の地震のあとに公開する推計震度分布図（250mメッシュ）を、過去分も含めて選んで表示します。</div>
+      <div class="subtitle">気象庁が震度5弱以上の地震のあとに公開する推計震度分布図（250mメッシュ）を、過去分も含めて選んで地図上に表示します。ホイール・ピンチで拡大・縮小できます。</div>
     </div>
     <button class="btn-link" id="themeBtn" type="button">テーマ</button>
   </div>
@@ -41,7 +43,13 @@
     <div class="card est-detail-card">
       <h2 id="detailTitle">推計震度分布図</h2>
       <div id="detailMeta"><div class="notif-empty">左の一覧から地震を選んでください。</div></div>
-      <div class="est-map-box" id="mapBox"></div>
+      <div class="toolbar est-map-tools">
+        <label class="est-opacity">重ねる図の濃さ
+          <input type="range" id="opacityRange" min="20" max="100" step="5" value="60" aria-label="推計震度分布図の濃さ">
+        </label>
+        <a class="btn-link" id="imageLink" href="#" target="_blank" rel="noopener" hidden>Discord通知と同じ1枚絵を開く</a>
+      </div>
+      <div id="estMap" role="application" aria-label="推計震度分布図の地図"></div>
       <div class="status-line" id="mapInfo" role="status" aria-live="polite"></div>
       <div class="status-line">出典: 気象庁ホームページ「推計震度分布図」（250mメッシュ）を加工して作成。推計値のため、実際の震度と1階級程度ずれることがあります。</div>
     </div>
