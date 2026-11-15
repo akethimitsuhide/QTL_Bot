@@ -155,6 +155,7 @@ SPECS: tuple[SettingSpec, ...] = (
     _bool("VOLCANO_ENABLE", "火山情報", "火山情報・噴火速報・噴火警報の通知"),
     _bool("TSUNAMI_ENABLE", "津波情報", "津波情報（P2P）の通知"),
     _bool("ENABLE_LONG_PERIOD", "長周期地震動", "長周期地震動に関する観測情報の通知"),
+    _bool("ENABLE_ESTIMATED_INTENSITY", "推計震度分布図", "推計震度分布図（気象庁HP）の通知"),
     _bool("ENABLE_ADVISORY", "後発地震注意情報等", "後発地震注意情報・南海トラフ地震臨時情報等の通知"),
     SettingSpec("GIS_MAP_THEME", "GIS地図: 配色テーマ", "choice",
                 "次に描画する地図から反映", options=_THEME_OPTIONS),

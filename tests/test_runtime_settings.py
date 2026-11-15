@@ -33,6 +33,7 @@ def _initial(**over):
         "QUAKE_ENABLE_FOREIGN": True, "QUAKE_ENABLE_OTHER": True,
         "EEW_ENABLE": True, "QUAKE_ENABLE": True, "VOLCANO_ENABLE": True,
         "TSUNAMI_ENABLE": True, "ENABLE_LONG_PERIOD": True, "ENABLE_ADVISORY": True,
+        "ENABLE_ESTIMATED_INTENSITY": True,
         "GIS_MAP_THEME": "light",
     }
     base.update(over)
