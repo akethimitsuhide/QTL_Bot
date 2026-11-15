@@ -1757,6 +1757,117 @@ def render_long_period_area_map(
         return None
 
 
+_ESTIMATED_OVERLAY_OPACITY = 0.6   # 気象庁HPの推計震度分布図と同じ重ね合わせの不透明度
+
+
+def _paste_estimated_tiles(canvas: Image.Image, tiles: list, projector: _Projector) -> int:
+    """
+    推計震度分布のメッシュ画像（透過PNG）を、各1次メッシュの緯度経度範囲に合わせて canvas に重ねる。
+    tiles: [(((緯度_南, 経度_西), (緯度_北, 経度_東)), PNGバイト列), …]
+    PNGとして読めない・大きさが異常な画像は読み飛ばす。重ねた枚数を返す。
+    """
+    pasted = 0
+    for ((lat0, lon0), (lat1, lon1)), png in tiles:
+        try:
+            tile = Image.open(io.BytesIO(png))
+            if tile.width > 2000 or tile.height > 2000:
+                continue
+            tile = tile.convert("RGBA")
+            x0, y0 = projector.project(lon0, lat1)          # 左上（西・北）
+            x1, y1 = projector.project(lon1, lat0)          # 右下（東・南）
+            w, h = round(x1 - x0), round(y1 - y0)
+            if w < 1 or h < 1:
+                continue
+            tile = tile.resize((w, h), Image.BILINEAR)
+            alpha = tile.getchannel("A").point(lambda v: int(v * _ESTIMATED_OVERLAY_OPACITY))
+            tile.putalpha(alpha)
+            # alpha_composite の dest は負にできないため、キャンバスからはみ出す部分は切り落とす
+            ox, oy = round(x0), round(y0)
+            left, top = max(0, -ox), max(0, -oy)
+            right, bottom = min(w, canvas.width - ox), min(h, canvas.height - oy)
+            if right <= left or bottom <= top:
+                continue
+            canvas.alpha_composite(tile.crop((left, top, right, bottom)), dest=(ox + left, oy + top))
+            pasted += 1
+        except Exception:
+            logger.warning("GIS地図(推計震度分布): メッシュ画像の重ね合わせに失敗したため読み飛ばします", exc_info=True)
+    return pasted
+
+
+def _draw_estimated_legend(draw: ImageDraw.ImageDraw, legend: tuple, width: int, height: int) -> None:
+    """推計震度分布の凡例（震度4〜7の色見本）を画像の左下に描く。width/height は描画先のピクセル数。"""
+    size = _px(_REGION_ICON_SIZE) * 0.9
+    gap = size * 0.25
+    pad = size * 0.4
+    font = _font(max(round(_REGION_ICON_SIZE * 0.8), 10))
+    box_w = pad * 2 + len(legend) * size + (len(legend) - 1) * gap
+    box_h = pad * 2 + size
+    x0, y1 = _px(8), height - _px(8)
+    y0 = y1 - box_h
+    draw.rounded_rectangle([x0, y0, x0 + box_w, y1], radius=size * 0.25, fill=(255, 255, 255, 215))
+    x = x0 + pad
+    for code, rgb in legend:
+        draw.rectangle([x, y0 + pad, x + size, y0 + pad + size], fill=(*rgb, 255), outline=(60, 60, 60, 255))
+        draw.text((x + size / 2, y0 + pad + size / 2), shindo_short_label(code),
+                  fill=(20, 20, 20, 255), font=font, anchor="mm")
+        x += size + gap
+
+
+def render_estimated_intensity_map(
+    tiles: list,
+    data_bounds: Optional[tuple] = None,
+    hypocenter_lonlat: Optional[tuple[float, float]] = None,
+    legend: tuple = (),
+) -> Optional[bytes]:
+    """
+    気象庁の推計震度分布図（250mメッシュ）を、独自ベクター地図（細分区域の陸地）の上に
+    半透明で重ねた地図を返す（2026-11-14追加。core/estimated_intensity.py 参照）。
+
+    tiles             : [(((緯度_南, 経度_西), (緯度_北, 経度_東)), PNGバイト列), …]
+                        （core.estimated_intensity.mesh_bounds の範囲と取得した画像）
+    data_bounds       : データのある範囲 ((緯度_南, 経度_西), (緯度_北, 経度_東))。表示範囲の決定に使う。
+                        None の場合は tiles の範囲を使う
+    hypocenter_lonlat : (経度, 緯度)。震源不明の場合は None
+    legend            : core.estimated_intensity.LEGEND（空なら凡例を描かない）
+
+    メッシュ画像を1枚も重ねられなかった場合・GIS_MAP_ENABLE=false・外部データ未取得の場合は
+    None を返す。重ね描きの順は 陸地 → 画像 → 区域の境界線 → 震源 → 凡例。
+    """
+    if not _ready() or not tiles:
+        return None
+    try:
+        view_points = list(_hypocenter_point(hypocenter_lonlat))
+        corner_sets = [data_bounds] if data_bounds else [bounds for bounds, _png in tiles]
+        for (lat0, lon0), (lat1, lon1) in corner_sets:
+            view_points.extend([(lon0, lat0), (lon1, lat1)])
+        viewport = _compute_viewport(view_points)
+        width, height = _dimensions_for_bbox(viewport)
+
+        with _supersampled():
+            render_w, render_h = _px(width), _px(height)
+            projector = _Projector(viewport, render_w, render_h)
+
+            canvas = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            _draw_land_fill(draw, _local_areas, projector, viewport)
+            if _paste_estimated_tiles(canvas, tiles, projector) == 0:
+                return None
+            _draw_polygon_boundaries(draw, _local_areas, projector, viewport)
+
+            hypo_points = _hypocenter_point(hypocenter_lonlat)
+            if hypo_points:
+                lon, lat = hypo_points[0]
+                warn_rgb = _rgb_to_rgba(GIS_MAP_WARNING_COLOR)[:3]
+                _draw_hypocenter(draw, lon, lat, False, warn_rgb, projector)
+            if legend:
+                _draw_estimated_legend(draw, legend, render_w, render_h)
+
+            return _finalize(canvas, (width, height))
+    except Exception:
+        logger.error("GIS地図(推計震度分布)描画エラー", exc_info=True)
+        return None
+
+
 # ===============================
 # 遠地地震（震源が日本国外）向け描画（2026-09-26追加、地理院タイル廃止）
 # ===============================

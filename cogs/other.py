@@ -56,6 +56,7 @@ from core.config import (
     YOMI_OTHER_NANKAI, YOMI_OTHER_KANCHI,
     CHANNEL_IDS, OTHER_CHANNEL_IDS,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
+    ESTIMATED_INTENSITY_POLL_SECONDS,
 )
 from core.constants import LG_COLORS
 from core.helpers import format_jma_time, truncate_embed_description, parse_jma_coordinate
@@ -66,9 +67,10 @@ from core.delivery_stats import record_delivery
 from core.startup_guard import reported_since_start
 from core.gis_render import (
     render_shindo_map, render_long_period_map, render_long_period_area_map,
-    is_outside_japan_bbox, render_overseas_map,
+    is_outside_japan_bbox, render_overseas_map, render_estimated_intensity_map,
 )
 from core.gis_data import ensure_gis_data_ready
+from core import estimated_intensity as ei
 from core.gis_discord import build_gis_message_kwargs
 
 logger = logging.getLogger("QTLBot")
@@ -106,13 +108,19 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         self.last_long_period_id = None
         self._long_period_initialized = False  # 初回ポーリング済みか（空リストでも立てる）
 
+        # -- 推計震度分布図の重複排除状態（2026-11-14追加） --
+        self._ei_state: dict = {}                    # 一覧の ETag / Last-Modified（条件付きGET用）
+        self._ei_seen: dict = {}                     # 通知済み（または起動時既存）のデータID（古い順）
+        self._ei_attempts: dict = {}                 # データID -> 通知に失敗した回数
+        self._ei_initialized = False
+
         # -- 気象庁その他情報の重複排除状態（7日間TTL） --
         self.last_advisory_ids: dict = {}
         self._quake_advisory_initialized = False  # 初回ポーリングでは通知せずIDのみ記録
 
         # -- 受信統計（!status 用。将来的にSystemCogと統合予定） --
-        self._last_recv = {"long_period": None, "quake_advisory": None}
-        self._recv_count = {"long_period": 0, "quake_advisory": 0}
+        self._last_recv = {"long_period": None, "quake_advisory": None, "estimated_intensity": None}
+        self._recv_count = {"long_period": 0, "quake_advisory": 0, "estimated_intensity": 0}
 
         # -- 音声再生（AudioMixin が要求する属性） --
         self.speech_queue = asyncio.PriorityQueue(maxsize=SPEECH_QUEUE_MAXSIZE)
@@ -135,7 +143,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         await ensure_gis_data_ready(self.session, "OtherInfoCog")
 
     async def cog_unload(self):
-        for loop_task in (self.fetch_long_period, self.fetch_quake_advisory):
+        for loop_task in (self.fetch_long_period, self.fetch_quake_advisory, self.fetch_estimated_intensity):
             if loop_task.is_running():
                 loop_task.cancel()
 
@@ -176,6 +184,9 @@ class OtherInfoCog(commands.Cog, AudioMixin):
 
         if not self.fetch_quake_advisory.is_running():
             self.fetch_quake_advisory.start()
+
+        if not self.fetch_estimated_intensity.is_running():
+            self.fetch_estimated_intensity.start()
 
         if self.speech_task is None or self.speech_task.done():
             self.speech_task = self.bot.loop.create_task(self.speech_worker())
@@ -236,6 +247,123 @@ class OtherInfoCog(commands.Cog, AudioMixin):
     async def before_fetch_long_period(self):
         """セッション初期化完了まで待機"""
         await self.bot.wait_until_ready()
+
+    # ===============================
+    # 推計震度分布図（2026-11-14追加。core/estimated_intensity.py 参照）
+    # ===============================
+    _EI_MAX_ATTEMPTS = 5          # メッシュ画像が揃わないときに通知を待つ回数（超えたら取れた分だけで通知）
+    _EI_MAX_PER_CYCLE = 3         # 1回の確認で通知する最大件数（古い順）
+    _EI_SEEN_MAX = 500
+
+    def _ei_remember(self, event_id: str) -> None:
+        self._ei_seen[event_id] = True
+        self._ei_attempts.pop(event_id, None)
+        while len(self._ei_seen) > self._EI_SEEN_MAX:
+            self._ei_seen.pop(next(iter(self._ei_seen)))
+
+    @tasks.loop(seconds=ESTIMATED_INTENSITY_POLL_SECONDS)
+    async def fetch_estimated_intensity(self):
+        if not rs.get("ENABLE_ESTIMATED_INTENSITY"):
+            return
+        try:
+            entries = await ei.fetch_entries(self.session, self._ei_state)
+            if entries is None:
+                return                      # 前回から変化なし（304）
+            if not entries:
+                self._ei_initialized = True
+                return
+
+            if not self._ei_initialized:
+                self._ei_initialized = True
+                # 起動前から一覧にあった分は通知せず既知にする（起動後に発表された分は通知する）
+                for e in entries:
+                    if not reported_since_start(e.reported_at):
+                        self._ei_remember(e.id)
+                logger.info(f"fetch_estimated_intensity: 起動時の既存情報 {len(self._ei_seen)} 件を記録（通知はしない）")
+
+            new = [e for e in entries if e.id not in self._ei_seen][: self._EI_MAX_PER_CYCLE]
+            for e in reversed(new):         # 古い順に通知
+                n = self._ei_attempts.get(e.id, 0) + 1
+                self._ei_attempts[e.id] = n
+                if await self.notify_estimated_intensity(e, final_attempt=n >= self._EI_MAX_ATTEMPTS):
+                    self._ei_remember(e.id)
+                elif n >= self._EI_MAX_ATTEMPTS:
+                    logger.warning(f"fetch_estimated_intensity: {e.id} の通知を {n} 回失敗したため断念します")
+                    self._ei_remember(e.id)
+
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            logger.warning(f"Fetch Estimated-Intensity: ネットワークエラー（次回の周期で再試行します）: {type(e).__name__}: {e}")
+        except Exception:
+            logger.error(f"Fetch Estimated-Intensity エラー:\n{traceback.format_exc()}")
+
+    @fetch_estimated_intensity.before_loop
+    async def before_fetch_estimated_intensity(self):
+        await self.bot.wait_until_ready()
+
+    async def notify_estimated_intensity(self, entry, is_test: bool = False, final_attempt: bool = True) -> bool:
+        """
+        推計震度分布図を「その他」チャンネルへ地図付きで通知する。送信できたら True。
+        メッシュ画像が一部しか取れていない場合は、final_attempt でない限り False を返して
+        次の周期で再試行する（欠けた地図を出さないため）。
+        """
+        if not rs.get("ENABLE_ESTIMATED_INTENSITY") and not is_test:
+            return True
+        channel = self.other_channel or self.channel
+        if not channel:
+            return False
+
+        gis_images = []
+        partial = False
+        tiles = await ei.fetch_tiles(self.session, entry)
+        wanted = entry.meshes[: ei.MAX_TILES]
+        if wanted and len(tiles) < len(wanted):
+            if not final_attempt:
+                logger.info(f"推計震度分布: メッシュ画像が揃っていません（{len(tiles)}/{len(wanted)}）。次回再試行します id={entry.id}")
+                return False
+            partial = bool(tiles)
+        if tiles:
+            tile_list = [(ei.mesh_bounds(m, entry.datum), png) for m, png in tiles.items()]
+            lonlat = (entry.lon, entry.lat) if entry.lon is not None and entry.lat is not None else None
+            image = await asyncio.to_thread(
+                render_estimated_intensity_map, tile_list, entry.bounds, lonlat, ei.LEGEND)
+            if image:
+                gis_images.append(image)
+
+        self._last_recv["estimated_intensity"] = datetime.now()
+        self._recv_count["estimated_intensity"] += 1
+
+        occurred = format_jma_time(entry.occurred_at) if entry.occurred_at else "不明"
+        mag = f"M{entry.magnitude}" if entry.magnitude else "不明"
+        depth = ("ごく浅い" if entry.depth is not None and entry.depth < 5
+                 else f"{entry.depth:g}km" if entry.depth is not None else "不明")
+        lines = [
+            f"**発生時刻**: {occurred}",
+            f"**震源地**: {entry.epicenter or '不明'}　**規模**: {mag}　**深さ**: {depth}",
+        ]
+        summary = ei.rank_summary(entry)
+        if summary:
+            lines.append("**推計震度ごとのメッシュ数**: " + "　".join(f"震度{lab}: {cnt:,}" for lab, cnt in summary))
+        if entry.comment:
+            lines.append(entry.comment)
+        lines.append("※推計値のため、実際の震度と1階級程度ずれることがあります。個々のメッシュの値ではなく、"
+                     "大きな震度の面的な広がりに着目してください。")
+        if not gis_images:
+            lines.append("（地図画像を生成できなかったため、文面のみ送信しています）")
+        embed = discord.Embed(
+            title="推計震度分布図",
+            description=truncate_embed_description("\n".join(lines)),
+            color=0x2e86c1,
+        )
+        footer = "出典: 気象庁ホームページ「推計震度分布図」（250mメッシュ）を加工して作成"
+        if partial:
+            footer += " | 一部のメッシュ画像を取得できなかったため、図に欠けがあります"
+        embed.set_footer(text=footer)
+
+        await send_with_retry(channel, _label="気象庁その他", **build_gis_message_kwargs(gis_images, embed))
+        if not is_test:
+            record_delivery(True, "推計震度分布図")
+            record_notification("推計震度分布図", "推計震度分布図", entry.epicenter)
+        return True
 
     @tasks.loop(seconds=60)
     async def fetch_quake_advisory(self):

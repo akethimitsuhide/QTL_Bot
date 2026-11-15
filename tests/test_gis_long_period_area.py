@@ -78,3 +78,4 @@ def test_none_and_empty_input(monkeypatch):
 def test_returns_none_when_gis_not_ready(monkeypatch):
     monkeypatch.setattr(g, "_ready", lambda: False)
     assert g.render_long_period_area_map(region_lg={"愛知県西部": "1"}) is None
+
