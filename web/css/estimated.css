@@ -1,0 +1,25 @@
+/* /estimated（推計震度分布図）専用のスタイル。色は common.css の変数を使う（ライト/ダーク両対応）。 */
+.est-layout { display: grid; grid-template-columns: minmax(260px, 380px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.est-input {
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--surface-2);
+  border-radius: 6px; padding: 5px 10px; font-size: 0.85em; width: 100%; box-sizing: border-box;
+}
+.est-list { max-height: 70vh; overflow: auto; border-radius: 6px; }
+.est-item {
+  display: block; width: 100%; text-align: left; cursor: pointer; font: inherit; color: var(--text);
+  background: transparent; border: 0; border-bottom: 1px solid var(--border); padding: 8px 10px;
+}
+.est-item:hover, .est-item:focus-visible { background: var(--surface-2); }
+.est-item.est-selected { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+.est-item-title { font-weight: 600; }
+.est-item-sub { color: var(--text-muted); font-size: 0.82em; margin-top: 2px; }
+.est-meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 0.9em; margin-bottom: 10px; }
+.est-meta dt { color: var(--text-muted); }
+.est-meta dd { margin: 0; overflow-wrap: anywhere; }
+.est-comment { font-size: 0.88em; color: var(--text-sub); margin-bottom: 10px; overflow-wrap: anywhere; }
+.est-map-box { min-height: 120px; }
+.est-map-box img { display: block; max-width: 100%; height: auto; border-radius: 6px; background: var(--surface-2); }
+@media (max-width: 800px) {
+  .est-layout { grid-template-columns: minmax(0, 1fr); }
+  .est-list { max-height: 40vh; }
+}

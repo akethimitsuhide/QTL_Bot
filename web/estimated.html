@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>QTL_Bot 推計震度分布図</title>
+<script src="/assets/js/theme.js"></script>
+<link rel="stylesheet" href="/assets/css/common.css">
+<link rel="stylesheet" href="/assets/css/estimated.css">
+<script src="/assets/js/common.js" defer></script>
+<script src="/assets/js/estimated.js" defer></script>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <h1>QTL_Bot 推計震度分布図</h1>
+      <div class="subtitle">気象庁が震度5弱以上の地震のあとに公開する推計震度分布図（250mメッシュ）を、過去分も含めて選んで表示します。</div>
+    </div>
+    <button class="btn-link" id="themeBtn" type="button">テーマ</button>
+  </div>
+
+  <div class="toolbar">
+    <a class="btn-link" href="/dashboard">ダッシュボード</a>
+    <a class="btn-link" href="/quake_map">地震情報履歴（地図・表）</a>
+    <a class="btn-link" href="/logs">ログ</a>
+    <button class="btn-link" id="reloadBtn" type="button">一覧を更新</button>
+  </div>
+
+  <div class="est-layout">
+    <div class="card est-list-card">
+      <h2>地震の一覧（新しい順）</h2>
+      <div class="toolbar">
+        <input class="est-input" id="keywordInput" type="search" maxlength="50" placeholder="日付・震央地名で絞り込み（例: 2026-11, 能登）" aria-label="絞り込み">
+      </div>
+      <div class="est-list" id="eventList"><div class="notif-empty">読み込み中...</div></div>
+      <div class="status-line" id="listInfo" role="status" aria-live="polite"></div>
+    </div>
+
+    <div class="card est-detail-card">
+      <h2 id="detailTitle">推計震度分布図</h2>
+      <div id="detailMeta"><div class="notif-empty">左の一覧から地震を選んでください。</div></div>
+      <div class="est-map-box" id="mapBox"></div>
+      <div class="status-line" id="mapInfo" role="status" aria-live="polite"></div>
+      <div class="status-line">出典: 気象庁ホームページ「推計震度分布図」（250mメッシュ）を加工して作成。推計値のため、実際の震度と1階級程度ずれることがあります。</div>
+    </div>
+  </div>
+
+  <noscript><div class="error">このページの表示には JavaScript が必要です。</div></noscript>
+</body>
+</html>
