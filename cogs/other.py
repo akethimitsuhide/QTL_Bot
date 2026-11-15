@@ -128,6 +128,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         self._ei_initialized = False
         self._ei_entries: list = []                  # 直近に取得した一覧（/qtl_estimated の候補表示用）
         self._ei_command_lock = asyncio.Lock()       # /qtl_estimated・ダッシュボードの同時描画を1件に制限（Pi のメモリ保護）
+        self._ei_tile_cache: OrderedDict = OrderedDict()    # (データID, メッシュ) -> PNG（ダッシュボードの地図用。最大 _EI_TILE_CACHE_MAX 枚）
+        self._ei_tile_sem = asyncio.Semaphore(4)            # 気象庁へ同時に取りにいくメッシュ画像は最大4枚
         self._ei_image_cache: OrderedDict = OrderedDict()   # データID -> 地図PNG（欠けの無いものだけ。最大 _EI_IMAGE_CACHE_MAX 件）
 
         # -- 気象庁その他情報の重複排除状態（7日間TTL） --
@@ -270,6 +272,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
     _EI_MAX_ATTEMPTS = 5          # メッシュ画像が揃わないときに通知を待つ回数（超えたら取れた分だけで通知）
     _EI_MAX_PER_CYCLE = 3         # 1回の確認で通知する最大件数（古い順）
     _EI_SEEN_MAX = 500
+    _EI_TILE_CACHE_MAX = 120      # 1枚 約100KB以下（最大でも十数MB）。ダッシュボードで数件を開き直す分を想定
     _EI_IMAGE_CACHE_MAX = 8       # 1枚 約100KB。同じ地図を何度も作らないための小さなキャッシュ
 
     def _ei_remember(self, event_id: str) -> None:
@@ -352,6 +355,26 @@ class OtherInfoCog(commands.Cog, AudioMixin):
     async def get_estimated_entries(self) -> list:
         """推計震度分布図の一覧（新しい順）。ダッシュボード用の公開メソッド。"""
         return await self._ei_entries_for_command()
+
+    async def get_estimated_tile(self, entry, mesh: str) -> Optional[bytes]:
+        """
+        ダッシュボードの地図（Leaflet）に重ねるメッシュ画像1枚を返す。entry にないメッシュ・取得失敗は None。
+        ブラウザは気象庁へ直接つなげない（CSP）ため、ここで中継する。小さなキャッシュと同時取得数の上限つき。
+        """
+        if mesh not in entry.meshes[: ei.MAX_TILES]:
+            return None
+        key = (entry.id, mesh)
+        cached = self._ei_tile_cache.get(key)
+        if cached is not None:
+            self._ei_tile_cache.move_to_end(key)
+            return cached
+        async with self._ei_tile_sem:
+            png = await ei.fetch_tile(self.session, entry, mesh)
+        if png is not None:
+            self._ei_tile_cache[key] = png
+            while len(self._ei_tile_cache) > self._EI_TILE_CACHE_MAX:
+                self._ei_tile_cache.popitem(last=False)
+        return png
 
     async def get_estimated_png(self, entry) -> Optional[bytes]:
         """
