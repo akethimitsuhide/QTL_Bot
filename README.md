@@ -684,6 +684,8 @@ bandit -r . --ini .bandit       # 指摘が 0 件なら "No issues identified."
 | `GET /logs` | ログの閲覧画面（ファイル一覧・末尾N件・レベルとキーワードで絞り込み・`.gz` のダウンロード）。Webhook URL・トークンらしき文字列は伏せ字にして表示する |
 | `GET /status/logs`・`/status/logs/view?file=&tail=&level=&q=` | 上の画面が使う JSON。`file` は一覧にあるファイル名との完全一致のみ（パスは入力から組み立てない） |
 | `GET /logs/download?file=` | 圧縮済み（`.gz`）ログのダウンロード。伏せ字にはしない（元のファイルそのもの）。現在のログ・圧縮待ちは対象外 |
+| `GET /estimated` | 推計震度分布図の閲覧画面。気象庁HPの一覧（約340件）から地震を選んで、地図・震源・推計震度ごとのメッシュ数・解説文を表示（日付・震央地名で絞り込み。`#<データID>` で特定の1件へのリンクになる）。Discord の `/qtl_estimated` と同じ処理・キャッシュを使う |
+| `GET /status/estimated_list`・`/status/estimated_map?id=` | 上の画面が使う API。一覧は JSON（`?limit=` 最大400）、地図は PNG。`id` は一覧にあるデータIDとの完全一致のみ（URL・パスは入力から組み立てない）。地図の作成は同時に1件・90秒で打ち切り、直近8件はキャッシュ。`GIS_MAP_ENABLE=false` のとき地図は 404（一覧は返す）。認証・IP許可リストは他の `/status/*` と同じ |
 | `GET /dashboard` | 上記を可視化する HTML ページ（ステータス、推移グラフ、通知履歴、CSV ダウンロード） |
 | `GET /assets/<ファイル>` | 画面用の CSS・JS（許可リストのファイルのみ。下記） |
 
@@ -693,7 +695,7 @@ curl http://localhost:8080/health/full | jq
 ```
 
 ### 画面（`web/`）・テーマ・スマホ対応
-`/dashboard`・`/quake_map`・`/logs` の HTML・CSS・JS は `web/` フォルダの別ファイル（`web/*.html`・`web/css/`・`web/js/`・`web/vendor/`）。`git pull` で `web/` ごと更新されるので、`cogs/system.py` を触らずに見た目を変えられる。
+`/dashboard`・`/quake_map`・`/logs`・`/estimated` の HTML・CSS・JS は `web/` フォルダの別ファイル（`web/*.html`・`web/css/`・`web/js/`・`web/vendor/`）。`git pull` で `web/` ごと更新されるので、`cogs/system.py` を触らずに見た目を変えられる。
 
 - **テーマ**: ダーク／ライト／自動（OS の設定に従う）。ページ右上の「テーマ」ボタンで切り替え、選択はそのブラウザにだけ保存される。色は `web/css/common.css` の CSS 変数だけで決まり、グラフ（Chart.js）・地図（Leaflet）もこの変数に連動する。
 - **スマホ対応**: 画面幅 640px 以下で、1 列表示・タップしやすい大きさのボタン（44px）・表の横スクロールと重要でない列の非表示・ノッチ付き端末の余白に対応。非表示のタブでは自動更新を止め、Raspberry Pi への無駄なアクセスを減らす。
@@ -841,6 +843,7 @@ python3 -m pytest tests/ -q
 | `test_log_archive.py` | ログの圧縮保存（起動時の退避・別スレッド圧縮・保持の日数/世代数・壊れた `.gz`・履歴を `.gz` から読めること） |
 | `test_log_mask.py` | 表示時の秘密情報の伏せ字（Webhook URL・トークン・`名前=値`・誤検知しないこと） |
 | `test_dashboard_logs.py` | `/logs`・`/status/logs*`・`/logs/download` を実際に起動して確認（絞り込み・伏せ字・パス探索の拒否・認証） |
+| `test_estimated_web.py` | `/status/estimated_list`・`/status/estimated_map` を実際に起動して確認（一覧・PNG・不正な id の拒否・無効時の 404・タイムアウト・内部エラーを漏らさない・セキュリティヘッダー） |
 | `test_qtl_logs_command.py` | `/qtl_logs` の権限・伏せ字・長文のファイル添付 |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
 | `test_status_history_view.py` | `/qtl_status` 履歴オプションの表示整形 |
@@ -960,6 +963,7 @@ QTL_Bot/
 │   ├── webhook_notify.py        Webhook 通知（Discord / Slack・複数宛先・種別別の宛先）
 │   ├── channels.py           通知チャンネルの複数指定（カンマ区切り）・複数チャンネルへの同時送信
 │   ├── web_static.py         ダッシュボードの静的ファイル配信（許可リスト方式）・セキュリティヘッダー
+│   ├── estimated_web.py      ダッシュボードの推計震度分布図 API（/status/estimated_list・/status/estimated_map）
 │   ├── yomiage_test.py       --test_yomiage（読み上げテンプレートのテスト再生）
 │   ├── runtime_settings.py      再起動不要で変更できる設定の定義・現在値・変更処理（/qtl_config）
 │   ├── env_writer.py            .env の指定キーだけを安全に書き換える
@@ -986,6 +990,7 @@ QTL_Bot/
 │   ├── epsp_area.py          地域コード → 地域名
 │   ├── gis_data.py           GIS データの取得・キャッシュ・簡略化国境の生成
 │   ├── gis_render.py         GIS 地図の描画（Pillow）
+│   ├── estimated_intensity.py  推計震度分布図（気象庁HP）の一覧解析・メッシュ範囲・取得
 │   ├── gis_discord.py        複数の地図画像を Embed にする kwargs 組み立て
 │   ├── notification_log.py   通知履歴（メモリ＋qtlbot.log）
 │   ├── quake_history_log.py / eew_history_log.py   地震情報・EEW 履歴の記録と読み出し
@@ -1049,5 +1054,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-15
+**最終更新**: 2026-11-16
 **対応 Python**: 3.11+
