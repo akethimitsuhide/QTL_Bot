@@ -798,6 +798,12 @@ QTL_STATUS_HISTORY_ACCESS = effective_mode(
 
 # /qtl_logs（ログの表示）。ログには内部の情報が含まれるため、既定は管理者のみ。
 # 表示時は Webhook URL・トークンらしき文字列を伏せ字にするが、ロールの範囲は慎重に決めること。
+# /qtl_estimated（過去の推計震度分布図の閲覧）の実行権限（2026-11-14追加）。仕組みは /qtl_logs と同じ
+QTL_ESTIMATED_ROLE_IDS = parse_role_ids(os.getenv("QTL_ESTIMATED_ROLE_IDS"), "QTL_ESTIMATED_ROLE_IDS")
+QTL_ESTIMATED_ACCESS = effective_mode(
+    parse_access_mode(os.getenv("QTL_ESTIMATED_ACCESS"), "QTL_ESTIMATED_ACCESS"),
+    QTL_ESTIMATED_ROLE_IDS, "QTL_ESTIMATED_ACCESS",
+)
 QTL_LOGS_ROLE_IDS = parse_role_ids(os.getenv("QTL_LOGS_ROLE_IDS"), "QTL_LOGS_ROLE_IDS")
 QTL_LOGS_ACCESS = effective_mode(
     parse_access_mode(os.getenv("QTL_LOGS_ACCESS"), "QTL_LOGS_ACCESS"),

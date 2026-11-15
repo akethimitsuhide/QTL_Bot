@@ -56,7 +56,7 @@ from core.config import (
     YOMI_OTHER_NANKAI, YOMI_OTHER_KANCHI,
     CHANNEL_IDS, OTHER_CHANNEL_IDS,
     SPEECH_QUEUE_MAXSIZE, MP3_QUEUE_MAXSIZE,
-    ESTIMATED_INTENSITY_POLL_SECONDS,
+    ESTIMATED_INTENSITY_POLL_SECONDS, QTL_ESTIMATED_ACCESS, QTL_ESTIMATED_ROLE_IDS,
 )
 from core.constants import LG_COLORS
 from core.helpers import format_jma_time, truncate_embed_description, parse_jma_coordinate
@@ -71,9 +71,21 @@ from core.gis_render import (
 )
 from core.gis_data import ensure_gis_data_ready
 from core import estimated_intensity as ei
+from core.command_access import ACCESS_ADMIN, is_allowed, member_access_info
 from core.gis_discord import build_gis_message_kwargs
 
 logger = logging.getLogger("QTLBot")
+
+
+def _estimated_default_permissions(func):
+    """
+    /qtl_estimated: QTL_ESTIMATED_ACCESS が admin（既定）のときだけ、Discord 側の既定権限を管理者に
+    限定する。それ以外のモードでは Discord 側で制限すると許可したユーザーも使えなくなるため付けない。
+    実際の可否は常にコマンド内で判定する（多重防御）。
+    """
+    if QTL_ESTIMATED_ACCESS == ACCESS_ADMIN:
+        return discord.app_commands.default_permissions(administrator=True)(func)
+    return func
 
 # 読み上げテンプレート（.env.yomiage。未設定・書式ミスは従来の文言）。
 # 設定ミスの警告はモジュール読み込み時に1回だけ出る。
@@ -113,6 +125,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         self._ei_seen: dict = {}                     # 通知済み（または起動時既存）のデータID（古い順）
         self._ei_attempts: dict = {}                 # データID -> 通知に失敗した回数
         self._ei_initialized = False
+        self._ei_entries: list = []                  # 直近に取得した一覧（/qtl_estimated の候補表示用）
+        self._ei_command_lock = asyncio.Lock()       # /qtl_estimated の同時描画を1件に制限（Pi のメモリ保護）
 
         # -- 気象庁その他情報の重複排除状態（7日間TTL） --
         self.last_advisory_ids: dict = {}
@@ -269,6 +283,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
             entries = await ei.fetch_entries(self.session, self._ei_state)
             if entries is None:
                 return                      # 前回から変化なし（304）
+            self._ei_entries = entries
             if not entries:
                 self._ei_initialized = True
                 return
@@ -300,18 +315,12 @@ class OtherInfoCog(commands.Cog, AudioMixin):
     async def before_fetch_estimated_intensity(self):
         await self.bot.wait_until_ready()
 
-    async def notify_estimated_intensity(self, entry, is_test: bool = False, final_attempt: bool = True) -> bool:
+    async def _prepare_estimated_intensity(self, entry, final_attempt: bool = True):
         """
-        推計震度分布図を「その他」チャンネルへ地図付きで通知する。送信できたら True。
-        メッシュ画像が一部しか取れていない場合は、final_attempt でない限り False を返して
-        次の周期で再試行する（欠けた地図を出さないため）。
+        推計震度分布図の Embed と地図画像を作る。(embed, gis_images) を返す。
+        メッシュ画像が一部しか取れておらず final_attempt でない場合は None（呼び出し側が再試行する。
+        欠けた地図を出さないため）。通知（notify_estimated_intensity）と /qtl_estimated が共用する。
         """
-        if not rs.get("ENABLE_ESTIMATED_INTENSITY") and not is_test:
-            return True
-        channel = self.other_channel or self.channel
-        if not channel:
-            return False
-
         gis_images = []
         partial = False
         tiles = await ei.fetch_tiles(self.session, entry)
@@ -319,7 +328,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         if wanted and len(tiles) < len(wanted):
             if not final_attempt:
                 logger.info(f"推計震度分布: メッシュ画像が揃っていません（{len(tiles)}/{len(wanted)}）。次回再試行します id={entry.id}")
-                return False
+                return None
             partial = bool(tiles)
         if tiles:
             tile_list = [(ei.mesh_bounds(m, entry.datum), png) for m, png in tiles.items()]
@@ -328,9 +337,6 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 render_estimated_intensity_map, tile_list, entry.bounds, lonlat, ei.LEGEND)
             if image:
                 gis_images.append(image)
-
-        self._last_recv["estimated_intensity"] = datetime.now()
-        self._recv_count["estimated_intensity"] += 1
 
         occurred = format_jma_time(entry.occurred_at) if entry.occurred_at else "不明"
         mag = f"M{entry.magnitude}" if entry.magnitude else "不明"
@@ -358,12 +364,105 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         if partial:
             footer += " | 一部のメッシュ画像を取得できなかったため、図に欠けがあります"
         embed.set_footer(text=footer)
+        return embed, gis_images
+
+    async def notify_estimated_intensity(self, entry, is_test: bool = False, final_attempt: bool = True) -> bool:
+        """推計震度分布図を「その他」チャンネルへ地図付きで通知する。送信できたら True。"""
+        if not rs.get("ENABLE_ESTIMATED_INTENSITY") and not is_test:
+            return True
+        channel = self.other_channel or self.channel
+        if not channel:
+            return False
+        prepared = await self._prepare_estimated_intensity(entry, final_attempt)
+        if prepared is None:
+            return False
+        embed, gis_images = prepared
+
+        self._last_recv["estimated_intensity"] = datetime.now()
+        self._recv_count["estimated_intensity"] += 1
 
         await send_with_retry(channel, _label="気象庁その他", **build_gis_message_kwargs(gis_images, embed))
         if not is_test:
             record_delivery(True, "推計震度分布図")
             record_notification("推計震度分布図", "推計震度分布図", entry.epicenter)
         return True
+
+    # ---- /qtl_estimated（過去の推計震度分布図を選んで閲覧） ----
+    @staticmethod
+    def _ei_choice_label(entry) -> str:
+        """候補の表示名。例: 2026-11-08 01:04 静岡県西部 M5.7 最大5強"""
+        when = entry.occurred_at.replace("T", " ")[:16] if entry.occurred_at else "日時不明"
+        top = ei.rank_summary(entry)
+        parts = [when, entry.epicenter or "震央不明"]
+        if entry.magnitude:
+            parts.append(f"M{entry.magnitude}")
+        if top:
+            parts.append(f"最大{top[0][0]}")
+        return " ".join(parts)[:100]
+
+    async def _ei_entries_for_command(self) -> list:
+        """候補用の一覧。ポーリングで取得済みならそれを使い、空のときだけその場で取得する。"""
+        if not self._ei_entries:
+            try:
+                self._ei_entries = await asyncio.wait_for(ei.fetch_entries(self.session, {}), timeout=2.5) or []
+            except Exception as e:
+                logger.warning(f"/qtl_estimated: 一覧の取得に失敗: {type(e).__name__}: {e}")
+        return self._ei_entries
+
+    def _can_use_estimated_command(self, user) -> bool:
+        is_admin, role_ids = member_access_info(user)
+        return is_allowed(QTL_ESTIMATED_ACCESS, QTL_ESTIMATED_ROLE_IDS, is_admin=is_admin, member_role_ids=role_ids)
+
+    @discord.app_commands.command(name="qtl_estimated", description="過去の推計震度分布図（気象庁）を選んで表示します")
+    @discord.app_commands.describe(event="表示する地震（日付・震央地名で絞り込めます。空欄なら新しい順）")
+    @discord.app_commands.checks.cooldown(1, 20.0, key=lambda i: i.user.id)
+    @_estimated_default_permissions
+    async def slash_qtl_estimated(self, interaction: discord.Interaction, event: str):
+        if not self._can_use_estimated_command(interaction.user):
+            await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        entry = next((e for e in await self._ei_entries_for_command() if e.id == event), None)
+        if entry is None:
+            await interaction.followup.send(
+                "指定された推計震度分布図が一覧に見つかりませんでした。候補から選び直してください。", ephemeral=True)
+            return
+        try:
+            async with self._ei_command_lock:
+                prepared = await self._prepare_estimated_intensity(entry, final_attempt=True)
+        except Exception:
+            logger.error(f"/qtl_estimated の生成に失敗:\n{traceback.format_exc()}")
+            await interaction.followup.send("推計震度分布図の生成に失敗しました。時間をおいて再度お試しください。", ephemeral=True)
+            return
+        embed, gis_images = prepared
+        await interaction.followup.send(ephemeral=True, **build_gis_message_kwargs(gis_images, embed))
+
+    @slash_qtl_estimated.autocomplete("event")
+    async def _qtl_estimated_autocomplete(self, interaction: discord.Interaction, current: str):
+        if not self._can_use_estimated_command(interaction.user):
+            return []
+        keyword = current.strip().lower()
+        choices = []
+        for entry in await self._ei_entries_for_command():
+            label = self._ei_choice_label(entry)
+            if keyword and keyword not in label.lower():
+                continue
+            choices.append(discord.app_commands.Choice(name=label, value=entry.id))
+            if len(choices) >= 25:             # Discord の候補は最大25件
+                break
+        return choices
+
+    @slash_qtl_estimated.error
+    async def _qtl_estimated_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+        if isinstance(error, discord.app_commands.CommandOnCooldown):
+            msg = f"続けて実行できません。{error.retry_after:.0f}秒後にもう一度お試しください。"
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+            return
+        logger.error(f"/qtl_estimated で予期しないエラー: {error!r}")
+        raise error
 
     @tasks.loop(seconds=60)
     async def fetch_quake_advisory(self):

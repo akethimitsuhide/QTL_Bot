@@ -170,3 +170,112 @@ def test_render_none_when_not_ready_or_no_tiles(monkeypatch):
     assert g.render_estimated_intensity_map([], None, None) is None
     monkeypatch.setattr(g, "_ready", lambda: False)
     assert g.render_estimated_intensity_map([(ei.mesh_bounds("5137", 2), _png())], None, None) is None
+
+
+# ---------- /qtl_estimated（過去分の選択・閲覧） ----------
+def _entries(n=3):
+    out = []
+    for i in range(n):
+        raw = dict(RAW, url=f"2026110{i+1}0104_44{i}",
+                   hypo=dict(RAW["hypo"], at=f"2026-11-0{i+1}T01:04:00", epi=["静岡県西部", "千葉県北東部", "石川県能登地方"][i % 3]))
+        out.extend(ei.parse_entries([raw]))
+    return out
+
+
+def _cog(entries):
+    from cogs.other import OtherInfoCog
+    cog = object.__new__(OtherInfoCog)
+    cog._ei_entries = entries
+    return OtherInfoCog, cog
+
+
+class _User:
+    def __init__(self, admin=False, roles=()):
+        self.guild_permissions = SimpleNamespace(administrator=admin)
+        self.roles = [SimpleNamespace(id=r) for r in roles]
+
+
+def test_choice_label_format():
+    cls, _ = _cog([])
+    (e,) = ei.parse_entries([RAW])
+    assert cls._ei_choice_label(e) == "2026-11-08 01:04 静岡県西部 M5.7 最大5強"
+
+
+def test_autocomplete_filters_and_limits(monkeypatch):
+    import cogs.other as other
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "all")
+    cls, cog = _cog(_entries(3))
+    inter = SimpleNamespace(user=_User())
+    all_choices = asyncio.run(cls._qtl_estimated_autocomplete(cog, inter, ""))
+    assert [c.value for c in all_choices] == [e.id for e in cog._ei_entries]
+    only = asyncio.run(cls._qtl_estimated_autocomplete(cog, inter, "千葉"))
+    assert len(only) == 1 and "千葉県北東部" in only[0].name
+    cog._ei_entries = _entries(3) * 20                     # 60件でも候補は25件まで
+    assert len(asyncio.run(cls._qtl_estimated_autocomplete(cog, inter, ""))) == 25
+
+
+def test_autocomplete_empty_for_unauthorized(monkeypatch):
+    import cogs.other as other
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "admin")
+    cls, cog = _cog(_entries(2))
+    assert asyncio.run(cls._qtl_estimated_autocomplete(cog, SimpleNamespace(user=_User()), "")) == []
+    assert asyncio.run(cls._qtl_estimated_autocomplete(cog, SimpleNamespace(user=_User(admin=True)), ""))
+
+
+def test_access_modes(monkeypatch):
+    import cogs.other as other
+    cls, cog = _cog([])
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ROLE_IDS", frozenset({7}))
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "role")
+    assert cog._can_use_estimated_command(_User(roles=[7])) and not cog._can_use_estimated_command(_User(roles=[8]))
+    assert cog._can_use_estimated_command(_User(admin=True))
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "admin")
+    assert not cog._can_use_estimated_command(_User(roles=[7]))
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "all")
+    assert cog._can_use_estimated_command(_User())
+
+
+class _Inter:
+    """/qtl_estimated の応答を記録するだけの Interaction もどき。"""
+    def __init__(self, user):
+        self.user = user
+        self.sent = []
+        self.response = SimpleNamespace(
+            defer=self._defer, is_done=lambda: False, send_message=self._send_message)
+        self.followup = SimpleNamespace(send=self._followup)
+
+    async def _defer(self, **kw):
+        self.sent.append(("defer", kw))
+
+    async def _send_message(self, content=None, **kw):
+        self.sent.append(("send", content, kw))
+
+    async def _followup(self, content=None, **kw):
+        self.sent.append(("followup", content, kw))
+
+
+def test_command_unauthorized_unknown_and_success(monkeypatch):
+    import discord
+    import cogs.other as other
+    cls, cog = _cog(_entries(2))
+    cog._ei_command_lock = asyncio.Lock()
+    callback = cls.slash_qtl_estimated.callback
+
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "admin")
+    denied = _Inter(_User())
+    asyncio.run(callback(cog, denied, event=cog._ei_entries[0].id))
+    assert denied.sent[0][0] == "send" and "権限" in denied.sent[0][1] and denied.sent[0][2]["ephemeral"]
+
+    monkeypatch.setattr(other, "QTL_ESTIMATED_ACCESS", "all")
+    unknown = _Inter(_User())
+    asyncio.run(callback(cog, unknown, event="202601010000_999"))
+    assert unknown.sent[-1][0] == "followup" and "見つかりません" in unknown.sent[-1][1]
+
+    async def fake_prepare(entry, final_attempt=True):
+        assert final_attempt is True
+        return discord.Embed(title="推計震度分布図"), []
+    cog._prepare_estimated_intensity = fake_prepare
+    ok = _Inter(_User())
+    asyncio.run(callback(cog, ok, event=cog._ei_entries[1].id))
+    kind, _content, kw = ok.sent[-1]
+    assert kind == "followup" and kw["ephemeral"] is True and kw["embed"].title == "推計震度分布図"

@@ -61,6 +61,15 @@ def parse_role_ids(raw: str | None, env_name: str) -> frozenset[int]:
     return frozenset(ids)
 
 
+def member_access_info(user) -> tuple[bool, list[int]]:
+    """
+    Discord のユーザー/メンバーから (管理者か, 所持ロールIDのリスト) を取り出す。
+    DM などロール情報の無い相手は (False, []) になる（= admin モードでは拒否される）。
+    """
+    perms = getattr(user, "guild_permissions", None)
+    return bool(perms and perms.administrator), [r.id for r in getattr(user, "roles", [])]
+
+
 def effective_mode(mode: str, role_ids: frozenset[int], env_name: str = "") -> str:
     """
     role モードでロールIDが1件も無い場合は、誰も使えない/全員使えるといった
@@ -96,3 +105,4 @@ def is_allowed(
     if mode == ACCESS_ROLE:
         return any(rid in role_ids for rid in member_role_ids)
     return False
+
