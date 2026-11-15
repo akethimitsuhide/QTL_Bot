@@ -279,3 +279,71 @@ def test_command_unauthorized_unknown_and_success(monkeypatch):
     asyncio.run(callback(cog, ok, event=cog._ei_entries[1].id))
     kind, _content, kw = ok.sent[-1]
     assert kind == "followup" and kw["ephemeral"] is True and kw["embed"].title == "推計震度分布図"
+
+
+# ---------- 地図生成の共通メソッド（通知・/qtl_estimated・ダッシュボード共用）----------
+class _TileSession:
+    """メッシュ画像の取得だけを再現するセッション（失敗させるメッシュを指定できる）。"""
+    def __init__(self, fail=()):
+        self.fail, self.calls = set(fail), []
+
+    def get(self, url, headers=None):
+        self.calls.append(url)
+        mesh = url.rsplit("/", 1)[1].split(".")[0]
+        return _Resp(404) if mesh in self.fail else _Resp(200, _png())
+
+
+def _real_cog(monkeypatch, session):
+    from collections import OrderedDict
+    import cogs.other as other
+    cls, cog = _cog([])
+    cog.session = session
+    cog._ei_image_cache = OrderedDict()
+    cog._ei_command_lock = asyncio.Lock()
+    monkeypatch.setattr(g, "_local_areas", _FakeAreaSet())
+    monkeypatch.setattr(g, "_ready", lambda: True)
+    monkeypatch.setattr(other, "render_estimated_intensity_map", g.render_estimated_intensity_map)
+    return cog
+
+
+def test_render_estimated_caches_complete_maps(monkeypatch):
+    sess = _TileSession()
+    cog = _real_cog(monkeypatch, sess)
+    (entry,) = ei.parse_entries([RAW])
+
+    async def go():
+        first = await cog.get_estimated_png(entry)
+        calls_after_first = len(sess.calls)
+        second = await cog.get_estimated_png(entry)
+        return first, second, calls_after_first
+    first, second, n = asyncio.run(go())
+    assert first.startswith(PNG_MAGIC) and second == first
+    assert n == len(entry.meshes) and len(sess.calls) == n          # 2回目はメッシュ画像を取りにいかない
+
+
+def test_render_estimated_cache_is_bounded(monkeypatch):
+    cog = _real_cog(monkeypatch, _TileSession())
+    cog._EI_IMAGE_CACHE_MAX = 2
+    entries = [ei.parse_entries([dict(RAW, url=f"2026110{i}0104_44{i}")])[0] for i in range(1, 5)]
+
+    async def go():
+        for e in entries:
+            await cog.get_estimated_png(e)
+    asyncio.run(go())
+    assert list(cog._ei_image_cache) == [entries[2].id, entries[3].id]
+
+
+def test_render_estimated_incomplete_tiles_retry_or_partial(monkeypatch):
+    sess = _TileSession(fail={"5236"})
+    cog = _real_cog(monkeypatch, sess)
+    (entry,) = ei.parse_entries([RAW])
+
+    async def go():
+        retry = await cog._render_estimated(entry, final_attempt=False)      # 欠けている間は再試行（None）
+        final = await cog._render_estimated(entry, final_attempt=True)       # 最終回は取れた分だけ
+        return retry, final
+    retry, final = asyncio.run(go())
+    assert retry is None
+    image, partial = final
+    assert image.startswith(PNG_MAGIC) and partial is True
+    assert entry.id not in cog._ei_image_cache                               # 欠けた地図はキャッシュしない

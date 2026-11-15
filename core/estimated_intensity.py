@@ -85,6 +85,11 @@ def _num(v) -> Optional[float]:
     return f if f == f and abs(f) != float("inf") else None
 
 
+def is_valid_id(value) -> bool:
+    """データID（一覧の url フィールド）の形式か。リクエストの入力を一覧と照合する前の形式チェックに使う。"""
+    return isinstance(value, str) and bool(_ID_RE.match(value))
+
+
 def parse_entries(data) -> list:
     """一覧JSONを Entry のリスト（元の順＝新しい順）にする。形式に合わない件は読み飛ばす。"""
     if not isinstance(data, list):
