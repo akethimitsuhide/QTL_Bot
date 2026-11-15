@@ -579,6 +579,8 @@ WEBHOOK_URLS_TSUNAMI=https://hooks.slack.com/services/T/B/zzz      # 津波だ�
 | `QTL_STATUS_HISTORY_ROLE_IDS` | （空） | 履歴表示で `role` モードのとき許可するロール ID |
 | `QTL_LOGS_ACCESS` | admin | `/qtl_logs`（ログの末尾の表示）を実行できる範囲。ログには内部の情報が含まれるため、`all` や `role` にするときは範囲を慎重に決める |
 | `QTL_LOGS_ROLE_IDS` | （空） | `/qtl_logs` で `role` モードのとき許可するロール ID |
+| `QTL_ESTIMATED_ACCESS` | admin | `/qtl_estimated`（過去の推計震度分布図の閲覧）を実行できる範囲（`admin` / `all` / `role`） |
+| `QTL_ESTIMATED_ROLE_IDS` | （空） | `/qtl_estimated` で `role` モードのとき許可するロール ID |
 
 - `role` モードでも管理者は常に実行できる。`role` なのにロール ID が未設定の場合や、不正な値の場合は、警告ログを出して `admin` として扱う。
 - 履歴オプションを指定したときは `QTL_STATUS_HISTORY_ACCESS` だけで判定する（`QTL_STATUS_ACCESS` が `admin` でも、履歴だけ全員に許可できる）。
@@ -715,6 +717,7 @@ curl http://localhost:8080/health/full | jq
 | `/qtl_status history:地震情報の履歴` | スラッシュ | `QTL_STATUS_HISTORY_ACCESS`（既定: 管理者） | 直近の地震情報を表示（`count` で 1〜10 件、既定 5 件）。実行者本人にのみ表示 |
 | `/qtl_status history:緊急地震速報(EEW)の履歴` | スラッシュ | `QTL_STATUS_HISTORY_ACCESS`（既定: 管理者） | 直近の EEW を表示（同一イベントは最新の報にまとめる）。実行者本人にのみ表示 |
 | `/qtl_logs` | スラッシュ | `QTL_LOGS_ACCESS`（既定: 管理者） | ログの末尾を表示（`lines` 1〜200・`level`・`keyword`・`generation`: 0=現在、1=ひとつ前の圧縮済み…）。Webhook URL・トークンらしき文字列は伏せ字。長いときは `.txt` で添付。実行者本人にのみ表示 |
+| `/qtl_estimated` | スラッシュ | `QTL_ESTIMATED_ACCESS`（既定: 管理者） | 気象庁HPの一覧（約340件）から過去の推計震度分布図を選んで表示。`event` の候補は新しい順で、日付・震央地名の入力で絞り込める（Discordの仕様で候補は最大25件）。実行者本人にのみ表示。同時に描画するのは1件、同じユーザーは20秒に1回まで（Raspberry Pi の負荷対策） |
 | `/qtl_config list` | スラッシュ | 管理者のみ | 再起動なしで変更できる設定と現在値を表示（実行者本人にのみ表示） |
 | `/qtl_config set` | スラッシュ | 管理者のみ | 設定を変更し `.env` に保存する。再起動は不要（実行者本人にのみ表示） |
 
