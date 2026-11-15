@@ -347,3 +347,51 @@ def test_render_estimated_incomplete_tiles_retry_or_partial(monkeypatch):
     image, partial = final
     assert image.startswith(PNG_MAGIC) and partial is True
     assert entry.id not in cog._ei_image_cache                               # 欠けた地図はキャッシュしない
+
+
+# ---------- メッシュ画像の中継（ダッシュボードの地図用）----------
+def test_fetch_tile_rejects_non_png_and_bad_mesh():
+    (e,) = ei.parse_entries([RAW])
+    html = b"<html>error page</html>"
+    assert asyncio.run(ei.fetch_tile(_Session([_Resp(200, html)]), e, "5137")) is None
+    assert asyncio.run(ei.fetch_tile(_Session([_Resp(200, _png())]), e, "5137")) is not None
+    sess = _Session([_Resp(200, _png())])
+    assert asyncio.run(ei.fetch_tile(sess, e, "../x")) is None and sess.calls == []   # 不正なメッシュは取りにいかない
+    assert asyncio.run(ei.fetch_tile(_Session([_Resp(404)]), e, "5137")) is None
+
+
+def test_legend_labels_match_legend():
+    assert len(ei.LEGEND_LABELS) == len(ei.LEGEND) == 6
+
+
+def test_get_estimated_tile_caches_and_limits_to_entry_meshes(monkeypatch):
+    sess = _TileSession()
+    cog = _real_cog(monkeypatch, sess)
+    from collections import OrderedDict
+    cog._ei_tile_cache = OrderedDict()
+    cog._ei_tile_sem = asyncio.Semaphore(4)
+    (entry,) = ei.parse_entries([RAW])
+
+    async def go():
+        a = await cog.get_estimated_tile(entry, "5137")
+        b = await cog.get_estimated_tile(entry, "5137")                 # 2回目はキャッシュ
+        other = await cog.get_estimated_tile(entry, "9999")             # その地震のメッシュではない
+        return a, b, other
+    a, b, other = asyncio.run(go())
+    assert a == b and a.startswith(PNG_MAGIC) and other is None
+    assert len(sess.calls) == 1
+
+
+def test_get_estimated_tile_cache_is_bounded(monkeypatch):
+    cog = _real_cog(monkeypatch, _TileSession())
+    from collections import OrderedDict
+    cog._ei_tile_cache = OrderedDict()
+    cog._ei_tile_sem = asyncio.Semaphore(4)
+    cog._EI_TILE_CACHE_MAX = 2
+    (entry,) = ei.parse_entries([RAW])
+
+    async def go():
+        for m in entry.meshes:
+            await cog.get_estimated_tile(entry, m)
+    asyncio.run(go())
+    assert list(cog._ei_tile_cache) == [(entry.id, "5138"), (entry.id, "5236")]

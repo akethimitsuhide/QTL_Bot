@@ -55,6 +55,9 @@ LEGEND = (
     (60, (165, 0, 33)),
     (70, (180, 0, 104)),
 )
+# 凡例のラベル（LEGEND と同じ順）。ダッシュボードの凡例表示に使う
+LEGEND_LABELS = ("4", "5弱", "5強", "6弱", "6強", "7")
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # rank_cnt のキー → 表示名
 RANK_LABELS = (("i9", "7"), ("i8", "6強"), ("i7", "6弱"), ("i6", "5強"), ("i5", "5弱"), ("i4", "4"))
 
@@ -83,6 +86,11 @@ def _num(v) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return f if f == f and abs(f) != float("inf") else None
+
+
+def is_valid_mesh(value) -> bool:
+    """1次メッシュコード（4桁の数字）の形式か。"""
+    return isinstance(value, str) and bool(_MESH_RE.match(value))
 
 
 def is_valid_id(value) -> bool:
@@ -193,10 +201,34 @@ async def fetch_entries(session: aiohttp.ClientSession, state: dict) -> Optional
     return parse_entries(data)
 
 
+async def fetch_tile(session: aiohttp.ClientSession, entry: Entry, mesh: str) -> Optional[bytes]:
+    """
+    メッシュ画像1枚を取得して PNG のバイト列を返す。取得できない・大きすぎる・PNG でない場合は None。
+    （PNG の署名を確認し、HTML のエラーページ等をそのまま利用者へ中継しないようにする）
+    """
+    if not is_valid_mesh(mesh):
+        return None
+    try:
+        async with session.get(tile_url(entry, mesh), headers={"Accept-Encoding": "identity"}) as resp:
+            if resp.status != 200:
+                logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} の取得に失敗（HTTP {resp.status}）")
+                return None
+            body = await _read_limited(resp, MAX_TILE_BYTES)
+    except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+        logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} の取得エラー: {type(e).__name__}: {e}")
+        return None
+    if body is None:
+        logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} が想定より大きいため破棄しました")
+        return None
+    if not body.startswith(_PNG_MAGIC):
+        logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} が PNG ではないため破棄しました")
+        return None
+    return body
+
+
 async def fetch_tiles(session: aiohttp.ClientSession, entry: Entry) -> dict:
     """
     entry のメッシュ画像を取得し、{メッシュコード: PNGバイト列} を返す（取得できたものだけ）。
-    PNGとして正しいか・大きさは描画側（Pillow）で検証する。
     """
     meshes = entry.meshes[:MAX_TILES]
     sem = asyncio.Semaphore(_TILE_CONCURRENCY)
@@ -204,18 +236,9 @@ async def fetch_tiles(session: aiohttp.ClientSession, entry: Entry) -> dict:
 
     async def one(mesh: str) -> None:
         async with sem:
-            try:
-                async with session.get(tile_url(entry, mesh), headers={"Accept-Encoding": "identity"}) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} の取得に失敗（HTTP {resp.status}）")
-                        return
-                    body = await _read_limited(resp, MAX_TILE_BYTES)
-                    if body is None:
-                        logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} が想定より大きいため破棄しました")
-                        return
-                    out[mesh] = body
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                logger.warning(f"推計震度分布: メッシュ画像 {entry.id}/{mesh} の取得エラー: {type(e).__name__}: {e}")
+            body = await fetch_tile(session, entry, mesh)
+            if body is not None:
+                out[mesh] = body
 
     await asyncio.gather(*(one(m) for m in meshes))
     return out

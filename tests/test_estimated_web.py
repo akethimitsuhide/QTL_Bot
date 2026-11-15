@@ -28,9 +28,17 @@ class _FakeCog:
     def __init__(self, entries, png=PNG, delay=0.0, boom=False):
         self.entries, self.png, self.delay, self.boom = entries, png, delay, boom
         self.png_calls = []
+        self.tile_calls = []
 
     async def get_estimated_entries(self):
         return self.entries
+
+    async def get_estimated_tile(self, entry, mesh):
+        self.tile_calls.append((entry.id, mesh))
+        if self.boom:
+            raise RuntimeError("secret internal detail")
+        await asyncio.sleep(self.delay)
+        return self.png
 
     async def get_estimated_png(self, entry):
         self.png_calls.append(entry.id)
@@ -134,4 +142,66 @@ def test_map_unavailable_timeout_and_internal_error_do_not_leak_details(monkeypa
         r = await c.get("/status/estimated_map?id=202611010104_440")
         text = await r.text()
         assert r.status == 500 and "secret internal detail" not in text
+    _run(_FakeCog(_entries(1), boom=True), True, check_boom)
+
+
+# ---------- 地図の部品（detail）とメッシュ画像の中継（tile）----------
+def test_detail_returns_tiles_bounds_and_legend():
+    cog = _FakeCog(_entries(2))
+
+    async def check(c):
+        r = await c.get("/status/estimated_detail?id=202611020104_441")
+        d = await r.json()
+        assert r.status == 200 and d["id"] == "202611020104_441" and (d["lat"], d["lon"]) == (34.93, 137.66)
+        assert d["bounds"] == [[34.6, 136.57], [35.9, 138.24]]
+        assert [t["mesh"] for t in d["tiles"]] == ["5137", "5138", "5236"]
+        (lat0, lon0), (lat1, lon1) = d["tiles"][0]["bounds"]
+        assert (lat0, lon0) == pytest.approx((34.0, 137.0)) and (lat1, lon1) == pytest.approx((34.0 + 40 / 60, 138.0))
+        assert [x["label"] for x in d["legend"]] == ["4", "5弱", "5強", "6弱", "6強", "7"]
+        assert d["legend"][0]["color"] == "#fae696" and d["legend"][5]["color"] == "#b40068"
+        assert r.headers["Cache-Control"] == "no-store" and r.headers["X-Content-Type-Options"] == "nosniff"
+    _run(cog, True, check)
+
+
+def test_detail_and_tile_reject_bad_input_without_fetching():
+    cog = _FakeCog(_entries(2))
+
+    async def check(c):
+        assert (await c.get("/status/estimated_detail?id=../x")).status == 400
+        assert (await c.get("/status/estimated_detail?id=209901010000_999")).status == 404
+        base = "/status/estimated_tile?id=202611020104_441"
+        assert (await c.get("/status/estimated_tile?id=../x&mesh=5137")).status == 400
+        assert (await c.get(base)).status == 400                           # mesh なし
+        for bad in ["../etc", "51370", "abcd", "5137/../1", ""]:
+            assert (await c.get(base, params={"mesh": bad})).status == 400
+        assert (await c.get(base + "&mesh=9999")).status == 404            # 形式は正しいが、その地震のメッシュではない
+        assert cog.tile_calls == []                                        # どれも取得には進まない
+    _run(cog, True, check)
+
+
+def test_tile_returns_png_with_private_cache():
+    cog = _FakeCog(_entries(2))
+
+    async def check(c):
+        r = await c.get("/status/estimated_tile?id=202611020104_441&mesh=5236")
+        assert r.status == 200 and r.content_type == "image/png" and await r.read() == PNG
+        assert r.headers["Cache-Control"] == "private, max-age=3600" and r.headers["X-Content-Type-Options"] == "nosniff"
+        assert cog.tile_calls == [("202611020104_441", "5236")]
+    _run(cog, True, check)
+
+
+def test_tile_unavailable_timeout_and_error_do_not_leak(monkeypatch):
+    async def check_none(c):
+        assert (await c.get("/status/estimated_tile?id=202611010104_440&mesh=5137")).status == 503
+    _run(_FakeCog(_entries(1), png=None), True, check_none)
+
+    monkeypatch.setattr(estimated_web, "TILE_TIMEOUT_SECONDS", 0.05)
+
+    async def check_timeout(c):
+        assert (await c.get("/status/estimated_tile?id=202611010104_440&mesh=5137")).status == 504
+    _run(_FakeCog(_entries(1), delay=1.0), True, check_timeout)
+
+    async def check_boom(c):
+        r = await c.get("/status/estimated_tile?id=202611010104_440&mesh=5137")
+        assert r.status == 500 and "secret internal detail" not in await r.text()
     _run(_FakeCog(_entries(1), boom=True), True, check_boom)
