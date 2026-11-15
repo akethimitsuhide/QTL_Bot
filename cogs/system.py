@@ -85,6 +85,7 @@ from core.quake_history_log import load_quake_history, display_record
 from core.log_view import list_log_files, find_log_file, read_entries, parse_level, LEVELS, MAX_TAIL
 from core.eew_history_log import load_eew_history, display_record as display_eew_record
 from core import gis_data
+from core.estimated_web import register_routes as register_estimated_routes
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
@@ -1766,6 +1767,8 @@ class SystemCog(commands.Cog):
             self._web_app.router.add_get("/status/logs", logs_list_handler)
             self._web_app.router.add_get("/status/logs/view", logs_view_handler)
             self._web_app.router.add_get("/logs/download", logs_download_handler)
+            # 推計震度分布図（一覧・地図）。実処理は OtherInfoCog、HTTP の入口は core/estimated_web.py
+            register_estimated_routes(self._web_app, lambda: self.bot.get_cog("OtherInfoCog"), GIS_MAP_ENABLE)
             self._web_app.router.add_get("/status/gis_local_areas", gis_local_areas_handler)
             self._web_app.router.add_get("/status/gis_countries", gis_countries_handler)
             # 画面（/dashboard・/quake_map）と /assets/*（web/ の静的ファイル。許可リスト方式）

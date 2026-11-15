@@ -45,7 +45,8 @@ import aiohttp
 import asyncio
 import traceback
 from datetime import datetime
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from typing import Optional
 import logging
 
 from core.discord_send import send_with_retry
@@ -126,7 +127,8 @@ class OtherInfoCog(commands.Cog, AudioMixin):
         self._ei_attempts: dict = {}                 # データID -> 通知に失敗した回数
         self._ei_initialized = False
         self._ei_entries: list = []                  # 直近に取得した一覧（/qtl_estimated の候補表示用）
-        self._ei_command_lock = asyncio.Lock()       # /qtl_estimated の同時描画を1件に制限（Pi のメモリ保護）
+        self._ei_command_lock = asyncio.Lock()       # /qtl_estimated・ダッシュボードの同時描画を1件に制限（Pi のメモリ保護）
+        self._ei_image_cache: OrderedDict = OrderedDict()   # データID -> 地図PNG（欠けの無いものだけ。最大 _EI_IMAGE_CACHE_MAX 件）
 
         # -- 気象庁その他情報の重複排除状態（7日間TTL） --
         self.last_advisory_ids: dict = {}
@@ -268,6 +270,7 @@ class OtherInfoCog(commands.Cog, AudioMixin):
     _EI_MAX_ATTEMPTS = 5          # メッシュ画像が揃わないときに通知を待つ回数（超えたら取れた分だけで通知）
     _EI_MAX_PER_CYCLE = 3         # 1回の確認で通知する最大件数（古い順）
     _EI_SEEN_MAX = 500
+    _EI_IMAGE_CACHE_MAX = 8       # 1枚 約100KB。同じ地図を何度も作らないための小さなキャッシュ
 
     def _ei_remember(self, event_id: str) -> None:
         self._ei_seen[event_id] = True
@@ -315,13 +318,17 @@ class OtherInfoCog(commands.Cog, AudioMixin):
     async def before_fetch_estimated_intensity(self):
         await self.bot.wait_until_ready()
 
-    async def _prepare_estimated_intensity(self, entry, final_attempt: bool = True):
+    async def _render_estimated(self, entry, final_attempt: bool = True):
         """
-        推計震度分布図の Embed と地図画像を作る。(embed, gis_images) を返す。
+        推計震度分布図の地図PNGを作る（通知・/qtl_estimated・ダッシュボードで共用）。
+        戻り値は (PNGバイト列 または None, 一部のメッシュ画像が欠けているか)。
         メッシュ画像が一部しか取れておらず final_attempt でない場合は None（呼び出し側が再試行する。
-        欠けた地図を出さないため）。通知（notify_estimated_intensity）と /qtl_estimated が共用する。
+        欠けた地図を出さないため）。欠けの無い地図は小さなキャッシュに保存して再利用する。
         """
-        gis_images = []
+        cached = self._ei_image_cache.get(entry.id)
+        if cached is not None:
+            self._ei_image_cache.move_to_end(entry.id)
+            return cached, False
         partial = False
         tiles = await ei.fetch_tiles(self.session, entry)
         wanted = entry.meshes[: ei.MAX_TILES]
@@ -330,13 +337,42 @@ class OtherInfoCog(commands.Cog, AudioMixin):
                 logger.info(f"推計震度分布: メッシュ画像が揃っていません（{len(tiles)}/{len(wanted)}）。次回再試行します id={entry.id}")
                 return None
             partial = bool(tiles)
+        image = None
         if tiles:
             tile_list = [(ei.mesh_bounds(m, entry.datum), png) for m, png in tiles.items()]
             lonlat = (entry.lon, entry.lat) if entry.lon is not None and entry.lat is not None else None
             image = await asyncio.to_thread(
                 render_estimated_intensity_map, tile_list, entry.bounds, lonlat, ei.LEGEND)
-            if image:
-                gis_images.append(image)
+        if image and not partial:
+            self._ei_image_cache[entry.id] = image
+            while len(self._ei_image_cache) > self._EI_IMAGE_CACHE_MAX:
+                self._ei_image_cache.popitem(last=False)
+        return image, partial
+
+    async def get_estimated_entries(self) -> list:
+        """推計震度分布図の一覧（新しい順）。ダッシュボード用の公開メソッド。"""
+        return await self._ei_entries_for_command()
+
+    async def get_estimated_png(self, entry) -> Optional[bytes]:
+        """
+        指定した1件の地図PNGを返す（ダッシュボード用の公開メソッド）。作れなければ None。
+        同時に作るのは1件だけ（/qtl_estimated と共通のロック。Raspberry Pi のメモリ・CPU 保護）。
+        """
+        async with self._ei_command_lock:
+            result = await self._render_estimated(entry, final_attempt=True)
+        return result[0] if result else None
+
+    async def _prepare_estimated_intensity(self, entry, final_attempt: bool = True):
+        """
+        推計震度分布図の Embed と地図画像を作る。(embed, gis_images) を返す。
+        メッシュ画像が揃っておらず final_attempt でない場合は None（呼び出し側が再試行する）。
+        通知（notify_estimated_intensity）と /qtl_estimated が共用する。
+        """
+        rendered = await self._render_estimated(entry, final_attempt)
+        if rendered is None:
+            return None
+        image, partial = rendered
+        gis_images = [image] if image else []
 
         occurred = format_jma_time(entry.occurred_at) if entry.occurred_at else "不明"
         mag = f"M{entry.magnitude}" if entry.magnitude else "不明"
