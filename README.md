@@ -28,9 +28,9 @@
 P2P地震情報 WebSocket が使えないときに、地震情報（震度速報・震源に関する情報・各地の震度に関する情報）を代替の取得元から通知する。
 
 - **接続の一元管理**: `core/p2p_ws_hub.py` の `P2PWebSocketHub` が WebSocket 接続を1本だけ保持し、code ごとに各 Cog へ配信する（551→地震情報、552→津波、556→EEW、9611→地震感知情報）。P2P の接続数上限（IP あたり2本）に対応するため。
-- **切り替え条件**（どちらか早い方）: 連続接続失敗が `P2P_FAILOVER_THRESHOLD`（既定5）回に達する、または接続できていない状態が `P2P_FAILOVER_DISCONNECT_SECONDS`（既定10）秒続く。
+- **切り替え条件**（どちらか早い方）: 連続接続失敗が `P2P_FAILOVER_THRESHOLD`（既定5）回に達する、または接続できていない状態が `P2P_FAILOVER_DISCONNECT_SECONDS`（既定0＝切断した瞬間）秒続く。
 - **取得元**（`QUAKE_FAILOVER_SOURCES`、既定 `quake_one,jma_json`。先頭から順に試す）: Quake.One（http のみの第三者配信のため入力を検証する。震度速報・震源に関する情報の段階は無く最終形のみ届く）、気象庁HPのJSON。気象庁防災情報XML（`jma_xml`）は既定の対象外で、指定すれば使える（XML は DTD/ENTITY 宣言・UTF-16/32・2MB 超を破棄してからパースする）。取得した電文は P2P の JMAQuake（code=551）互換形式に変換し、通常と同じ通知処理を通す（フッターに「P2P地震情報の障害のため〇〇から取得」と表示）。
-- **復旧**: WebSocket が `P2P_FAILOVER_RECOVERY_SECONDS`（既定60）秒以上連続して接続できたらフォールバックを停止する。WebSocket の再接続はフォールバック中も続ける。
+- **復旧**: WebSocket が `P2P_FAILOVER_RECOVERY_SECONDS`（既定60）秒以上連続して接続できたら失敗カウントをリセットする。切断・接続失敗のあとに再接続した場合は、さらに `P2P_FAILOVER_HOLD_SECONDS`（既定600＝10分）が経つまで代替取得を続けてから停止する（途中で再び切断したら続行し、次の再接続で数え直す。起動時に一発で接続できた場合は対象外）。WebSocket の再接続はフォールバック中も続ける。
 - **重複防止**（`QuakeContentDedupe`）: 震源要素（発生時刻±3分・震央地名・M・深さ）と震度分布の内容指紋で照合し、取得元をまたいでも同じ内容は通知しない（保持は最大200件・6時間）。
 - **起動時**: 各取得元の現在の一覧を既知として記録し、通知しない。発表が `P2P_FAILOVER_CATCHUP_MINUTES`（既定30）分より古い情報も通知しない。
 - 無効化は `P2P_FAILOVER_ENABLE=false`。取得元を増やすときは `QuakeFallbackSource` を継承して `SOURCE_FACTORIES` に登録する。
@@ -54,6 +54,7 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
 - **火山情報**（`VolcanoCog`）: 気象庁HPのJSONを1分間隔でポーリング。`info.json` の各エントリの `eventId` と `reportDatetime` の差分で新規・更新を判定し、活動状況・予防措置・次回発表予定を通知する。噴火速報（`eruption.json`）・噴火警報（`warning.json`）は独立にポーリングする。
 - **USGS 地震情報**（`UsgsCog`）: USGS の GeoJSON フィードから海外の地震を取得。対象領域・M下限・クールダウンを設定できる（通知済みIDはフィードに載っている間は保持）。
 - **気象庁その他特別情報**（`OtherInfoCog`）: 北海道・三陸沖後発地震注意情報・南海トラフ地震臨時情報・顕著な地震の震源要素更新のお知らせ・長周期地震動に関する観測情報。後発地震注意情報と南海トラフ臨時情報には区域図（`hokkaido_bosaitaiou_area.png`／`nankai_bosaitaiou_area.png`、`bot.py` と同じディレクトリ）を添付する。南海トラフ臨時情報と震源要素更新は気象庁が2つの `list.json` に重複掲載するため、2経路から独立に通知される。
+- **推計震度分布図**（`OtherInfoCog`、`core/estimated_intensity.py`）: 震度5弱以上の地震のあと気象庁が公開する250mメッシュの推計震度分布図を、独自ベクター地図の上に半透明（不透明度0.6、気象庁HPと同じ）で重ね、震度4〜7の凡例と震源のバツ印を付けて「その他」チャンネルへ通知する。気象庁HPが画面表示に使っている公開ファイル（`bosai/estimated_intensity_map/data/list.json` と1次メッシュごとの透過PNG）を `ESTIMATED_INTENSITY_POLL_SECONDS`（既定60）秒間隔で確認する（ETag の条件付きGETで、変化が無いときは本文を転送しない）。起動前から一覧にあった分は通知しない。メッシュ画像が揃わないときは最大5回まで再試行し、超えたら取れた分だけで通知する（フッターに明記）。出典「気象庁ホームページ」を加工して作成した旨をフッターに表示する。気象庁がAPIとして公開しているものではなくHPの内部ファイルのため、仕様変更で止まる可能性がある（その場合も他の通知には影響しない）。
 - **P2P 地震感知情報**（`JishinKanchiCog`、code=9611。既定無効、`JISHIN_KANCHI_ENABLE=true` で有効化）: P2P が独自に推定する速報値。信頼度をレベル1〜4に変換し、地域ごとの信頼度（A〜F）でグルーピングして表示する。音声・効果音は同一イベント（`started_at`）の第一報のみ、テキスト通知は `JISHIN_KANCHI_MIN_UPDATE_INTERVAL_SEC`（既定10）秒未満の更新を間引く。地域コードの変換には `epsp_area.csv`（[p2pquake/epsp-specifications](https://github.com/p2pquake/epsp-specifications) 配布）を使う。地図画像は添付しない。
 
 ### 起動時の「既存情報」の扱い
@@ -206,6 +207,8 @@ python3 bot.py
 | `TSUNAMI_ENABLE` | true | 津波情報通知の有効化 |
 | `ENABLE_ADVISORY` | true | 気象庁その他情報の有効化 |
 | `ENABLE_LONG_PERIOD` | true | 長周期地震動通知の有効化 |
+| `ENABLE_ESTIMATED_INTENSITY` | true | 推計震度分布図の通知の有効化（実行時に変更可） |
+| `ESTIMATED_INTENSITY_POLL_SECONDS` | 60 | 推計震度分布図の一覧を確認する間隔（秒、最小30） |
 | `ENABLE_TSUNAMI_OBS` | true | **現在未使用**（設定しても効果なし。津波観測情報は常に通知される） |
 
 ### USGS 地震情報設定
@@ -287,8 +290,9 @@ python3 bot.py
 | :--- | :--- | :--- |
 | `P2P_FAILOVER_ENABLE` | true | P2P WebSocket の障害時に気象庁データから代替取得する機能の有効化 |
 | `P2P_FAILOVER_THRESHOLD` | 5 | 連続で何回接続に失敗したらフォールバックに入るか（最小1） |
-| `P2P_FAILOVER_DISCONNECT_SECONDS` | 10 | 接続できていない状態（再接続の待ち時間中を含む）がこの秒数続いたら、失敗回数に関わらずフォールバックに入る（最小0=切断した瞬間に開始） |
+| `P2P_FAILOVER_DISCONNECT_SECONDS` | 0 | 接続できていない状態（再接続の待ち時間中を含む）がこの秒数続いたら、失敗回数に関わらずフォールバックに入る（最小0=切断した瞬間に開始） |
 | `P2P_FAILOVER_RECOVERY_SECONDS` | 60 | WebSocket が何秒以上連続して接続できたら復旧とみなすか（最小5） |
+| `P2P_FAILOVER_HOLD_SECONDS` | 600 | 切断・接続失敗のあと再接続できても、接続から何秒間は代替取得を続けるか（最小0。0=無効）。起動時に失敗なく接続できた場合は適用しない |
 | `QUAKE_FAILOVER_POLL_SECONDS` | 10 | フォールバック中の取得間隔（秒、最小5） |
 | `QUAKE_ONE_POLL_SECONDS` | 6 | Quake.One の `list.json` の取得間隔（秒）。既定6秒＝10回/分。6秒未満（10回/分を超える頻度）は指定できず6に切り上げる。詳細の取得は数えない |
 | `P2P_FAILOVER_CATCHUP_MINUTES` | 30 | フォールバックが通知対象にする情報の新しさ（分、最小1）。発表がこれより古い情報は通知済みとみなして通知しない |
@@ -539,6 +543,7 @@ WEBHOOK_URLS_TSUNAMI=https://hooks.slack.com/services/T/B/zzz      # 津波だ�
 | `EEW_ENABLE`（EEW）・`QUAKE_ENABLE`（地震情報全体）・`VOLCANO_ENABLE`（火山情報） | `on` / `off` |
 | `TSUNAMI_ENABLE`（津波情報） | `on` / `off` |
 | `ENABLE_LONG_PERIOD`（長周期地震動） | `on` / `off` |
+| `ENABLE_ESTIMATED_INTENSITY`（推計震度分布図） | `on` / `off` |
 | `ENABLE_ADVISORY`（後発地震注意情報等） | `on` / `off` |
 | `GIS_MAP_THEME`（地図の配色。次に描画する地図から反映） | `light` / `dark` / `highlight` |
 
@@ -1013,6 +1018,7 @@ QTL_Bot/
 | `QuakeInfoCog.handle_p2p_quake()` / `TsunamiCog.handle_p2p_tsunami()` | P2P の地震情報・津波情報の受信 |
 | `TsunamiCog.fetch_tsunami_observation()` | 気象庁津波 JSON のポーリング（60秒） |
 | `OtherInfoCog.fetch_long_period()` / `fetch_quake_advisory()` | 長周期地震動・気象庁その他情報のポーリング |
+| `OtherInfoCog.fetch_estimated_intensity()` | 推計震度分布図のポーリング・通知 |
 | `UsgsCog.fetch_usgs_quake()` | USGS のポーリング |
 | `VolcanoCog.fetch_volcano_info()` / `fetch_eruption_info()` / `fetch_warning_info()` | 火山情報・噴火速報・噴火警報のポーリング |
 | `EewCog._eew_monitor_timeout()` | EEW 第一報から最長300秒で `monitored_event_id` を解除 |
@@ -1040,5 +1046,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-14
+**最終更新**: 2026-11-15
 **対応 Python**: 3.11+
