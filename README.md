@@ -684,8 +684,8 @@ bandit -r . --ini .bandit       # 指摘が 0 件なら "No issues identified."
 | `GET /logs` | ログの閲覧画面（ファイル一覧・末尾N件・レベルとキーワードで絞り込み・`.gz` のダウンロード）。Webhook URL・トークンらしき文字列は伏せ字にして表示する |
 | `GET /status/logs`・`/status/logs/view?file=&tail=&level=&q=` | 上の画面が使う JSON。`file` は一覧にあるファイル名との完全一致のみ（パスは入力から組み立てない） |
 | `GET /logs/download?file=` | 圧縮済み（`.gz`）ログのダウンロード。伏せ字にはしない（元のファイルそのもの）。現在のログ・圧縮待ちは対象外 |
-| `GET /estimated` | 推計震度分布図の閲覧画面。気象庁HPの一覧（約340件）から地震を選んで、地図・震源・推計震度ごとのメッシュ数・解説文を表示（日付・震央地名で絞り込み。`#<データID>` で特定の1件へのリンクになる）。Discord の `/qtl_estimated` と同じ処理・キャッシュを使う |
-| `GET /status/estimated_list`・`/status/estimated_map?id=` | 上の画面が使う API。一覧は JSON（`?limit=` 最大400）、地図は PNG。`id` は一覧にあるデータIDとの完全一致のみ（URL・パスは入力から組み立てない）。地図の作成は同時に1件・90秒で打ち切り、直近8件はキャッシュ。`GIS_MAP_ENABLE=false` のとき地図は 404（一覧は返す）。認証・IP許可リストは他の `/status/*` と同じ |
+| `GET /estimated` | 推計震度分布図の閲覧画面。気象庁HPの一覧（約340件）から地震を選ぶと、**GeoJSON の背景地図（Leaflet）の上に推計震度分布図（メッシュ画像）を重ねて表示**し、ホイール・ピンチ・ドラッグで拡大・縮小・移動できる。震源の×印・凡例・重ねる図の濃さ（スライダー、既定0.6）・日付や震央地名での絞り込み・`#<データID>` での共有リンクに対応。区域の境界線は画像の上に描く。画像の一部が取れなかったときは枚数を表示する。外部の地図サーバーにはアクセスしない（背景は `/status/gis_countries`・`/status/gis_local_areas`） |
+| `GET /status/estimated_list`・`/status/estimated_detail?id=`・`/status/estimated_tile?id=&mesh=`・`/status/estimated_map?id=` | 上の画面が使う API。一覧は JSON（`?limit=` 最大400）、`estimated_detail` は地図の部品（各メッシュの緯度経度範囲・震源・凡例。JSON）、`estimated_tile` は気象庁のメッシュ画像（透過PNG）の中継（ブラウザは CSP により気象庁へ直接つなげないため。PNG の署名を確認し、直近120枚をキャッシュ、気象庁への同時取得は4枚まで）、`estimated_map` は Discord 通知と同じサーバーで描いた1枚絵（直近8件をキャッシュ、同時に作るのは1件・90秒で打ち切り）。`id` は一覧にあるデータID、`mesh` はその地震のメッシュとの完全一致のみ（URL・パスは入力から組み立てない）。`GIS_MAP_ENABLE=false` のとき `estimated_map` は 404（一覧・`estimated_detail`・`estimated_tile` は使える）。認証・IP許可リストは他の `/status/*` と同じ |
 | `GET /dashboard` | 上記を可視化する HTML ページ（ステータス、推移グラフ、通知履歴、CSV ダウンロード） |
 | `GET /assets/<ファイル>` | 画面用の CSS・JS（許可リストのファイルのみ。下記） |
 
@@ -843,7 +843,7 @@ python3 -m pytest tests/ -q
 | `test_log_archive.py` | ログの圧縮保存（起動時の退避・別スレッド圧縮・保持の日数/世代数・壊れた `.gz`・履歴を `.gz` から読めること） |
 | `test_log_mask.py` | 表示時の秘密情報の伏せ字（Webhook URL・トークン・`名前=値`・誤検知しないこと） |
 | `test_dashboard_logs.py` | `/logs`・`/status/logs*`・`/logs/download` を実際に起動して確認（絞り込み・伏せ字・パス探索の拒否・認証） |
-| `test_estimated_web.py` | `/status/estimated_list`・`/status/estimated_map` を実際に起動して確認（一覧・PNG・不正な id の拒否・無効時の 404・タイムアウト・内部エラーを漏らさない・セキュリティヘッダー） |
+| `test_estimated_web.py` | 推計震度分布図の API 4本（一覧・detail・tile・map）を実際に起動して確認（JSON・PNG・不正な id/mesh の拒否と取得に進まないこと・その地震に無いメッシュの 404・無効時の 404・タイムアウト・内部エラーを漏らさない・セキュリティヘッダー） |
 | `test_qtl_logs_command.py` | `/qtl_logs` の権限・伏せ字・長文のファイル添付 |
 | `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
 | `test_status_history_view.py` | `/qtl_status` 履歴オプションの表示整形 |
