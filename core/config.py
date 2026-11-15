@@ -401,6 +401,10 @@ QUAKE_ENABLE       = _env_bool("QUAKE_ENABLE", True)
 VOLCANO_ENABLE     = _env_bool("VOLCANO_ENABLE", True)
 TSUNAMI_ENABLE     = _env_bool("TSUNAMI_ENABLE", True)
 ENABLE_LONG_PERIOD = _env_bool("ENABLE_LONG_PERIOD", True)
+# 推計震度分布図（気象庁HP。250mメッシュ）を「その他」チャンネルへ地図付きで通知する（2026-11-14追加）
+ENABLE_ESTIMATED_INTENSITY = _env_bool("ENABLE_ESTIMATED_INTENSITY", True)
+# 一覧（list.json）の確認間隔（秒、最小30）。変化が無いときは条件付きGETで本文は転送されない
+ESTIMATED_INTENSITY_POLL_SECONDS = max(30, _env_int("ESTIMATED_INTENSITY_POLL_SECONDS", 60))
 ENABLE_ADVISORY    = _env_bool("ENABLE_ADVISORY", True)
 ENABLE_TSUNAMI_OBS = _env_bool("ENABLE_TSUNAMI_OBS", True)
 ENABLE_KYOSHIN     = _env_bool("ENABLE_KYOSHIN", True)
@@ -701,7 +705,14 @@ P2P_FAILOVER_RECOVERY_SECONDS = max(5, _env_int("P2P_FAILOVER_RECOVERY_SECONDS",
 # どちらか早い方で開始する。再接続は 5→10→20→40→60秒と待ち時間が延びるため、
 # 回数だけだと2026-10-01の障害では開始まで約2分かかり、その間の地震情報が
 # 通知されなかった。
-P2P_FAILOVER_DISCONNECT_SECONDS = max(0, _env_int("P2P_FAILOVER_DISCONNECT_SECONDS", 10))
+# 【2026-11-14変更】既定を 10 → 0（切断した瞬間に開始）に変更。通知漏れを減らすため。
+P2P_FAILOVER_DISCONNECT_SECONDS = max(0, _env_int("P2P_FAILOVER_DISCONNECT_SECONDS", 0))
+# 切断・接続失敗のあとに WebSocket が再接続できても、この秒数が経つまでは代替取得を
+# 続ける（2026-11-14追加。0=従来どおり P2P_FAILOVER_RECOVERY_SECONDS だけで停止）。
+# 再接続直後の P2P が不安定な場合や、切断中に取りこぼした情報の拾い直しのため。
+# 起動時に接続できた場合（失敗が1回も無い場合）には適用しない。同じ内容は
+# QuakeContentDedupe で重複通知されない。
+P2P_FAILOVER_HOLD_SECONDS = max(0, _env_int("P2P_FAILOVER_HOLD_SECONDS", 600))
 QUAKE_FAILOVER_POLL_SECONDS   = max(5, _env_int("QUAKE_FAILOVER_POLL_SECONDS", 10))
 # Quake.One の list.json の取得間隔（秒。2026-10-05追加）。既定6秒＝10回/分。
 # これより短い値（10回/分を超える頻度）は指定できず、6秒に切り上げる。

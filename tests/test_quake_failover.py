@@ -204,7 +204,7 @@ def test_dedupe_store_ttl_and_size():
 # ---------- ハブの切り替え判定 ----------
 def test_hub_failover_after_threshold_and_recovery():
     async def run():
-        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05, disconnect_seconds=1000)
+        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05, disconnect_seconds=1000, hold_seconds=0)
         events = []
         hub.add_failover_listener(events.append)
         for i in range(4):
@@ -638,7 +638,7 @@ def test_controller_catchup_window_skips_old_items_on_first_activation():
 def test_hub_failover_starts_during_reconnect_wait_without_waiting_for_failure_count():
     """切断後、再接続の待ち時間（失敗が積み上がらない間）でも一定時間でフォールバックに入る。"""
     async def run():
-        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05, disconnect_seconds=0.05)
+        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05, disconnect_seconds=0.05, hold_seconds=0)
         events = []
         hub.add_failover_listener(events.append)
         hub._on_ws_connect()
@@ -819,3 +819,77 @@ def test_quake_one_list_accepts_real_dict_keyed_by_event_id():
             except RuntimeError:
                 assert bad in ("1", '"x"')       # 辞書でも配列でもない形式だけがエラー
     asyncio.run(run())
+
+
+# ===== 切断の瞬間に開始・再接続後も一定時間取得を続ける（2026-11-14追加）=====
+def test_hub_holds_failover_after_reconnect_then_releases():
+    """切断後に再接続しても、接続から hold_seconds が経つまでフォールバックを続ける。"""
+    async def run():
+        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05,
+                              disconnect_seconds=0, hold_seconds=0.3)
+        events = []
+        hub.add_failover_listener(events.append)
+        hub._on_ws_connect()
+        hub._on_ws_failure()                       # 切断した瞬間に開始（disconnect_seconds=0）
+        assert hub.failover_active and events == [True]
+        hub._on_ws_connect()                       # 再接続
+        await asyncio.sleep(0.15)                  # recovery_seconds は過ぎたが hold の途中
+        assert hub.failover_active and events == [True]
+        assert hub.get_stats()["failover"]["consecutive_failures"] == 0     # 失敗カウントは安定でリセット
+        await asyncio.sleep(0.3)
+        assert not hub.failover_active and events == [True, False]
+    asyncio.run(run())
+
+
+def test_hub_hold_is_restarted_when_connection_drops_again():
+    """hold の途中で再び切断したらフォールバックを続け、次の再接続から数え直す。"""
+    async def run():
+        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05,
+                              disconnect_seconds=0, hold_seconds=0.3)
+        events = []
+        hub.add_failover_listener(events.append)
+        hub._on_ws_connect()
+        hub._on_ws_failure()
+        hub._on_ws_connect()
+        await asyncio.sleep(0.2)
+        hub._on_ws_failure()                       # hold の途中で再び切断
+        await asyncio.sleep(0.2)                   # 最初の hold なら解除されている時間
+        assert hub.failover_active and events == [True]
+        hub._on_ws_connect()                       # 再接続（ここから数え直し）
+        await asyncio.sleep(0.2)
+        assert hub.failover_active
+        await asyncio.sleep(0.25)
+        assert not hub.failover_active and events == [True, False]
+    asyncio.run(run())
+
+
+def test_hub_hold_not_applied_on_clean_first_connection():
+    """起動時に失敗なく接続できた場合は hold を適用せず、recovery_seconds で停止する。"""
+    async def run():
+        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05,
+                              disconnect_seconds=0, hold_seconds=5)
+        events = []
+        hub.add_failover_listener(events.append)
+        hub._begin_down_period()                   # 起動直後は切断期間として扱う（即時開始）
+        assert hub.failover_active and events == [True]
+        hub._on_ws_connect()                       # 一発で接続（失敗0回）
+        await asyncio.sleep(0.15)
+        assert not hub.failover_active and events == [True, False]
+    asyncio.run(run())
+
+
+def test_hub_hold_zero_keeps_legacy_release():
+    async def run():
+        hub = P2PWebSocketHub(lambda: False, failover_threshold=5, recovery_seconds=0.05,
+                              disconnect_seconds=0, hold_seconds=0)
+        hub._on_ws_connect()
+        hub._on_ws_failure()
+        hub._on_ws_connect()
+        await asyncio.sleep(0.15)
+        assert not hub.failover_active
+    asyncio.run(run())
+
+
+def test_hub_stats_include_hold_seconds():
+    hub = P2PWebSocketHub(lambda: False, hold_seconds=123)
+    assert hub.get_stats()["failover"]["hold_seconds"] == 123

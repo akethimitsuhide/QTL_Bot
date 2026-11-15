@@ -53,7 +53,7 @@ P2P地震情報の仕様上、同一内容のメッセージが複数回配信�
   ① 接続・再接続が failover_threshold 回（既定5回）連続で失敗
      （切断・接続タイムアウト）
   ② WebSocket が接続できていない状態（再接続の待ち時間・接続試行中を
-     含む）が disconnect_seconds 秒（既定10秒）続いた（2026-10-02 追加）
+     含む）が disconnect_seconds 秒続いた（2026-10-02 追加。既定は2026-11-14から0＝切断した瞬間）
      ※ ①だけだと、再接続の待ち時間（5→10→20→40秒）と各試行のタイム
        アウトを5回分待つ間（2026-10-01 の障害では約2分）フォールバックが
        始まらず、その間の地震情報が通知されなかった。0 を指定すると切断
@@ -64,6 +64,13 @@ core/quake_failover.py 参照）。WebSocket の再接続はその後も並行�
 続け、接続が recovery_seconds 秒以上安定したらフォールバック状態を解除
 （active=False を通知）し、失敗カウントをリセットする。接続しても
 すぐ切れることを繰り返す場合は安定とみなさず、失敗が積み上がる。
+
+【再接続後の取得継続（2026-11-14追加）】
+切断・接続失敗のあとに再接続できた場合は、接続できた時点から hold_seconds（既定600秒＝
+10分）が経つまでフォールバックを続ける（取りこぼしの拾い直し・再接続直後の不安定さへの
+備え）。途中で再び切断されたら続行し、次の再接続で待ち時間を数え直す。起動時に失敗なく
+接続できた場合は対象外（recovery_seconds だけで停止）。開始は既定で切断した瞬間
+（disconnect_seconds=0）。同じ内容は QuakeContentDedupe で重複通知されない。
 """
 import asyncio
 import json
@@ -76,7 +83,7 @@ from collections import OrderedDict
 from core.ws_helpers import ws_connect_loop
 from core.config import (
     P2P_WSS, P2P_FAILOVER_THRESHOLD, P2P_FAILOVER_RECOVERY_SECONDS,
-    P2P_FAILOVER_DISCONNECT_SECONDS,
+    P2P_FAILOVER_DISCONNECT_SECONDS, P2P_FAILOVER_HOLD_SECONDS,
 )
 
 logger = logging.getLogger("QTLBot")
@@ -104,7 +111,8 @@ class P2PWebSocketHub:
     def __init__(self, is_closed_fn,
                  failover_threshold: int = P2P_FAILOVER_THRESHOLD,
                  recovery_seconds: float = P2P_FAILOVER_RECOVERY_SECONDS,
-                 disconnect_seconds: float = P2P_FAILOVER_DISCONNECT_SECONDS):
+                 disconnect_seconds: float = P2P_FAILOVER_DISCONNECT_SECONDS,
+                 hold_seconds: float = P2P_FAILOVER_HOLD_SECONDS):
         """
         Parameters
         ----------
@@ -119,13 +127,18 @@ class P2PWebSocketHub:
                        （既定: P2P_FAILOVER_RECOVERY_SECONDS=60）。
         disconnect_seconds : 接続できていない状態が何秒続いたら、失敗回数に
                        関わらずフォールバック状態に入るか
-                       （既定: P2P_FAILOVER_DISCONNECT_SECONDS=10、0=即時）。
+                       （既定: P2P_FAILOVER_DISCONNECT_SECONDS=0＝切断した瞬間）。
+        hold_seconds : 切断・接続失敗のあとに再接続できても、接続できた時点から
+                       この秒数が経つまでフォールバックを続ける
+                       （既定: P2P_FAILOVER_HOLD_SECONDS=600、0=無効）。
+                       recovery_seconds より短い値は recovery_seconds が優先される。
         """
         self._is_closed_fn = is_closed_fn
         # -- 障害時フォールバック判定用の状態 --
         self._failover_threshold = failover_threshold
         self._recovery_seconds = recovery_seconds
         self._disconnect_seconds = disconnect_seconds
+        self._hold_seconds = hold_seconds
         self._down_since: float | None = None       # 接続できていない状態の開始時刻（monotonic）
         self._down_epoch = 0                        # 接続のたびに増やす（切断期間の世代番号）
         self._ws_connected = False
@@ -230,36 +243,62 @@ class P2PWebSocketHub:
 
     def _on_ws_connect(self) -> None:
         """WebSocket の接続確立時（ws_connect_loop の on_connect）。"""
+        # 切断・接続失敗のあとの再接続なら、接続できた時点から hold_seconds の間は
+        # フォールバックを続ける（起動時に一発で接続できた場合は対象外）
+        hold = self._hold_seconds if self._consecutive_failures > 0 else 0.0
         self._ws_connected = True
         self._down_since = None
         self._down_epoch += 1                       # 進行中の disconnect_check を無効化
         self._connect_seq += 1
         seq = self._connect_seq
         try:
-            asyncio.get_running_loop().create_task(self._recovery_check(seq))
+            asyncio.get_running_loop().create_task(self._recovery_check(seq, hold))
         except RuntimeError:
             # イベントループ外から呼ばれた場合（単体テスト等）は何もしない
             pass
 
-    async def _recovery_check(self, seq: int) -> None:
-        """接続が recovery_seconds 秒以上続いていれば「安定」とみなして復旧させる。"""
+    async def _recovery_check(self, seq: int, hold: float = 0.0) -> None:
+        """
+        接続が recovery_seconds 秒以上続いていれば「安定」とみなして失敗カウントをリセットし、
+        さらに接続から max(recovery_seconds, hold) 秒続いていればフォールバックを解除する。
+        途中で切断された場合（_connect_seq が変わる）は何もしない（フォールバックは続き、
+        次に再接続したときに待ち時間を数え直す）。
+        """
         await asyncio.sleep(self._recovery_seconds)
-        if self._ws_connected and self._connect_seq == seq:
-            self._mark_stable()
+        if not (self._ws_connected and self._connect_seq == seq):
+            return
+        self._reset_failure_count()
+        remaining = hold - self._recovery_seconds
+        if remaining > 0 and self._failover_active:
+            logger.info(
+                f"P2PWebSocketHub: WebSocket は安定しましたが、再接続から {hold:g} 秒間は"
+                "代替取得（フォールバック）を続けます（取りこぼし防止）"
+            )
+            await asyncio.sleep(remaining)
+            if not (self._ws_connected and self._connect_seq == seq):
+                return
+        self._release_failover(max(self._recovery_seconds, hold))
 
-    def _mark_stable(self) -> None:
+    def _reset_failure_count(self) -> None:
         had_failures = self._consecutive_failures > 0
         self._consecutive_failures = 0
         self._first_failure_monotonic = None
+        if had_failures and not self._failover_active:
+            logger.info("P2PWebSocketHub: WebSocket が安定したため接続失敗カウントをリセットしました")
+
+    def _release_failover(self, stable_seconds: float) -> None:
         if self._failover_active:
             self._failover_active = False
             logger.warning(
-                f"P2PWebSocketHub: WebSocket が {self._recovery_seconds:g} 秒以上安定したため、"
+                f"P2PWebSocketHub: WebSocket が {stable_seconds:g} 秒以上安定したため、"
                 "代替取得（フォールバック）を停止します"
             )
             self._notify_failover(False)
-        elif had_failures:
-            logger.info("P2PWebSocketHub: WebSocket が安定したため接続失敗カウントをリセットしました")
+
+    def _mark_stable(self) -> None:
+        """失敗カウントのリセットとフォールバック解除をまとめて行う（待ち時間なし）。"""
+        self._reset_failure_count()
+        self._release_failover(self._recovery_seconds)
 
     def _on_ws_failure(self) -> None:
         """
@@ -410,5 +449,6 @@ class P2PWebSocketHub:
                 "consecutive_failures": self._consecutive_failures,
                 "threshold": self._failover_threshold,
                 "disconnect_seconds": self._disconnect_seconds,
+                "hold_seconds": self._hold_seconds,
             },
         }
