@@ -705,6 +705,7 @@ curl http://localhost:8080/health/full | jq
 `web/` の中身を「フォルダごと公開」する作りにはしていない（パスの組み立て 1 か所の誤りが `.env` などの漏えいにつながるため）。`core/web_static.py` が次の方針で配信する。
 
 - **許可リスト方式**: 配信するのは `core/web_static.py` の `PAGES`・`ASSETS` に書かれたファイルだけ。リクエストのパスは辞書のキーと文字列として一致するか調べるだけで、ファイルパスの組み立てには使わない（`..`・`%2e%2e`・二重エンコード・NUL 文字等を送られても 404）。ディレクトリ一覧も無い。`.env`・`bot.py`・`web/` 内の許可外ファイルは、どんなパスでも返らない。
+- **キャッシュ**: 画面（HTML）と自前の JS・CSS は `Cache-Control: private, no-cache`（毎回 ETag で再検証し、変更が無ければ 304 で本文は転送されない）。版を固定して同梱した `web/vendor/`（Leaflet・Chart.js）だけ `max-age=3600`。以前は自前の JS・CSS も `max-age=3600` だったため、Bot を更新しても最大1時間ブラウザが古い JS・CSS を使い続け、新しい HTML と食い違って画面が壊れた（2026-11-16、`/estimated` の地図が出ない不具合。実ブラウザで再現確認）。すでに古い版をキャッシュしたブラウザ向けに、`estimated.html` は `estimated.css?v=2`・`estimated.js?v=2` を参照する（`?v=` は配信側では無視される）。
 - **実行できるものを配信しない**: PHP 等のサーバー側スクリプトの実行機構・アップロード機能は存在しない。Bot が返すのは、許可リストのファイルのバイト列と JSON のみ。シンボリックリンクも辿らない。
 - **全レスポンスにセキュリティヘッダー**: CSP（`script-src 'self'`・インラインスクリプト禁止・外部接続禁止・フレーム埋め込み禁止）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等。404・認証失敗・想定外の例外（汎用の 500。内部情報は返さない）にも付き、`Server` ヘッダーでライブラリの版も出さない。
 - **XSS 対策**: 外部から受け取った文字列（震源地名・通知タイトル・気象庁のコメント等）は HTML 文字列にせず、DOM API（テキストノード）で表示する。さらに CSP により、万一インラインスクリプトが注入されても実行されない。
@@ -834,7 +835,7 @@ python3 -m pytest tests/ -q
 | `test_notify_enable.py` | 通知種類ごとの ON/OFF（EEW・地震情報・火山） |
 | `test_webhook_event_urls.py` | Webhook の種別別 URL・区切り・重複 |
 | `test_yomiage_test.py` | `--test_yomiage`（一覧・再生・引数・実際のプレーヤー起動経路） |
-| `test_web_static.py` | ダッシュボードの静的配信（許可リスト・`.env` を狙うパス探索の拒否・304 でのヘッダー維持・CSP 適合の静的点検） |
+| `test_web_static.py` | ダッシュボードの静的配信（許可リスト・`.env` を狙うパス探索の拒否・304 でのヘッダー維持・CSP 適合の静的点検・自前ファイルは毎回再検証／vendor は1時間キャッシュ・`?v=` 付きでも配信） |
 | `test_dashboard_security.py` | 実際のダッシュボードを起動して、秘密が返らないこと・全応答のヘッダー・認証が静的ファイルにも効くことを確認 |
 | `test_webhook_notify.py` | Webhook 通知（URL 検証・Embed 変換・再送・複数宛先・種別フィルター・Discord 送信との独立性） |
 | `test_runtime_settings.py` | 再起動不要の設定変更（入力解釈・保存失敗時・再起動後の読み戻し）と `/qtl_config` コマンド |
@@ -1054,5 +1055,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-16
+**最終更新**: 2026-11-17
 **対応 Python**: 3.11+
