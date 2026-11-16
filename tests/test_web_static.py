@@ -285,7 +285,8 @@ def test_every_script_and_link_target_in_html_is_in_the_allowlist():
     for page in PAGES.values():
         html = _read(page)
         for url in re.findall(r"(?:src|href)=\"(/assets/[^\"]+)\"", html):
-            assert url[len("/assets/"):] in ASSETS, (page, url)
+            # ?v=N（キャッシュ更新用の版番号）は許可リストの照合には使われない（パス部分だけで引く）
+            assert url[len("/assets/"):].split("?")[0] in ASSETS, (page, url)
 
 
 def test_vendored_versions_are_documented():
@@ -328,3 +329,38 @@ def test_vendored_files_match_documented_sha256():
         with open(os.path.join(_REAL_WEB, "vendor", name), "rb") as f:
             data = f.read()
         assert hashlib.sha256(data).hexdigest() == expected, f"web/vendor/{name} が公式パッケージと一致しません"
+
+
+# ---------- 自前のJS・CSSは毎回再検証（更新後に古い版が使われ続けない）----------
+def test_asset_cache_policy_own_files_revalidate_and_vendor_is_cached():
+    from core.web_static import asset_cache_control
+    assert asset_cache_control("js/estimated.js") == "private, no-cache"
+    assert asset_cache_control("css/common.css") == "private, no-cache"
+    assert asset_cache_control("vendor/leaflet.js") == "private, max-age=3600"
+    assert asset_cache_control("vendor/chart.umd.js") == "private, max-age=3600"
+
+
+def test_assets_are_served_with_the_policy_and_revalidate_with_etag(tmp_path):
+    files = StaticFiles(_make_site(tmp_path))
+
+    async def go():
+        client = await _client(_app(files))
+        try:
+            own = await client.get("/assets/js/estimated.js")
+            vendor = await client.get("/assets/vendor/leaflet.js")
+            again = await client.get("/assets/js/estimated.js", headers={"If-None-Match": own.headers["ETag"]})
+            busted = await client.get("/assets/js/estimated.js?v=2")           # 版番号つきでも同じファイルが返る
+            return own, vendor, again, busted, await busted.read(), await own.read()
+        finally:
+            await client.close()
+    own, vendor, again, busted, busted_body, own_body = _run(go())
+    assert own.status == 200 and own.headers["Cache-Control"] == "private, no-cache"
+    assert vendor.status == 200 and vendor.headers["Cache-Control"] == "private, max-age=3600"
+    assert again.status == 304 and again.headers["Cache-Control"] == "private, no-cache"
+    assert "script-src 'self'" in again.headers["Content-Security-Policy"]       # 304 にも CSP を付ける（既存の回帰テストと同じ観点）
+    assert busted.status == 200 and busted_body == own_body
+
+
+def test_estimated_page_references_versioned_assets_that_exist():
+    html = _read("estimated.html")
+    assert "/assets/css/estimated.css?v=" in html and "/assets/js/estimated.js?v=" in html

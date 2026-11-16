@@ -205,6 +205,17 @@ class StaticFiles:
         return out
 
 
+def asset_cache_control(key: str) -> str:
+    """
+    /assets/<key> の Cache-Control。
+      - web/vendor/（版を固定して同梱した Leaflet・Chart.js）: 1時間キャッシュ（内容が変わらないため）
+      - それ以外（このリポジトリ自身の JS・CSS）: 毎回 ETag で再検証させる（変更が無ければ 304 で本文は転送されない）
+    自前の JS・CSS を max-age で長く保持させると、Bot を更新したあとも最大1時間、ブラウザが古い JS・CSS を
+    使い続け、新しい HTML と食い違って画面が壊れる（2026-11-16 に /estimated で発生。実ブラウザで再現確認済み）。
+    """
+    return "private, max-age=3600" if key.startswith("vendor/") else "private, no-cache"
+
+
 def _respond(request: web.Request, entry: Optional[_Entry], cache_control: str) -> web.Response:
     if entry is None:
         return web.Response(status=503, text="dashboard files are not available", content_type="text/plain")
@@ -242,7 +253,7 @@ def register_routes(app: web.Application, files: Optional[StaticFiles] = None) -
         content_type = ASSETS.get(key)                 # 辞書のキーとの文字列一致のみ。パスの組み立てには使わない
         if content_type is None:
             raise web.HTTPNotFound()
-        return _respond(request, files.get(key, content_type), "private, max-age=3600")
+        return _respond(request, files.get(key, content_type), asset_cache_control(key))
 
     app.router.add_get("/assets/{asset:.+}", asset_handler)
     return files
