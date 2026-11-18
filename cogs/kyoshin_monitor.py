@@ -92,7 +92,7 @@ import discord
 from discord.ext import commands
 import aiohttp
 
-from core.channels import resolve_channels
+from core.channels import RETRYABLE_EXCEPTIONS, resolve_channels
 from core.config import (
     CHANNEL_IDS, KYOSHIN_CHANNEL_IDS, ENABLE_KYOSHIN,
     KYOSHIN_IMAGE_DELAY_SEC, KYOSHIN_IMAGE_STEP_SEC,
@@ -811,6 +811,12 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
                 await self._notify_tick()
             except asyncio.CancelledError:
                 raise
+            except RETRYABLE_EXCEPTIONS as e:
+                # 【2026-11修正】Discord への送信中の一時的なネットワークエラー（Server disconnected・
+                # 接続失敗・タイムアウト・5xx）は、通知ループが次の周期で最新のフレームを送り直すため
+                # WARNING に留める。従来は ERROR（全文トレース）となり、管理者チャンネルにも
+                # 誤エラー通知が出ていた。
+                logger.warning(f"KyoshinMonitorCog: 通知の送信に失敗しました（次の周期で再試行します）: {type(e).__name__}: {e}")
             except Exception as e:
                 logger.error(f"KyoshinMonitorCog: 通知ループでエラー: {e}", exc_info=True)
             await asyncio.sleep(max(0.0, interval - (time.monotonic() - t0)))

@@ -816,7 +816,7 @@ class EewCog(commands.Cog, AudioClientMixin):
             # 読み上げ判定（何をどう読むか）を先に確定・実行し、
             # その後に効果音を鳴らす順序に統一することで、
             # 両者が同じ state を同時に触らないようにする。
-            await self.generate_and_speak_eew(data, cumulative_warn_areas)
+            await self.generate_and_speak_eew(data, cumulative_warn_areas, is_test=is_test)
             await self.play_eew_sound(data, cumulative_warn_areas)
 
         except Exception as e:
@@ -826,7 +826,8 @@ class EewCog(commands.Cog, AudioClientMixin):
     # ===============================
     # 読み上げエンジン
     # ===============================
-    async def generate_and_speak_eew(self, data, cumulative_warn_areas: set | None = None):
+    async def generate_and_speak_eew(self, data, cumulative_warn_areas: set | None = None,
+                                     is_test: bool = False):
         """QuakeTsunami_antei.html の generateAndPlaySpeech をPythonで再現"""
         event_id = data.get("EventID")
         serial = int(data.get("Serial", 1))
@@ -852,7 +853,18 @@ class EewCog(commands.Cog, AudioClientMixin):
         text = ""
         priority = 3
 
-        if serial == 1 or prev_data is None:
+        # 【2026-11修正】Wolfx と P2P の両経路から同じ第1報が届くと、2回目も「初報」として
+        # 読み上げ直していた（実機の警報で「緊急地震速報。…」が2回読まれた）。すでに同じ種別
+        # （警報/予報）の第1報を読み上げ済みなら、初報としては読まず、通常の差分判定（地域の
+        # 拡大・震度や震源の変化）に回す。警報/予報の種別が違う第1報は従来どおり初報として読む。
+        # テスト通知（同じ EventID を繰り返し使う）には適用しない。
+        is_repeated_first = (
+            not is_test and serial == 1 and prev_data is not None
+            and prev_data.get("Serial") is not None and int(prev_data.get("Serial", 0)) == 1
+            and bool(prev_data.get("isWarn", False)) == bool(is_warn)
+        )
+
+        if prev_data is None or (serial == 1 and not is_repeated_first):
             if is_warn:
                 priority = 1
                 text = _YOMI.render("EEW_FIRST_WARN", values)
@@ -956,6 +968,10 @@ class EewCog(commands.Cog, AudioClientMixin):
 
         if should_play_high_alert:
             await self.play_mp3("high_alert")
+            if serial == 1:
+                # 【2026-11修正】初報の効果音を鳴らした印。別経路から同じ第1報が届いたとき、
+                # 続けて low_alert（初報）が鳴らないようにする。
+                audio_flags["first"] = True
             state["audio_warn_areas"] = set(current_warn_areas)
             logger.debug(f"音声: high_alert (地域数: {len(current_warn_areas)})")
             return
@@ -965,6 +981,8 @@ class EewCog(commands.Cog, AudioClientMixin):
             if not audio_flags.get("int3"):
                 await self.play_mp3("eew3")
                 audio_flags["int3"] = True
+                if serial == 1:
+                    audio_flags["first"] = True   # high_alert と同様（別経路の同じ初報で low_alert を重ねない）
                 logger.debug("音声: eew3 (震度3以上)")
                 return
 

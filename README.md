@@ -8,7 +8,7 @@
 
 ### 緊急地震速報（EEW）
 - **Wolfx WebSocket**（主）と **P2P地震情報の EEW（警報、code=556）** をリアルタイム受信して通知する。予想最大震度・地域ごとの予想震度・推奨行動を表示し、AquesTalkPi 等で読み上げる。
-- EventID ごとの最大 Serial をソース別に独立管理し、同一ソース内の重複・逆行メッセージだけを除外する（Wolfx と P2P は Serial の採番が別のため、互いの通知を抑制しない）。
+- EventID ごとの最大 Serial をソース別に独立管理し、同一ソース内の重複・逆行メッセージだけを除外する（Wolfx と P2P は Serial の採番が別のため、互いの通知を抑制しない）。ただし読み上げと効果音は EventID ごとの状態を共有しており、両経路から同じ種別（警報/予報）の第1報が届いても、2回目は「初報」として読み上げず、効果音（`low_alert`）も重ねない。地域の拡大・震度や震源の変化があるときだけ、続報として読み上げる（テスト通知は対象外）。
 - 警報（`isWarn`）時の注意喚起文は予想最大震度で切り替える（6弱以上「直ちに身の安全を確保してください」、それ未満「強い揺れに警戒してください」）。
 - 警報対象の府県予報区が `EEW_REGION_COLLAPSE_THRESHOLD`（既定10）件以上なら、`pref_region_map.json` で地方予報区に集約して通知・読み上げる。
 - 複数の地震のEEWが有効（`recent_eews`、TTL300秒で2件以上）なときは、通常通知の直前に「複数の緊急地震速報が発表されています」のサマリーを送る。
@@ -394,7 +394,7 @@ python3 bot.py
 | `SCRATCHTTS_TIMEOUT_SEC` | 10 | ScratchTTS APIリクエストのタイムアウト秒数 |
 | `FFMPEG_PATH` | ffmpeg | ScratchTTS のピッチシフトに使う ffmpeg のコマンド／パス（PATH が通っていない場合は絶対パス） |
 | `AUDIO_PLAYER` | aplay | 音声再生コマンド（`aplay` / `mpg123` 等） |
-| `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ |
+| `SPEECH_QUEUE_MAXSIZE` | 200 | 音声読み上げキューの最大サイズ（優先度の小さい順に読み上げ、同じ優先度は到着順） |
 | `MP3_QUEUE_MAXSIZE` | 50 | MP3 再生キューの最大サイズ |
 
 `TTS_ENGINE=scratchtts` では、取得した音声を ffmpeg で約3セミトーンピッチアップして再生する（`ffmpeg` が必要）。`--starter` で選ばなかった方のエンジンの設定行は `.env` 内でコメントアウトされる。

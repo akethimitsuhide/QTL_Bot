@@ -48,6 +48,7 @@ AudioCogへ統合する場合は、これらのCogも AudioClientMixin に置き
 import os
 import time
 import asyncio
+import itertools
 import logging
 
 from core.config import (
@@ -59,6 +60,12 @@ from core.tts_engines import synthesize, SCRATCHTTS_PITCH_SEMITONES
 from core.ews_signal import SAMPLE_RATE as EWS_PCM_SAMPLE_RATE
 
 logger = logging.getLogger("QTLBot")
+
+# 読み上げキューの到着順を保つための通し番号。
+# 【2026-11 修正】(priority, text) をそのまま積むと、同じ優先度では読み上げ文の文字列順で
+# 取り出されてしまう（実機で、先に積んだ「推定最大震度6弱」より後に積んだ「5強」が先に
+# 読み上げられ、最後に聞こえるのが古い情報になった）。同じ優先度は到着順（FIFO）にする。
+_speech_seq = itertools.count()
 
 try:
     import pygame
@@ -142,7 +149,7 @@ class AudioMixin:
         if not text or not text.strip():
             return
         try:
-            self.speech_queue.put_nowait((priority, text))
+            self.speech_queue.put_nowait((priority, next(_speech_seq), text))
             logger.info(
                 f"音声キュー追加 [優先度{priority}] "
                 f"(深さ: {self.speech_queue.qsize()}/{SPEECH_QUEUE_MAXSIZE}): {text[:60]}"
@@ -167,7 +174,7 @@ class AudioMixin:
 
         while not self.bot.is_closed():
             try:
-                priority, text = await self.speech_queue.get()
+                priority, _seq, text = await self.speech_queue.get()
                 queue_size = self.speech_queue.qsize()
 
                 if queue_size >= queue_warn_threshold:
