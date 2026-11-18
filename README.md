@@ -939,6 +939,7 @@ QTL_Bot/
 │   ├── eew.py                EewCog: 緊急地震速報（Wolfx/P2P）
 │   ├── quake.py              QuakeInfoCog: 地震情報・P2P障害時のフォールバック
 │   ├── tsunami.py            TsunamiCog: 津波情報・観測・予報、EWS 信号音
+│   ├── quake_summary.py      QuakeSummaryCog: 日次・週次の地震サマリー投稿（既定無効）
 │   ├── jishin_kanchi.py      JishinKanchiCog: P2P地震感知情報
 │   ├── volcano.py            VolcanoCog: 火山情報・噴火速報・噴火警報
 │   ├── usgs.py               UsgsCog: USGS 海外地震情報
@@ -994,6 +995,7 @@ QTL_Bot/
 │   ├── estimated_intensity.py  推計震度分布図（気象庁HP）の一覧解析・メッシュ範囲・取得
 │   ├── gis_discord.py        複数の地図画像を Embed にする kwargs 組み立て
 │   ├── notification_log.py   通知履歴（メモリ＋qtlbot.log）
+│   ├── quake_summary.py      日次・週次の地震サマリーの集計・スケジュール計算・Embed 組み立て
 │   ├── quake_history_log.py / eew_history_log.py   地震情報・EEW 履歴の記録と読み出し
 │   ├── quake_history_backfill.py   --backfill_quake_history
 │   ├── delivery_stats.py     通知送信の成功率の統計
@@ -1012,6 +1014,7 @@ QTL_Bot/
 | `AudioCog` | `cogs/audio_shared.py` | 読み上げ・MP3 再生の実体 |
 | `EewCog` | `cogs/eew.py` | Wolfx WebSocket・P2P EEW の受信・通知、EEW 発表中の状態管理（`monitored_event_id`） |
 | `QuakeInfoCog` | `cogs/quake.py` | P2P 地震情報の受信・通知、障害時の代替取得 |
+| `QuakeSummaryCog` | `cogs/quake_summary.py` | 日次・週次の地震サマリーの投稿（既定無効。集計は `core/quake_summary.py`） |
 | `JishinKanchiCog` | `cogs/jishin_kanchi.py` | P2P 地震感知情報（既定無効） |
 | `TsunamiCog` | `cogs/tsunami.py` | P2P 津波情報の受信、気象庁津波 JSON のポーリング、EWS 信号音 |
 | `VolcanoCog` | `cogs/volcano.py` | 火山情報・噴火速報・噴火警報のポーリング |
@@ -1055,5 +1058,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-17
+**最終更新**: 2026-11-18
 **対応 Python**: 3.11+
