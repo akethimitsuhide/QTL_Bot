@@ -129,8 +129,20 @@ _YOMI = TemplateSet(
 GRADE_ORDER = TSUNAMI_GRADE_ORDER
 
 
+# 津波情報（気象庁 JSON）の取得・通知に失敗したとき、次の周期で再試行する最大回数。
+# 一時的な失敗で通知を取りこぼさないための再試行で、恒久的な失敗（404・通知処理の不具合など）
+# で毎分リトライし続けないよう上限を設ける。
+TSUNAMI_OBS_MAX_ATTEMPTS = 3
+
+
 class TsunamiCog(commands.Cog, AudioMixin):
     """津波情報（P2P・JMA）を扱う Cog。"""
+
+    # fetch_tsunami_observation の再試行管理。__init__ を通らない生成（テスト等）でも
+    # 動くよう、既定値はクラス属性で持つ（代入時にインスタンス属性として上書きされる）。
+    _obs_inflight_key = None   # 取得・通知の処理中にある項目のキー（失敗時の再試行判定用）
+    _obs_retry_key = None      # 直近に失敗した項目のキー
+    _obs_retry_count = 0       # そのキーの連続失敗回数
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -342,10 +354,15 @@ class TsunamiCog(commands.Cog, AudioMixin):
                         break
 
                     detail_url = f"https://www.jma.go.jp/bosai/tsunami/data/{json_filename}"
+                    self._obs_inflight_key = current_key  # 以降の例外は再試行（上限付き）の対象
                     async with self.session.get(detail_url, timeout=aiohttp.ClientTimeout(total=25)) as detail_resp:
                         if detail_resp.status != 200:
                             logger.warning(f"津波情報詳細取得失敗: HTTP {detail_resp.status}")
-                            continue
+                            # 【2026-11 修正】従来は continue で、より古い項目を先に処理して
+                            # しまい（通知の順序が前後）、最新項目は次の周期まで未処理だった。
+                            # 最新項目の再試行を優先してここで打ち切る（上限付き）。
+                            self._record_obs_failure(current_key)
+                            break
                         detail = await detail_resp.json(content_type=None)
 
                     # 通知成功後に lastID を更新
@@ -395,6 +412,8 @@ class TsunamiCog(commands.Cog, AudioMixin):
                             logger.info(f"津波観測情報取得: ID={event_id}, 時刻={report_time}")
                             await self.notify_tsunami_observation(detail, list_item=item)
                     self.last_tsunami_observation_id = current_key
+                    self._obs_inflight_key = None
+                    self._obs_retry_key, self._obs_retry_count = None, 0
                     break
 
                 self._tsunami_observation_initialized = True
@@ -405,8 +424,32 @@ class TsunamiCog(commands.Cog, AudioMixin):
             # となり、管理者チャンネルへの誤エラー通知も起きていた。USGS・火山と同様に
             # WARNING（トレースなし）で記録する。
             logger.warning(f"Fetch Tsunami Observation: ネットワークエラー（次回の周期で再試行します）: {type(e).__name__}: {e}")
+            self._record_inflight_obs_failure()
         except Exception:
             logger.error(f"Fetch Tsunami Observation エラー:\n{traceback.format_exc()}")
+            self._record_inflight_obs_failure()
+
+    def _record_obs_failure(self, key: str) -> None:
+        """津波情報の取得・通知の失敗を数える。上限に達したら、その項目を処理済みとして諦める。
+
+        【2026-11 修正】従来は失敗しても last_tsunami_observation_id を更新しないため、恒久的な
+        失敗（詳細 JSON が 404、通知処理の例外など）だと60秒ごとに同じ項目を再試行し続け、
+        通知処理が途中まで進んでいた場合は重複通知にもなり得た。再試行は
+        TSUNAMI_OBS_MAX_ATTEMPTS 回までにする。
+        """
+        self._obs_inflight_key = None
+        count = self._obs_retry_count + 1 if self._obs_retry_key == key else 1
+        if count >= TSUNAMI_OBS_MAX_ATTEMPTS:
+            logger.warning(f"津波情報: {count}回連続で失敗したため再試行を打ち切ります（key={key}）")
+            self.last_tsunami_observation_id = key
+            self._obs_retry_key, self._obs_retry_count = None, 0
+        else:
+            self._obs_retry_key, self._obs_retry_count = key, count
+
+    def _record_inflight_obs_failure(self) -> None:
+        """処理中だった項目があれば、その失敗を数える（例外処理から呼ぶ）。"""
+        if self._obs_inflight_key is not None:
+            self._record_obs_failure(self._obs_inflight_key)
 
 
     @fetch_tsunami_observation.before_loop

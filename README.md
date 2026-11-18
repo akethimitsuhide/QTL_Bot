@@ -38,7 +38,7 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
 
 ### 津波情報
 - **P2P地震情報**（WebSocket code=552、`notify_tsunami`）: 警報種別・予想高さ別の区域一覧、ただちに来襲・到達予想時刻、発信元コメントを表示。読み上げは「（地域名）に（警報種別）が発表されました」。
-- **気象庁HPのJSON**（`tsunami/data/list.json` を60秒間隔でポーリング）: `Head.Title` で次のとおり振り分ける。
+- **気象庁HPのJSON**（`tsunami/data/list.json` を60秒間隔でポーリング）: `Head.Title` で次のとおり振り分ける。最新の1件だけを処理し、詳細の取得や通知に失敗した場合は、より古い項目を先に通知せず、同じ項目を次の周期で再試行する（最大3回。超えたら処理済みとして諦める）。
   - 津波予報・警報・注意報（VTSE41、`notify_tsunami_forecast`）: 区域一覧・原因地震・解除時の文言を出し分ける。
   - 津波観測に関する情報（VTSE51、`notify_tsunami_observation_coastal`）: 警報区分→地域→観測点の順に、高さの高い順で表示。前報より実際に上昇した観測点にだけ「↑」を付ける。
   - 沖合の津波観測に関する情報（VTSE52、`notify_tsunami_observation_offshore`）: 観測点ごとに押し・引き・状態を表示し、新規追加の観測点を読み上げる。
@@ -51,7 +51,7 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
 - **EWS（緊急警報放送）信号音**: `EWS_ENABLE=true`（既定 false）のとき、津波警報・大津波警報の発表・更新時（P2P・気象庁HPの両形式、および地震情報の `domesticTsunami` 経由）に、昭和60年郵政省告示第405号準拠の AFSK 信号音（第二種開始信号）を再生する。同一イベントの警報区分が上がったときだけ再度鳴らす。波形は `core/ews_signal.py` がメモリ上で合成し、`pygame.mixer.Sound(buffer=...)` で再生する（ミキサーは 44100Hz・モノラルで初期化）。CLI テストでは `EWS_ENABLE` に関わらず再生する。
 
 ### 火山情報・USGS・その他
-- **火山情報**（`VolcanoCog`）: 気象庁HPのJSONを1分間隔でポーリング。`info.json` の各エントリの `eventId` と `reportDatetime` の差分で新規・更新を判定し、活動状況・予防措置・次回発表予定を通知する。噴火速報（`eruption.json`）・噴火警報（`warning.json`）は独立にポーリングする。
+- **火山情報**（`VolcanoCog`）: 気象庁HPのJSONを1分間隔でポーリング。`info.json` の各エントリの `eventId` と `reportDatetime` の差分で新規・更新を判定し、活動状況・予防措置・次回発表予定を通知する。詳細（`info/{eventId}.json`）の取得に失敗した分は、一覧に記録せず次の周期で再検知して再試行する（最大5回。恒久的な失敗で毎分リトライし続けないための上限）。噴火速報（`eruption.json`）・噴火警報（`warning.json`）は独立にポーリングする。
 - **USGS 地震情報**（`UsgsCog`）: USGS の GeoJSON フィードから海外の地震を取得。対象領域・M下限・クールダウンを設定できる（通知済みIDはフィードに載っている間は保持）。
 - **気象庁その他特別情報**（`OtherInfoCog`）: 北海道・三陸沖後発地震注意情報・南海トラフ地震臨時情報・顕著な地震の震源要素更新のお知らせ・長周期地震動に関する観測情報。後発地震注意情報と南海トラフ臨時情報には区域図（`hokkaido_bosaitaiou_area.png`／`nankai_bosaitaiou_area.png`、`bot.py` と同じディレクトリ）を添付する。南海トラフ臨時情報と震源要素更新は気象庁が2つの `list.json` に重複掲載するため、2経路から独立に通知される。
 - **推計震度分布図**（`OtherInfoCog`、`core/estimated_intensity.py`）: 震度5弱以上の地震のあと気象庁が公開する250mメッシュの推計震度分布図を、独自ベクター地図の上に半透明（不透明度0.6、気象庁HPと同じ）で重ね、震度4〜7の凡例と震源のバツ印を付けて「その他」チャンネルへ通知する。気象庁HPが画面表示に使っている公開ファイル（`bosai/estimated_intensity_map/data/list.json` と1次メッシュごとの透過PNG）を `ESTIMATED_INTENSITY_POLL_SECONDS`（既定60）秒間隔で確認する（ETag の条件付きGETで、変化が無いときは本文を転送しない）。起動前から一覧にあった分は通知しない。メッシュ画像が揃わないときは最大5回まで再試行し、超えたら取れた分だけで通知する（フッターに明記）。出典「気象庁ホームページ」を加工して作成した旨をフッターに表示する。気象庁がAPIとして公開しているものではなくHPの内部ファイルのため、仕様変更で止まる可能性がある（その場合も他の通知には影響しない）。
@@ -227,8 +227,8 @@ python3 bot.py
 | 変数名 | 既定値 | 説明 |
 | :--- | :--- | :--- |
 | `WOLFX_HEARTBEAT_TIMEOUT` | 90 | Wolfx heartbeat タイムアウト（秒） |
-| `FETCH_FAILURE_THRESHOLD` | 3 | API の連続失敗がこの回数に達するとバックオフに入る |
-| `FETCH_BACKOFF_SECONDS` | 60 | API 失敗時のバックオフ待機時間（秒） |
+| `FETCH_FAILURE_THRESHOLD` | 3 | USGS の取得が連続でこの回数失敗するとバックオフに入る |
+| `FETCH_BACKOFF_SECONDS` | 60 | USGS の取得失敗時のバックオフ待機時間（秒）。バックオフ中は取得しない（既定のポーリング間隔600秒より短いため、既定では実質的な差は出ない） |
 | `DISCORD_SEND_RETRY_ATTEMPTS` | 3 | Discord への通知送信が一時的に失敗したときの総試行回数（初回を含む。1〜5、1 で再送なし）。詳細は下記「Discord 送信の再送」 |
 | `WEBHOOK_URLS` | （空） | 追加の通知先 Webhook URL（カンマ区切りで複数可。https の Discord / Slack のみ）。**秘密情報**。空なら無効。詳細は下記「Webhook 通知」 |
 | `WEBHOOK_URLS_EEW` / `_QUAKE` / `_TSUNAMI` / `_VOLCANO` / `_USGS` / `_KANCHI` / `_OTHER` | （空） | 種別ごとの宛先（書いた URL にはその種別だけが届く）。**秘密情報**。`WEBHOOK_URLS` と併用可 |
@@ -854,6 +854,7 @@ python3 -m pytest tests/ -q
 | `test_tsunami_speech.py` | 津波の読み上げ文・二重読み上げ防止 |
 | `test_tsunami_alert_wiring.py` | 警報・注意報・予報の読み上げ／EWS が、P2P・気象庁の両経路から届いても二重にならないこと（実際の通知経路で確認） |
 | `test_usgs_dedupe.py` | USGS の重複通知防止・`--test_quake` の入力検証 |
+| `test_fetch_retry.py` | 取得失敗時の再試行（火山の詳細取得失敗の再検知と上限・津波の最新項目の再試行と上限・USGS のバックオフが取得ループに効くこと） |
 
 ---
 
@@ -1058,5 +1059,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-18
+**最終更新**: 2026-11-19
 **対応 Python**: 3.11+

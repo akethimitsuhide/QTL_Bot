@@ -60,6 +60,12 @@ _YOMI = TemplateSet(
 )
 
 
+# 火山情報の詳細取得（info/{eventId}.json）に失敗したとき、次の周期で再試行する最大回数。
+# 一時的な失敗で通知を取りこぼさないための再試行で、恒久的な失敗（404 など）で
+# 毎分リトライし続けないよう上限を設ける。
+VOLCANO_DETAIL_MAX_ATTEMPTS = 5
+
+
 class VolcanoCog(commands.Cog, AudioMixin):
     """火山情報（火山情報・噴火速報・噴火警報）を扱う Cog。"""
 
@@ -78,6 +84,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
         self._last_volcano_event_id = None
         self._last_volcano_info_map: dict = {}
         self._volcano_info_initialized = False  # 初回ポーリング済みか（空リストでも立てる）
+        self._volcano_detail_fail_counts: dict[str, int] = {}  # eventId → 詳細取得の連続失敗回数
         self.volcano_task = None
         self._last_volcano_recv_time = None
         self._volcano_recv_count = 0
@@ -283,6 +290,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
             logger.info(f"Volcano: {len(target_ids)}件の新規/更新を検知 {target_ids}")
 
         # Step③: 各 eventId で詳細を取得して通知
+        failed_ids: list[str] = []  # 詳細取得に失敗した eventId（次回再検知させる）
         for event_id in target_ids:
             try:
                 detail_url = f"https://www.jma.go.jp/bosai/volcano/data/info/{event_id}.json"
@@ -293,11 +301,13 @@ class VolcanoCog(commands.Cog, AudioMixin):
                 ) as detail_resp:
                     if detail_resp.status != 200:
                         logger.warning(f"Volcano detail fetch failed: HTTP {detail_resp.status} eventId={event_id}")
+                        failed_ids.append(event_id)
                         continue
 
                     detail: dict = await detail_resp.json(content_type=None)
 
                 await self._notify_volcano(detail, event_id)
+                self._volcano_detail_fail_counts.pop(event_id, None)
 
                 # 受信統計を更新
                 self._last_recv["volcano"] = datetime.now()
@@ -308,6 +318,7 @@ class VolcanoCog(commands.Cog, AudioMixin):
 
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 logger.warning(f"Volcano detail fetch error: {type(e).__name__} eventId={event_id}")
+                failed_ids.append(event_id)
             except Exception as e:
                 logger.error(f"Volcano detail error: {e} eventId={event_id}", exc_info=True)
 
@@ -316,7 +327,30 @@ class VolcanoCog(commands.Cog, AudioMixin):
                 await asyncio.sleep(2)
 
         # Step④: 次回ループのために現在のリストを保存
-        self._last_volcano_info_map = curr
+        # 【2026-11 修正】詳細取得に失敗した eventId は「未処理」のまま残す。従来は常に curr を
+        # 保存していたため、一時的な失敗でその更新の通知が取りこぼされていた。
+        self._last_volcano_info_map = self._next_info_map(prev, curr, failed_ids)
+
+    def _next_info_map(self, prev: dict, curr: dict, failed_ids: list[str]) -> dict:
+        """次回比較用に保存する info.json のマップを返す。
+
+        詳細取得に失敗した eventId は、新規なら記録から外し、更新なら前回の項目に戻すことで、
+        次の周期で再び「新規/更新」として検知される。再試行は VOLCANO_DETAIL_MAX_ATTEMPTS 回までで、
+        上限に達したら諦めて現在の項目を記録する（恒久的な失敗で毎分リトライし続けない）。
+        """
+        saved = dict(curr)
+        for eid in failed_ids:
+            attempts = self._volcano_detail_fail_counts.get(eid, 0) + 1
+            if attempts >= VOLCANO_DETAIL_MAX_ATTEMPTS:
+                logger.warning(f"Volcano: 詳細取得が{attempts}回連続で失敗したため再試行を打ち切ります eventId={eid}")
+                self._volcano_detail_fail_counts.pop(eid, None)
+                continue
+            self._volcano_detail_fail_counts[eid] = attempts
+            if eid in prev:
+                saved[eid] = prev[eid]
+            else:
+                saved.pop(eid, None)
+        return saved
 
     async def _notify_volcano(self, detail: dict, event_id: str) -> None:
         """

@@ -113,7 +113,11 @@ class UsgsCog(commands.Cog, AudioMixin):
         until = self._fetch_backoff_until.get(key, 0.0)
         if until > now:
             return True
-        if self._fetch_failures.get(key, 0) > 0:
+        # 【2026-11 修正】バックオフが発動し、その期限が切れたときだけ失敗回数を戻す。
+        # 従来は「失敗が1回以上あれば」戻していたため、取得ループの先頭でこの関数を呼ぶと
+        # 連続失敗が毎回ゼロに戻り、しきい値に達しなくなる（かつ、そもそもどこからも
+        # 呼ばれておらず、バックオフは実際には効いていなかった）。
+        if until > 0.0:
             self._fetch_failures[key] = 0
             self._fetch_backoff_until[key] = 0.0
         return False
@@ -205,6 +209,12 @@ class UsgsCog(commands.Cog, AudioMixin):
         従来どおり cooldown 経過後に削除する。
         """
         if not USGS_ENABLED:
+            return
+
+        # 連続失敗がしきい値に達してバックオフ中なら、今回の取得は行わない
+        # （FETCH_FAILURE_THRESHOLD / FETCH_BACKOFF_SECONDS）。
+        if self._fetch_backoff_is_active("usgs"):
+            logger.debug("USGS: バックオフ中のため取得をスキップします")
             return
 
         # 使用エンドポイント: significant_week より all_day が網羅性高い
