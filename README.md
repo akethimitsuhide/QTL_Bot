@@ -854,6 +854,7 @@ python3 -m pytest tests/ -q
 | `test_tsunami_speech.py` | 津波の読み上げ文・二重読み上げ防止 |
 | `test_tsunami_alert_wiring.py` | 警報・注意報・予報の読み上げ／EWS が、P2P・気象庁の両経路から届いても二重にならないこと（実際の通知経路で確認） |
 | `test_usgs_dedupe.py` | USGS の重複通知防止・`--test_quake` の入力検証 |
+| `test_ws_helpers.py` | WebSocket 自動再接続ループのログ表記（切断は接続時間つき・接続失敗は「再接続失敗 #N」）と、待機・コールバックが変わらないこと |
 | `test_fetch_retry.py` | 取得失敗時の再試行（火山の詳細取得失敗の再検知と上限・津波の最新項目の再試行と上限・USGS のバックオフが取得ループに効くこと） |
 
 ---
@@ -980,7 +981,7 @@ QTL_Bot/
 │   ├── audio.py              AudioMixin／AudioClientMixin（読み上げ・MP3・EWS のキュー）
 │   ├── tts_engines.py        TTS エンジン（AquesTalkPi／ScratchTTS）
 │   ├── ews_signal.py         EWS の AFSK 信号音の合成
-│   ├── ws_helpers.py         WebSocket 自動再接続の共通ループ
+│   ├── ws_helpers.py         WebSocket 自動再接続の共通ループ（切断時は接続時間をログに出す。接続できなかった場合のみ「再接続失敗 #N」）
 │   ├── p2p_ws_hub.py         P2P WebSocket の一元接続・code 別配信
 │   ├── quake_failover.py     P2P 障害時の代替取得（気象庁JSON/XML・Quake.One）と重複防止
 │   ├── startup_guard.py      起動時の「既存情報」判定の補助
@@ -1059,5 +1060,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-19
+**最終更新**: 2026-11-20
 **対応 Python**: 3.11+
