@@ -86,6 +86,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import discord
@@ -108,7 +109,7 @@ from core.config import (
     KYOSHIN_STARTUP_WARMUP_SEC,
     KYOSHIN_MIN_NOTIFY_PHASE, KYOSHIN_MIN_STATIONS_SHINDO0, KYOSHIN_MIN_STATIONS_SHINDO1,
     KYOSHIN_DEBUG_SAVE_IMAGE, KYOSHIN_DEBUG_IMAGE_DIR,
-    KYOSHIN_STATIONS_SOURCE_URL, KYOSHIN_STATIONS_CACHE_PATH,
+    KYOSHIN_STATIONS_SOURCE_URL, KYOSHIN_STATIONS_CACHE_PATH, KYOSHIN_MAINTENANCE_STATE_PATH,
     KYOSHIN_STATIONS_REFRESH_SEC, KYOSHIN_NEIGHBOR_K,
     KYOSHIN_SLOW_FETCH_THRESHOLD_SEC,
     KYOSHIN_PATCH_RADIUS, KYOSHIN_PATCH_AGGREGATION,
@@ -118,6 +119,7 @@ from core.config import (
 )
 from core.audio import AudioClientMixin
 from core.kyoshin_detector import DetectorConfig, SeismicEvent
+from core.maintenance import MaintenanceState, format_jst, parse_duration
 from core.kyoshin_image_monitor import KyoshinImageMonitor
 from core.kyoshin_stations import (
     StationStore, KyoshinStationMeta, build_k_nearest_neighbors,
@@ -179,10 +181,17 @@ def _phase_index(phase: str) -> int:
 class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
     """強震モニタ画像の解析（震度の時系列上昇幅＋K近傍同時上昇の検証）による揺れ検知・Discord通知を行う Cog。"""
 
+    # 【2026-11 追加】メンテナンスモードの状態（/qtl_maintenance）。__init__ を通らない生成（テスト等）でも
+    # 動くよう、既定値はクラス属性で持つ（代入時にインスタンス属性として上書きされる）。
+    maintenance: MaintenanceState | None = None
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.channel = None
         self.kyoshin_channel = None
+        self.maintenance = MaintenanceState.load(KYOSHIN_MAINTENANCE_STATE_PATH)
+        if self.maintenance.is_active():
+            logger.info(f"KyoshinMonitorCog: 前回から引き継いだメンテナンスモードが有効です（{self.maintenance.describe()}）")
         self.session: aiohttp.ClientSession | None = None
 
         self._station_store = StationStore(
@@ -367,6 +376,108 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
             logger.info("KyoshinMonitorCog: 通知は無効です（受信・検知のみ）")
 
     # ===============================
+    # メンテナンスモード（/qtl_maintenance）
+    # ===============================
+    # 配信元（防災科研 lmoni.bosai.go.jp）のメンテナンス中に、取得失敗のリクエストを送り続けない
+    # ためのモード。対象は強震モニタ(jma_s)の画像取得と長周期地震動モニタ(abrspmx_s)の画像探索。
+    # 振動レベル（kwatch-24h.net）・観測点データ（GitHub）は別のサーバーなので止めない。
+    # 状態の管理・保存・自動解除は core/maintenance.py を参照。
+    # 管理者のみ（Discord 側の既定権限＋コマンド内の判定の二重）。
+    def _in_maintenance(self) -> bool:
+        return self.maintenance is not None and self.maintenance.is_active()
+
+    qtl_maintenance = discord.app_commands.Group(
+        name="qtl_maintenance",
+        description="強震モニタ・長周期地震動モニタのメンテナンスモードを操作します（管理者のみ）",
+        default_permissions=discord.Permissions(administrator=True),
+        guild_only=True,
+    )
+
+    async def _maintenance_precheck(self, interaction: discord.Interaction) -> bool:
+        """実行できる状況か確認する。できない場合は理由を返信して False。"""
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (perms and perms.administrator):
+            await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
+            return False
+        if not ENABLE_KYOSHIN or self.maintenance is None:
+            await interaction.response.send_message(
+                "強震モニタ機能が無効（ENABLE_KYOSHIN=false）のため、メンテナンスモードは使えません。", ephemeral=True)
+            return False
+        return True
+
+    @qtl_maintenance.command(
+        name="start",
+        description="メンテナンスモードを開始します（この間、強震モニタ・長周期地震動モニタへリクエストを送りません）",
+    )
+    @discord.app_commands.describe(
+        duration="期間（例: 2h, 90m, 1d, 1h30m, 2時間）。省略すると手動で解除するまで続きます",
+    )
+    async def slash_maintenance_start(self, interaction: discord.Interaction, duration: Optional[str] = None):
+        if not await self._maintenance_precheck(interaction):
+            return
+        seconds = None
+        if duration is not None and duration.strip():
+            try:
+                seconds = parse_duration(duration)
+            except ValueError as e:
+                await interaction.response.send_message(f"期間を指定できません: {e}", ephemeral=True)
+                return
+
+        was_active = self.maintenance.is_active()
+        self.maintenance.start(seconds, started_by=f"{interaction.user} ({interaction.user.id})")
+        logger.info(
+            f"KyoshinMonitorCog: {interaction.user}（ID: {interaction.user.id}）がメンテナンスモードを"
+            f"{'更新' if was_active else '開始'}しました（{self.maintenance.describe()}）"
+        )
+        lines = [
+            f"状態: {self.maintenance.describe()}",
+            "この間、強震モニタ・長周期地震動モニタ（lmoni.bosai.go.jp）へのリクエストを送りません。",
+            "振動レベル（kwatch-24h.net）は影響を受けません。",
+            "解除する場合は `/qtl_maintenance end` を実行してください。",
+        ]
+        if not self.maintenance.last_save_ok:
+            lines.append("注意: 状態ファイルを保存できませんでした。Bot を再起動すると解除されます（詳細はログを確認してください）。")
+        embed = discord.Embed(
+            title="メンテナンスモードの期間を更新しました" if was_active else "メンテナンスモードを開始しました",
+            description="\n".join(lines),
+            color=0xE67E22,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @qtl_maintenance.command(name="end", description="メンテナンスモードを解除します（リクエストを再開します）")
+    async def slash_maintenance_end(self, interaction: discord.Interaction):
+        if not await self._maintenance_precheck(interaction):
+            return
+        if not self.maintenance.end():
+            await interaction.response.send_message("メンテナンスモードではありません。", ephemeral=True)
+            return
+        logger.info(
+            f"KyoshinMonitorCog: {interaction.user}（ID: {interaction.user.id}）がメンテナンスモードを手動で解除しました"
+        )
+        lines = ["強震モニタ・長周期地震動モニタのリクエストを再開します。"]
+        if not self.maintenance.last_save_ok:
+            lines.append("注意: 状態ファイルを削除できませんでした。Bot を再起動すると再びメンテナンスモードになる場合があります（詳細はログを確認してください）。")
+        embed = discord.Embed(title="メンテナンスモードを解除しました", description="\n".join(lines), color=0x2ECC71)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @qtl_maintenance.command(name="status", description="メンテナンスモードの現在の状態を表示します")
+    async def slash_maintenance_status(self, interaction: discord.Interaction):
+        if not await self._maintenance_precheck(interaction):
+            return
+        lines = [f"状態: {self.maintenance.describe()}"]
+        if self.maintenance.is_active():
+            if self.maintenance.started_at is not None:
+                lines.append(f"開始: {format_jst(self.maintenance.started_at)}")
+            if self.maintenance.started_by:
+                lines.append(f"開始した利用者: {self.maintenance.started_by}")
+        embed = discord.Embed(
+            title="メンテナンスモードの状態",
+            description="\n".join(lines),
+            color=0xE67E22 if self.maintenance.is_active() else 0x3098BD,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ===============================
     # 観測点データの初期化・定期更新
     # ===============================
     async def _init_stations(self) -> None:
@@ -515,6 +626,13 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
         最大実震度は、EEW通知・検知通知の表示にも共用する。
         """
         if not KYOSHIN_RECV_JMA_S_ENABLE:
+            return {}
+
+        # 【2026-11 追加】メンテナンスモード中は、配信元へリクエストを送らない（/qtl_maintenance）。
+        # 失敗時の探索を含めると毎秒最大5リクエストになるため。直前の最大実震度は、メンテナンス中に
+        # 古い値が通知色に使われないよう消しておく。
+        if self._in_maintenance():
+            self._latest_max_shindo = None
             return {}
 
         # 【2026-08-29 追加】このメソッドは KYOSHIN_RECV_IMAGE_INTERVAL_SEC
@@ -869,7 +987,8 @@ class KyoshinMonitorCog(commands.Cog, AudioClientMixin):
                 and time.monotonic() - self._last_image_at <= max(10.0, 3 * KYOSHIN_RECV_IMAGE_INTERVAL_SEC)):
             jma_s_url = self._last_image_url
         lmoni_url = None
-        if KYOSHIN_RECV_LMONI_ENABLE:
+        # 【2026-11 追加】メンテナンスモード中は長周期地震動モニタの画像探索（HEAD リクエスト）も送らない
+        if KYOSHIN_RECV_LMONI_ENABLE and not self._in_maintenance():
             lmoni_url = await self._dual_image_fetcher.fetch_lmoni_url(self.session)
         if not jma_s_url and not lmoni_url and vib_level is None:
             return

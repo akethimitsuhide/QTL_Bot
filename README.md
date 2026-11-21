@@ -67,6 +67,7 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 - **受信**: 強震モニタ `jma_s`・長周期地震動モニタ（LMoni, `abrspmx_s`）の画像を `KYOSHIN_RECV_IMAGE_INTERVAL_SEC`（既定1.0、最小1.0）秒間隔で、振動レベル（kwatch-24h.net）を `KYOSHIN_RECV_VIBRATION_INTERVAL_SEC`（既定2.0、最小2.0）秒間隔で受信する（それぞれ有効/無効を設定可能）。振動レベルが `KYOSHIN_VIBRATION_DETECT_LEVEL`（既定100）以上なら「揺れを検知」と判定する。
 - **通知**（`KYOSHIN_NOTIFY_ENABLE`）: 通知間隔は有効な受信のうち最短の間隔。EEW発表時（第一報〜最終報・キャンセル報、最長300秒）と、検知時（画像解析または振動レベル）に通知する。EEW通知中は検知通知を中断し、EEW通知の終了後に検知が続いていれば再開する。通知色は `jma_s` の実震度から決める独自カラーマップ（画像が無ければ振動レベル）。
 - **画像解析による揺れ検知**: 実観測点データ（[kyoshin-monitor-observation-points](https://github.com/ingen084/kyoshin-monitor-observation-points) の `intensity-points.json`）で `jma_s` 画像をサンプリングし、基準値（過去10〜25秒平均）との差分による上昇トリガーと、K近傍（既定6）のうち一定数の同時上昇で判定する。起動直後は `KYOSHIN_STARTUP_WARMUP_SEC` の間イベント生成を抑制する。周囲が無反応のまま高震度が続く観測点は機器異常とみなして自動除外する。誤検知対策の調整値は `.env.kyoshin` に分離している。検知までの遅延は、起動判定を意図的に厳しめにしていること（P波の立ち上がりが緩い小地震では10〜25秒程度）が主因で、既定値は変更していない。Pillow が無い環境では画像解析検知だけが無効になる。
+- **メンテナンスモード**（`/qtl_maintenance`・管理者のみ）: 配信元（防災科研 `lmoni.bosai.go.jp`）のメンテナンス中は、画像取得が毎秒失敗し、失敗時の探索を含めて最大で毎秒5リクエスト（1日約43万回）を送り続けてしまう。`/qtl_maintenance start` でメンテナンス中であることを Bot に伝えると、強震モニタ（`jma_s`）の画像取得と長周期地震動モニタ（`abrspmx_s`）の画像探索のリクエストをいっさい送らない（2つはまとめて切り替わる）。期間（`duration`）を指定するとその時刻に自動で解除され、省略すると `/qtl_maintenance end` で解除するまで続く。状態は `KYOSHIN_MAINTENANCE_STATE_PATH` のファイルに保存し、Bot を再起動しても期限を含めて引き継ぐ。止めるのは `lmoni.bosai.go.jp` へのリクエストだけで、振動レベル（kwatch-24h.net）・観測点データ（GitHub）・EEW の受信は影響を受けない（メンテナンス中の通知は振動レベルのみで継続し、画像は付かない）。`!status`／`/qtl_status` にも「メンテナンス中」と表示される。
 - 振動レベルに応じた音声（`lv100`／`lv1000`／`lv2000`）は、EEW通知では常に、検知通知では `KYOSHIN_DETECT_VIBRATION_SOUND` が有効なときに鳴らす。
 
 ### GIS地図描画（既定無効）
@@ -342,6 +343,7 @@ python3 bot.py
 | `ENABLE_KYOSHIN` | true | 強震モニタ機能（受信・通知・画像解析検知）の有効化 |
 | `KYOSHIN_STATIONS_SOURCE_URL` | ingen084氏のリポジトリURL | 実観測点データ（`intensity-points.json`）の取得元。通常変更不要 |
 | `KYOSHIN_STATIONS_CACHE_PATH` | kyoshin_stations_cache.json | 観測点データのキャッシュファイルパス（`.gitignore`対象） |
+| `KYOSHIN_MAINTENANCE_STATE_PATH` | kyoshin_maintenance_state.json | メンテナンスモード（`/qtl_maintenance`）の状態ファイル。Bot を再起動しても期限を含めて引き継ぐ（`.gitignore`対象の `*.json`）。通常変更不要 |
 | `KYOSHIN_STATIONS_REFRESH_SEC` | 3600 | 観測点データの再取得間隔（秒）。起動時はキャッシュ優先、以後この間隔で追従する |
 | `KYOSHIN_NEIGHBOR_K` | 6 | 近隣観測点として扱う件数（地理的K近傍）。`.env.kyoshin`の`KYOSHIN_NEIGHBOR_TRIGGER_COUNT`より大きい値にすること |
 | `KYOSHIN_IMAGE_DELAY_SEC` | 6 | `latest.json` 取得失敗時のフォールバック探索で遡る基準秒数 |
@@ -723,6 +725,9 @@ curl http://localhost:8080/health/full | jq
 | `/qtl_estimated` | スラッシュ | `QTL_ESTIMATED_ACCESS`（既定: 管理者） | 気象庁HPの一覧（約340件）から過去の推計震度分布図を選んで表示。`event` の候補は新しい順で、日付・震央地名の入力で絞り込める（Discordの仕様で候補は最大25件）。実行者本人にのみ表示。同時に描画するのは1件、同じユーザーは20秒に1回まで（Raspberry Pi の負荷対策） |
 | `/qtl_config list` | スラッシュ | 管理者のみ | 再起動なしで変更できる設定と現在値を表示（実行者本人にのみ表示） |
 | `/qtl_config set` | スラッシュ | 管理者のみ | 設定を変更し `.env` に保存する。再起動は不要（実行者本人にのみ表示） |
+| `/qtl_maintenance start` | スラッシュ | 管理者のみ | 強震モニタ・長周期地震動モニタのメンテナンスモードを開始する。`duration`（例: `2h`・`90m`・`1d`・`1h30m`・`2時間`）を省略すると手動で解除するまで続く（実行者本人にのみ表示） |
+| `/qtl_maintenance end` | スラッシュ | 管理者のみ | メンテナンスモードを手動で解除し、リクエストを再開する（実行者本人にのみ表示） |
+| `/qtl_maintenance status` | スラッシュ | 管理者のみ | メンテナンスモードの状態（終了予定・残り時間・開始した利用者）を表示（実行者本人にのみ表示） |
 
 履歴は `qtlbot.log*` から復元する（Web ダッシュボードの `/status/quake_history`・`/status/eew_history` と同じデータ）。
 
@@ -826,6 +831,8 @@ python3 -m pytest tests/ -q
 | `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
 | `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
 | `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
+| `test_maintenance.py` | メンテナンスモードの状態管理（期間の解釈・開始/解除・期限での自動解除・再起動後の引き継ぎ・壊れた状態ファイル・保存失敗） |
+| `test_kyoshin_maintenance.py` | メンテナンス中に強震モニタ・長周期地震動モニタへリクエストを送らないこと、`/qtl_maintenance` コマンド（管理者のみ・期間の検証・解除・状態）、再起動後の引き継ぎ |
 | `test_quake_failover.py` | P2P 障害時の代替取得・取得した XML の安全確認（DTD/ENTITY・UTF-16/32 の拒否） |
 | `test_kyoshin_phase.py` | 強震モニタ検知の揺れの強さ（4段階）・`latest.json` の配信元 |
 | `test_quake_test_input.py` | `--test_quake` の気象庁JSON／Quake.One入力・観測点名の「＊」照合・代替取得の既定の取得元 |
@@ -911,7 +918,8 @@ curl http://localhost:8080/status | jq '.monitoring.usgs'
 2. 観測点データの取得を確認する: `grep -i KyoshinStations qtlbot.log`（取得に一度も成功していないとキャッシュ `KYOSHIN_STATIONS_CACHE_PATH` も無く、検知が実質無効になる。ネットワークと `KYOSHIN_STATIONS_SOURCE_URL` の到達性を確認）。
 3. 検知の状態を確認する: `grep -i kyoshin qtlbot.log`。イベントが生成されているのに通知が来ない場合は `KYOSHIN_MIN_STATIONS_SHINDO0`／`SHINDO1`・`KYOSHIN_MIN_NOTIFY_PHASE` を確認する。特定の観測点の警告が繰り返し出るときは、機器異常としてブラックリスト化されている可能性がある（「ブラックリスト化しました」で検索）。
 4. 通知設定を確認する: `KYOSHIN_NOTIFY_ENABLE`・`KYOSHIN_NOTIFY_ON_DETECT`・`KYOSHIN_NOTIFY_ON_EEW`、`KYOSHIN_RECV_*` が1つ以上有効か。EEW 通知中は検知通知が中断される。
-5. 誤検知・未検知を後から確認したいときは `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` の画像を見る。通知が続く時間は `KYOSHIN_EVENT_TIMEOUT_SEC`（既定25）で調整する。
+5. 配信元（防災科研）がメンテナンス中で画像が取得できないときは、`/qtl_maintenance status` で状態を確認し、`/qtl_maintenance start`（期間は `duration` で指定）でメンテナンスモードにする。メンテナンス中は画像のリクエストを送らず、解除後に再開する。ログに「メンテナンスモード」とあれば、解除し忘れていないか確認する（`!status` にも表示される）。
+6. 誤検知・未検知を後から確認したいときは `KYOSHIN_DEBUG_SAVE_IMAGE=true` にして `KYOSHIN_DEBUG_IMAGE_DIR` の画像を見る。通知が続く時間は `KYOSHIN_EVENT_TIMEOUT_SEC`（既定25）で調整する。
 
 ### メモリ・ネットワーク
 - メモリ使用量は `/status` の `memory_usage_mb` や `!status` で確認できる（目安は 80〜100MB 程度。大きく超える場合は要調査）。
@@ -1005,7 +1013,8 @@ QTL_Bot/
 │   ├── kyoshin_stations.py   実観測点データの取得・K近傍・色→震度変換
 │   ├── kyoshin_image_analyzer.py   画像→震度変換（EEW 時の最大震度推定）
 │   ├── kyoshin_detector.py   揺れ検知イベントの状態機械（EventManager）
-│   └── kyoshin_image_monitor.py    イベントと連動した画像監視ループ
+│   ├── kyoshin_image_monitor.py    イベントと連動した画像監視ループ
+│   └── maintenance.py        強震モニタ・長周期地震動モニタのメンテナンスモード（期間の解釈・状態の保存・期限での自動解除）
 └── tests/                    pytest（上記「単体テスト」）
 ```
 
@@ -1060,5 +1069,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-20
+**最終更新**: 2026-11-21
 **対応 Python**: 3.11+

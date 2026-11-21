@@ -566,6 +566,9 @@ KYOSHIN_STATIONS_SOURCE_URL = os.getenv(
     "https://raw.githubusercontent.com/ingen084/kyoshin-monitor-observation-points/refs/heads/master/intensity-points.json",
 )
 KYOSHIN_STATIONS_CACHE_PATH = os.getenv("KYOSHIN_STATIONS_CACHE_PATH", "kyoshin_stations_cache.json")
+# 【2026-11 追加】強震モニタ・長周期地震動モニタのメンテナンスモード（/qtl_maintenance）の状態ファイル。
+# Bot を再起動しても状態（期限を含む）を引き継ぐ。core/maintenance.py 参照。
+KYOSHIN_MAINTENANCE_STATE_PATH = os.getenv("KYOSHIN_MAINTENANCE_STATE_PATH", "kyoshin_maintenance_state.json")
 KYOSHIN_STATIONS_REFRESH_SEC = _env_int("KYOSHIN_STATIONS_REFRESH_SEC", 3600)  # 秒。1時間ごとに再フェッチ
 
 # 近隣観測点として扱う件数（K近傍方式）。画像ピクセルグリッドの8近傍に

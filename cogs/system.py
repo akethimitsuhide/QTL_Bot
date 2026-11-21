@@ -883,6 +883,13 @@ class SystemCog(commands.Cog):
         # する必要があるため、api_rows の一律処理には含めず個別に
         # 組み立てる。
         if ENABLE_KYOSHIN:
+            # 【2026-11 追加】メンテナンスモード中は、その旨を表示する（/qtl_maintenance）
+            maintenance = self._kyoshin_attr("maintenance")
+            if maintenance is not None and maintenance.is_active():
+                api_lines.append(
+                    f"[ - ] **強震モニタ・長周期地震動モニタ**: {maintenance.describe()}"
+                    f"（`/qtl_maintenance end` で解除）"
+                )
             kyoshin_icon, kyoshin_detail = api_status(
                 "kyoshin", 120, 600,
                 connection_alive=_loop_is_running(self._kyoshin_attr("_monitor_task")),
