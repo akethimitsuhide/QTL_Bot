@@ -317,6 +317,32 @@ DISK_WARNING_THRESHOLD      = _env_int("DISK_WARNING_THRESHOLD", 80)
 DISK_ERROR_THRESHOLD        = _env_int("DISK_ERROR_THRESHOLD", 90)
 
 # ===============================
+# Web Dashboard 設定
+# ===============================
+# 有効化。既定は false（.env.example と同じ）。"true" と書いたときだけ有効
+# （1 / yes は有効にならない。ポートを意図せず開かないための従来どおりの挙動）。
+WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "false").strip().lower() == "true"
+
+WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
+
+# バインドアドレス。既定は 127.0.0.1（ローカルホストのみ）。
+# LAN 内の別端末から見たい場合などは .env で WEB_DASHBOARD_HOST=0.0.0.0 等を指定する。
+WEB_DASHBOARD_HOST = os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1").strip()
+
+# アクセスを許可するクライアント IP のカンマ区切りリスト（CIDR 表記も可。例: "192.168.1.0/24"）。
+# 空（未設定）なら IP 制限は行わず、WEB_DASHBOARD_HOST 側の制御のみに委ねる。
+_raw_allowed_ips = os.getenv("WEB_DASHBOARD_ALLOWED_IPS", "").strip()
+WEB_DASHBOARD_ALLOWED_IPS = [
+    ip.strip() for ip in _raw_allowed_ips.split(",") if ip.strip()
+] if _raw_allowed_ips else []
+
+# アクセストークン（任意）。設定すると /health 以外の全ページ・API で認証が必要になる。
+#   - curl 等: Authorization: Bearer <トークン> ヘッダー
+#   - ブラウザ: /login でトークンを入力 → セッションクッキー（7日間）
+# 空（未設定）なら認証なし。詳細は core/dashboard_auth.py。
+WEB_DASHBOARD_TOKEN = os.getenv("WEB_DASHBOARD_TOKEN", "").strip()
+
+# ===============================
 # ヘルスチェック設定
 # ===============================
 HEALTH_CHECK_TIMEOUT   = 5

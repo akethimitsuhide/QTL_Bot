@@ -46,8 +46,9 @@ from __future__ import annotations
 
 import colorsys
 import logging
-import os
 from dataclasses import dataclass
+
+from core.config import KYOSHIN_ACTIVE_SHINDO_FLOOR
 
 logger = logging.getLogger("QTLBot")
 
@@ -93,7 +94,8 @@ BACKGROUND_VALUE_THRESHOLD = 0.05   # これ未満のV(明度)は背景(黒)と�
 # 単一観測点由来のGIF圧縮ノイズ（実震度0.2程度）まで解析対象に
 # 含まれてしまい、他社製ソフトでは検知しないレベルのノイズで
 # 誤検知が多発したため、0.5より下げない方針とする。
-ACTIVE_SHINDO_FLOOR = float(os.getenv("KYOSHIN_ACTIVE_SHINDO_FLOOR", "0.5"))
+# 値は core/config.py が .env（KYOSHIN_ACTIVE_SHINDO_FLOOR）から読み込む。
+ACTIVE_SHINDO_FLOOR = KYOSHIN_ACTIVE_SHINDO_FLOOR
 
 # 1グリッドセル内で、この個数以上の「揺れ候補ピクセル」が
 # 存在しない限り、そのセルはアクティブとみなさない

@@ -68,6 +68,8 @@ from core.config import (
     QTL_STATUS_ACCESS, QTL_STATUS_ROLE_IDS,
     QTL_STATUS_HISTORY_ACCESS, QTL_STATUS_HISTORY_ROLE_IDS,
     QTL_LOGS_ACCESS, QTL_LOGS_ROLE_IDS,
+    WEB_DASHBOARD_ENABLED, WEB_DASHBOARD_PORT, WEB_DASHBOARD_HOST,
+    WEB_DASHBOARD_ALLOWED_IPS, WEB_DASHBOARD_TOKEN,
 )
 from core.constants import INT_MAP
 from core.command_access import ACCESS_ADMIN, is_allowed
@@ -89,38 +91,6 @@ from core.estimated_web import register_routes as register_estimated_routes
 from core import test_runner as _test_runner_module
 
 logger = logging.getLogger("QTLBot")
-
-# 【2026-08-27 修正】以前はこの変数を on_ready() 内で
-# os.getenv("WEB_DASHBOARD_ENABLED", "true") として直接読み込んでおり、
-# .env.example に明記されているデフォルト値「false」と実際のコードの
-# デフォルト値「true」が食い違っていた。そのため .env に
-# WEB_DASHBOARD_ENABLED を書き忘れると、ドキュメント上は無効なはずの
-# Web Dashboard が意図せず起動しポートを待ち受けてしまう不具合があった。
-# 他の WEB_DASHBOARD_* 設定と同様にモジュールレベル定数へ揃え、
-# ドキュメント通り既定値を false に修正した。
-WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "false").strip().lower() == "true"
-
-WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
-
-# Web Dashboard のバインドアドレス。
-# デフォルトは 127.0.0.1（ローカルホストのみ）にし、以前の "0.0.0.0"
-# （誰でもアクセス可能）を既定挙動から外した。LAN内の別端末から見たい
-# 場合などは .env で明示的に WEB_DASHBOARD_HOST=0.0.0.0 等を指定する。
-WEB_DASHBOARD_HOST = os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1").strip()
-
-# アクセスを許可するクライアントIPのカンマ区切りリスト（例: "192.168.1.10,192.168.1.20"）。
-# 空（未設定）の場合はIP制限を行わない（WEB_DASHBOARD_HOST側の制御のみに委ねる）。
-# CIDR表記（例: "192.168.1.0/24"）にも対応する。
-_raw_allowed_ips = os.getenv("WEB_DASHBOARD_ALLOWED_IPS", "").strip()
-WEB_DASHBOARD_ALLOWED_IPS = [
-    ip.strip() for ip in _raw_allowed_ips.split(",") if ip.strip()
-] if _raw_allowed_ips else []
-
-# Web Dashboard のアクセストークン（任意）。設定すると /health 以外の全ページ・APIで認証が必要になる。
-#   - curl 等: Authorization: Bearer <トークン> ヘッダー
-#   - ブラウザ: /login でトークンを入力 → セッションクッキー（7日間）
-# 空（未設定）の場合は認証なし（従来どおり）。詳細は core/dashboard_auth.py。
-WEB_DASHBOARD_TOKEN = os.getenv("WEB_DASHBOARD_TOKEN", "").strip()
 
 # ダッシュボードの画面（/dashboard・/quake_map）の HTML・CSS・JS は web/ フォルダの別ファイルに分離した
 # （2026-10-23）。配信は core/web_static.py（許可リスト方式。リクエストのパスからファイルを探さず、
@@ -411,16 +381,7 @@ class SystemCog(commands.Cog):
                     "（本番プロセスとのポート衝突を回避）"
                 )
             elif WEB_DASHBOARD_ENABLED:
-                # 【2026-09-24 修正】以前はここで
-                # os.getenv("WEB_DASHBOARD_ENABLED", "true") と直接・重複して
-                # 読み込んでおり、既定値が"true"だった。上部（本ファイル
-                # 76〜83行目）の2026-08-27修正で「既定値をfalseに統一した」
-                # はずが、この箇所だけ修正が反映されておらず、.env に
-                # WEB_DASHBOARD_ENABLEDを書かなければ、ドキュメント上は
-                # 無効なはずのWeb Dashboardが実際には起動してしまう状態が
-                # 残っていた（コードとREADME/.env.exampleの記載を突き合わせる
-                # 監査で発見）。モジュールレベル定数WEB_DASHBOARD_ENABLED
-                # （既定false）を参照するよう修正し、重複読み込みを解消した。
+                # WEB_DASHBOARD_ENABLED は core/config.py で読み込む（既定 false）。
                 self.bot.loop.create_task(self.start_web_dashboard())
 
             # スラッシュコマンドを同期
