@@ -304,7 +304,7 @@ python3 bot.py
 | :--- | :--- | :--- |
 | `JISHIN_KANCHI_ENABLE` | false | 地震感知情報（code=9611）通知の有効化 |
 | `JISHIN_KANCHI_MIN_LEVEL` | 1 | 通知する最小レベル（1〜4。**数値が大きいほど信頼度が高い**。1が最低・4が最高）。この値以上のレベルのみ通知する。信頼度の低い感知情報を抑制する用途はこちら（例: `3` でレベル3・4のみ通知） |
-| `JISHIN_KANCHI_MAX_LEVEL` | 4 | 通知する最大レベル（1〜4）。この値以下のレベルのみ通知する。数値が大きいほど信頼度が高いため、低い値を指定すると高信頼度が抑制される。通常は既定の4のまま使う（以前の説明は逆だったため訂正） |
+| `JISHIN_KANCHI_MAX_LEVEL` | 4 | 通知する最大レベル（1〜4）。この値以下のレベルのみ通知する。数値が大きいほど信頼度が高いため、低い値を指定すると高信頼度が抑制される。通常は既定の4のまま使う |
 | `JISHIN_KANCHI_MIN_COUNT` | 1 | 通知する最小件数（`count`）。これ未満は通知しない |
 | `JISHIN_KANCHI_SPEECH_ENABLE` | true | 音声読み上げの有効化 |
 | `JISHIN_KANCHI_SOUND_ENABLE` | true | 効果音再生の有効化 |
@@ -358,7 +358,7 @@ python3 bot.py
 | `KYOSHIN_NOTIFY_ENABLE` | true | 強震モニタの通知機能の有効化。通知間隔＝有効な受信のうち最短の受信間隔 |
 | `KYOSHIN_NOTIFY_ON_EEW` | true | EEW発表時（第一報〜最終報・キャンセル報、最長300秒）に通知するか。通知中は検知による通知を中断する（検知は継続） |
 | `KYOSHIN_NOTIFY_ON_DETECT` | true | 揺れ検知時（画像解析・振動レベル）に通知するか。検知が終わるまで通知を続ける |
-| `KYOSHIN_EVENT_TIMEOUT_SEC` | 25.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く（2026-10-29 に既定を 45 から 25 に短縮。`.env` に値を書いている場合はそちらが優先される） |
+| `KYOSHIN_EVENT_TIMEOUT_SEC` | 25.0 | 最後の上昇トリガーからこの秒数経過でイベント終了。上げるほど余韻の通知が長く続く |
 | `KYOSHIN_MIN_NOTIFY_PHASE` | Weak | 通知を送信する最小フェーズ（Weak＝弱い揺れ < Medium＝揺れ < Strong＝強い揺れ < Stronger＝非常に強い揺れ。旧設定の `Weaker` は `Weak` と同じ扱い） |
 | `KYOSHIN_MIN_STATIONS_SHINDO0` | 4 | 揺れの強さが「弱い揺れ」（Weak）の場合に通知に必要な最小検出観測点数 |
 | `KYOSHIN_MIN_STATIONS_SHINDO1` | 2 | 揺れの強さが「揺れ」（Medium）以上の場合に通知に必要な最小検出観測点数 |
@@ -707,7 +707,7 @@ curl http://localhost:8080/health/full | jq
 `web/` の中身を「フォルダごと公開」する作りにはしていない（パスの組み立て 1 か所の誤りが `.env` などの漏えいにつながるため）。`core/web_static.py` が次の方針で配信する。
 
 - **許可リスト方式**: 配信するのは `core/web_static.py` の `PAGES`・`ASSETS` に書かれたファイルだけ。リクエストのパスは辞書のキーと文字列として一致するか調べるだけで、ファイルパスの組み立てには使わない（`..`・`%2e%2e`・二重エンコード・NUL 文字等を送られても 404）。ディレクトリ一覧も無い。`.env`・`bot.py`・`web/` 内の許可外ファイルは、どんなパスでも返らない。
-- **キャッシュ**: 画面（HTML）と自前の JS・CSS は `Cache-Control: private, no-cache`（毎回 ETag で再検証し、変更が無ければ 304 で本文は転送されない）。版を固定して同梱した `web/vendor/`（Leaflet・Chart.js）だけ `max-age=3600`。以前は自前の JS・CSS も `max-age=3600` だったため、Bot を更新しても最大1時間ブラウザが古い JS・CSS を使い続け、新しい HTML と食い違って画面が壊れた（2026-11-16、`/estimated` の地図が出ない不具合。実ブラウザで再現確認）。すでに古い版をキャッシュしたブラウザ向けに、`estimated.html` は `estimated.css?v=2`・`estimated.js?v=2` を参照する（`?v=` は配信側では無視される）。
+- **キャッシュ**: 画面（HTML）と自前の JS・CSS は `Cache-Control: private, no-cache`（毎回 ETag で再検証し、変更が無ければ 304 で本文は転送されない）。版を固定して同梱した `web/vendor/`（Leaflet・Chart.js）だけ `max-age=3600`。すでに古い版をキャッシュしたブラウザ向けに、`estimated.html` は `estimated.css?v=2`・`estimated.js?v=2` を参照する（`?v=` は配信側では無視される）。
 - **実行できるものを配信しない**: PHP 等のサーバー側スクリプトの実行機構・アップロード機能は存在しない。Bot が返すのは、許可リストのファイルのバイト列と JSON のみ。シンボリックリンクも辿らない。
 - **全レスポンスにセキュリティヘッダー**: CSP（`script-src 'self'`・インラインスクリプト禁止・外部接続禁止・フレーム埋め込み禁止）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等。404・認証失敗・想定外の例外（汎用の 500。内部情報は返さない）にも付き、`Server` ヘッダーでライブラリの版も出さない。
 - **XSS 対策**: 外部から受け取った文字列（震源地名・通知タイトル・気象庁のコメント等）は HTML 文字列にせず、DOM API（テキストノード）で表示する。さらに CSP により、万一インラインスクリプトが注入されても実行されない。
@@ -817,52 +817,18 @@ python3 -m pytest tests/ -q
 
 引数なしの `python3 -m pytest` でも、`pytest.ini` の `testpaths` により `tests/` だけが対象になる（`core/test_runner.py` は CLI テスト用のモジュールで、pytest のテストではない）。
 
-| ファイル | 対象 |
-|:---|:---|
-| `test_apm_expected_errors.py` | APM の想定内エラー（Timeout／Cancelled）の扱い |
-| `test_eew_forecast_label.py` | EEW 予想震度の見出し |
-| `test_eew_region_resolve.py` | EEW の未知の地域名の解決・GIS 区域名の読み替え |
-| `test_env_merge.py` | `--merge_env` |
-| `test_doctor.py` | `--doctor`（起動前の自己診断） |
-| `test_yomiage.py`・`test_eew_yomiage_integration.py`・`test_quake_yomiage_integration.py`・`test_tsunami_yomiage.py`・`test_yomiage_other_cogs.py` | 読み上げテンプレートの展開・検証・EEW／地震情報の読み上げが従来と同じ文言になること |
-| `test_gis_overseas_switch.py` | 遠地地震向け地図への自動切り替え |
-| `test_travel_time.py`・`test_eew_wave.py`・`test_eew_wave_integration.py`・`test_gis_wave_overlay.py` | P波・S波の円（走時表の読み込みと逆引き、経過秒数・描かない条件、円周の頂点、地図への描画とズーム） |
-| `test_gis_station_star.py` | 震度分布の地図で観測点名の「＊」の有無（気象庁HP JSON／P2P）に関わらず描画できること |
-| `test_gis_theme_icon.py` | 地図の配色テーマ・震度アイコン |
-| `test_gis_thread_safety.py` | 描画倍率のスレッド分離 |
-| `test_kyoshin_notify.py` | 強震モニタの受信・通知の集約 |
-| `test_maintenance.py` | メンテナンスモードの状態管理（期間の解釈・開始/解除・期限での自動解除・再起動後の引き継ぎ・壊れた状態ファイル・保存失敗） |
-| `test_kyoshin_maintenance.py` | メンテナンス中に強震モニタ・長周期地震動モニタへリクエストを送らないこと、`/qtl_maintenance` コマンド（管理者のみ・期間の検証・解除・状態）、再起動後の引き継ぎ |
-| `test_quake_failover.py` | P2P 障害時の代替取得・取得した XML の安全確認（DTD/ENTITY・UTF-16/32 の拒否） |
-| `test_kyoshin_phase.py` | 強震モニタ検知の揺れの強さ（4段階）・`latest.json` の配信元 |
-| `test_quake_test_input.py` | `--test_quake` の気象庁JSON／Quake.One入力・観測点名の「＊」照合・代替取得の既定の取得元 |
-| `test_dependency_audit.py` | `--audit_deps`（ロックファイルのパース・版ずれ検出・pip-audit の終了コード・`requirements.lock` の整合） |
-| `test_env_writer.py` | `.env` の指定キーだけの安全な書き換え（行の保持・アトミック書き込み・拒否する値） |
-| `test_channels.py` | 通知チャンネルの複数指定（解析・同時送信・再送との整合・設定の読み込み） |
-| `test_notify_enable.py` | 通知種類ごとの ON/OFF（EEW・地震情報・火山） |
-| `test_webhook_event_urls.py` | Webhook の種別別 URL・区切り・重複 |
-| `test_yomiage_test.py` | `--test_yomiage`（一覧・再生・引数・実際のプレーヤー起動経路） |
-| `test_web_static.py` | ダッシュボードの静的配信（許可リスト・`.env` を狙うパス探索の拒否・304 でのヘッダー維持・CSP 適合の静的点検・自前ファイルは毎回再検証／vendor は1時間キャッシュ・`?v=` 付きでも配信） |
-| `test_dashboard_security.py` | 実際のダッシュボードを起動して、秘密が返らないこと・全応答のヘッダー・認証が静的ファイルにも効くことを確認 |
-| `test_webhook_notify.py` | Webhook 通知（URL 検証・Embed 変換・再送・複数宛先・種別フィルター・Discord 送信との独立性） |
-| `test_runtime_settings.py` | 再起動不要の設定変更（入力解釈・保存失敗時・再起動後の読み戻し）と `/qtl_config` コマンド |
-| `test_discord_send.py` | Discord 送信の再送（再送対象・nonce 固定・指数バックオフ・添付ファイルの巻き戻し） |
-| `test_dashboard_auth.py` | Web ダッシュボードのトークン認証（Bearer・ログイン/クッキー・リダイレクト対策・総当たり対策） |
-| `test_log_archive.py` | ログの圧縮保存（起動時の退避・別スレッド圧縮・保持の日数/世代数・壊れた `.gz`・履歴を `.gz` から読めること） |
-| `test_log_mask.py` | 表示時の秘密情報の伏せ字（Webhook URL・トークン・`名前=値`・誤検知しないこと） |
-| `test_dashboard_logs.py` | `/logs`・`/status/logs*`・`/logs/download` を実際に起動して確認（絞り込み・伏せ字・パス探索の拒否・認証） |
-| `test_estimated_web.py` | 推計震度分布図の API 4本（一覧・detail・tile・map）を実際に起動して確認（JSON・PNG・不正な id/mesh の拒否と取得に進まないこと・その地震に無いメッシュの 404・無効時の 404・タイムアウト・内部エラーを漏らさない・セキュリティヘッダー） |
-| `test_qtl_logs_command.py` | `/qtl_logs` の権限・伏せ字・長文のファイル添付 |
-| `test_command_access.py` | `!status` / `/qtl_status` の実行権限（モード・ロール・DM・既定権限） |
-| `test_status_history_view.py` | `/qtl_status` 履歴オプションの表示整形 |
-| `test_error_notify_handler.py` | ERROR ログの管理者通知（対象レベル・再帰防止・スレッド・例外抽出） |
-| `test_startup_guard.py` | 起動時の既存情報の扱い |
-| `test_test_runner_input.py` | CLI テストの入力 JSON・引数の扱い |
-| `test_tsunami_speech.py` | 津波の読み上げ文・二重読み上げ防止 |
-| `test_tsunami_alert_wiring.py` | 警報・注意報・予報の読み上げ／EWS が、P2P・気象庁の両経路から届いても二重にならないこと（実際の通知経路で確認） |
-| `test_usgs_dedupe.py` | USGS の重複通知防止・`--test_quake` の入力検証 |
-| `test_ws_helpers.py` | WebSocket 自動再接続ループのログ表記（切断は接続時間つき・接続失敗は「再接続失敗 #N」）と、待機・コールバックが変わらないこと |
-| `test_fetch_retry.py` | 取得失敗時の再試行（火山の詳細取得失敗の再検知と上限・津波の最新項目の再試行と上限・USGS のバックオフが取得ループに効くこと） |
+| 分野 | ファイル | 対象 |
+|:---|:---|:---|
+| EEW・通知の判定 | `test_eew_cancel.py`・`test_eew_cancel_map.py`・`test_eew_dual_source_dedupe.py`・`test_eew_forecast_label.py`・`test_eew_region_resolve.py`・`test_notify_enable.py`・`test_jishin_kanchi_level_filter.py`・`test_usgs_dedupe.py` | キャンセル報・Wolfx と P2P の二重通知／二重読み上げの防止・予想震度の見出し・地域名の解決・通知種類ごとの ON/OFF・地震感知情報のレベル絞り込み・USGS の重複防止 |
+| 取得・P2P 障害時の代替取得 | `test_quake_failover.py`・`test_quake_test_input.py`・`test_fetch_retry.py`・`test_fetch_network_errors.py`・`test_ws_helpers.py`・`test_startup_guard.py`・`test_quake_summary.py` | 代替取得と取得した XML の安全確認（DTD/ENTITY・UTF-16/32 の拒否）・取得失敗時の再試行と上限・想定内のネットワークエラーの扱い・WebSocket 再接続ループ・起動時の既存情報の扱い・地震サマリーの集計 |
+| 津波 | `test_tsunami_speech.py`・`test_tsunami_alert_wiring.py`・`test_tsunami_yomiage.py` | 読み上げ文・二重読み上げ防止（P2P・気象庁の両経路から届いても二重にならないこと）・テンプレート |
+| 読み上げ | `test_yomiage.py`・`test_eew_yomiage_integration.py`・`test_quake_yomiage_integration.py`・`test_yomiage_other_cogs.py`・`test_yomiage_test.py`・`test_speech_queue_order.py` | テンプレートの展開・検証・既定の文言が変わらないこと・`--test_yomiage`・読み上げキューの取り出し順 |
+| GIS 地図・予報円 | `test_gis_finalize.py`・`test_gis_long_period_area.py`・`test_gis_overseas_switch.py`・`test_gis_station_star.py`・`test_gis_theme_icon.py`・`test_gis_thread_safety.py`・`test_gis_wave_overlay.py`・`test_travel_time.py`・`test_eew_wave.py`・`test_eew_wave_integration.py`・`test_estimated_intensity.py` | 遠地地震向け地図への自動切り替え・テーマ／震度アイコン・描画倍率のスレッド分離・長周期の区域塗り・P波・S波の円（走時表・描かない条件・ズーム）・推計震度分布図 |
+| 強震モニタ | `test_kyoshin_decode_failure.py`・`test_kyoshin_log_filter.py`・`test_kyoshin_maintenance.py`・`test_kyoshin_notify.py`・`test_kyoshin_notify_loop.py`・`test_kyoshin_phase.py`・`test_maintenance.py` | 受信・通知の集約・揺れの強さの段階・画像のデコード失敗・通知ループのエラー処理・ログ抑制・メンテナンスモード（状態管理と `/qtl_maintenance`） |
+| Web ダッシュボード | `test_dashboard_auth.py`・`test_dashboard_gis_payload.py`・`test_dashboard_logs.py`・`test_dashboard_security.py`・`test_web_static.py`・`test_estimated_web.py` | トークン認証・静的配信（許可リスト・`.env` を狙うパス探索の拒否）・秘密が返らないこと・セキュリティヘッダー・ログ閲覧 API・推計震度分布図 API・地図データ |
+| Discord コマンド・設定 | `test_command_access.py`・`test_qtl_logs_command.py`・`test_status_history_view.py`・`test_runtime_settings.py`・`test_env_writer.py`・`test_channels.py` | `/qtl_status`・`/qtl_logs` の権限と表示・`/qtl_config`（再起動不要の設定変更）・`.env` の安全な書き換え・通知チャンネルの複数指定 |
+| 送信・Webhook・ログ・監視 | `test_discord_send.py`・`test_webhook_notify.py`・`test_webhook_event_urls.py`・`test_log_archive.py`・`test_log_mask.py`・`test_error_notify_handler.py`・`test_apm_expected_errors.py` | 送信の再送（nonce 固定・指数バックオフ）・Webhook 通知・ログの圧縮保存と伏せ字・ERROR ログの管理者通知・APM の想定内エラー |
+| CLI・環境・依存 | `test_env_merge.py`・`test_env_bool.py`・`test_doctor.py`・`test_dependency_audit.py`・`test_test_runner_input.py` | `--merge_env`・真偽値の綴りミス警告・`--doctor`・`--audit_deps`・CLI テストの入力 JSON |
 
 ---
 
@@ -1069,5 +1035,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-21
+**最終更新**: 2026-11-23
 **対応 Python**: 3.11+
