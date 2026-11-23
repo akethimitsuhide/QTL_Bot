@@ -78,8 +78,9 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 - **描画内容**: EEW警報は発表地域の塗りつぶし＋震源のバツ印（警報時は震度分布の地図も2枚目に添付、PLUM法は震源の代わりにドーナツ型）。地震情報・EEW予報は震度の区域塗り（震度速報は区域中央に震度アイコン、観測点情報があれば観測点マーカー）。津波は予報区の沿岸線を警報種別の色で、VTSE51 は観測点を観測値に応じた色の円で、VTSE52 は押し（リング）・引き（円）で描く。長周期地震動は、震源の地図に加えて、細分区域ごとの最大階級で区域を塗りつぶした地図（区域中央に階級ラベル）と、観測点の階級を色分けした地図を添付する。USGS・遠地地震は国外向けの地図を使う。
 - **EEWキャンセル報**: Wolfx・P2P地震情報ともに、キャンセル報は直前の報と同じ Serial で届くため、Serial の大小ではなく EventID 単位（取得元ごとに最初の1回だけ）で通知する（`core/eew_convert.should_process_eew`）。通知時は取消音（`eewC`）も再生し、「先程の緊急地震速報はキャンセルされました。」を読み上げる（文言は `YOMI_EEW_CANCEL` で変更可）。P2P地震情報のキャンセル報には発生時刻が含まれないため、その行は省く。GIS地図が有効な場合は、同じ EventID の直近の報（キャンセル報の直前に発表された報）の震源要素で、**震源のバツ印（PLUM法はドーナツ）だけ**の地図を添付する（発表地域・地域ごとの予想震度の塗りつぶしはしない）。直近の報は EventID ごとに最大30分保持し、保持していない場合（起動前の報など）や震源の座標が無い場合は地図なしで通知する。
 - **遠地地震向けの地図**: 震源が日本の表示範囲外、または表示範囲に陸地が無い場合は、`render_overseas_map` に自動で切り替える（世界の国境を陸地色で塗り、日本の区域線と震源を重ねる。日付変更線をまたぐ震源も近い側の範囲で描く）。国境データの読み込みは `EewCog` 起動時にワーカースレッドで先に済ませる。震度の区域・観測点がある地震情報（各地の震度に関する情報など）では、観測点マーカーを縮小サイズで重ねて描く。
-- **P波・S波の円（予報円。`EEW_WAVE_CIRCLE_ENABLE=true`）**: EEWの全画像（発表地域・地域ごとの予想震度・海外向け地図）に、震源を中心とするP波（青）・S波（橙）の円と、左下に基準時刻・経過秒数（例: `12:00:25 JST  +25s`）を重ねる。円の半径は、震源の深さと経過秒数（基準時刻 − `OriginTime`）を**気象庁のJMA2001走時表**に当てはめて求める（`core/travel_time.py`・`core/eew_wave.py`）。
+- **P波・S波の円（予報円。`EEW_WAVE_CIRCLE_ENABLE=true`）**: EEWの全画像（発表地域・地域ごとの予想震度・海外向け地図）に、震源を中心とするP波（青）・S波（橙）の円と、左下に基準時刻・経過秒数（例: `12:00:25 JST  +25s`）を重ねる。円の半径は、震源の深さと経過秒数（基準時刻 − `OriginTime`）を**気象庁の走時表**（既定はJMA2001A。`EEW_WAVE_TABLE_MODEL` でJMA2020A/B/Cも選べる）に当てはめて求める（`core/travel_time.py`・`core/wave_table_model.py`・`core/eew_wave.py`）。
   - **走時表の配置**: [気象庁の走時表のページ](https://ds.data.jma.go.jp/eqev/data/bulletin/catalog/appendix/trtime/trt_j.html)から JMA2001 の標高別ファイルを入手し、標高0mのファイルが `data/tjma/tjma2001h/tjma2001h.+00000`（`EEW_WAVE_TABLE_FILE` で変更可）になるよう置く。`data/tjma/` は `.gitignore` 登録済みでリポジトリに含まれない。読み込めない場合は警告を1回出して円なしで通知する（置いた後は再起動が必要）。形式の確認は `python3 -m core.travel_time` で行える。
+  - **走時表のモデル（`EEW_WAVE_TABLE_MODEL`）**: `jma2001a`（既定。従来どおり）／`jma2020a`（東北太平洋沖用）／`jma2020b`（東北アウターライズ用）／`jma2020c`（南海トラフ用）。JMA2020系は気象庁の [走時表のページ](https://ds.data.jma.go.jp/eqev/data/bulletin/catalog/appendix/trtime/trt_j.html) の `tjma2020a.zip` 等を入手し、解凍したフォルダを `data/tjma/tjma2020a/` のように置く（親フォルダは `EEW_WAVE_TABLE_DIR` で変更可）。標高別ファイルは `tjma2020a.-00000`〜`tjma2020a.-08000`（100m刻み。観測点が海底のため負の標高）で、**標高0mの `tjma2020a.-00000`** を使う（無ければ `.+00000`、それも無ければ `*.-00000`／`*.+00000` が1つだけの場合にそれを使う）。JMA2020系はJMA2001Aと同じ形式・同じメッシュ間隔のため同じ読み込み処理を使い、読み込み済みの表はモデルごとに別々に保持する（互いに上書きしない）。JMA2020A/B/Cは気象庁が**観測点ごと**に割り当てる走時表で、震央の位置から選ぶ公式の規則が無いため**自動切り替えはせず**、設定した1モデルだけを使う。JMA2020系のときは注記の末尾にモデル名（例: `12:00:25 JST  +25s  JMA2020A`）が付く。読み込めない場合は警告を1回出して円なしで通知する。形式・範囲の確認は `python3 -m core.travel_time <ファイル>` で行える。
   - **基準時刻**: `EEW_WAVE_CIRCLE_TIME_BASE=render`（既定。地図を描く時刻）または `announce`（気象庁の発表時刻 `AnnouncedTime`。得られなければ `render` で代用）。
   - **描かない場合**: PLUM法（仮定震源要素）、震源・深さ・`OriginTime` が不明、地震発生から現在まで、または経過秒数が `EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC`（既定180秒）超え（`announce` 基準でも発生から現在までで判定するため、過去のEEWの再送・再生では描かない）、波がまだ地表に届いていない（深い地震の発生直後）、走時表の範囲外（震央距離2000km超・深さ700km超）。テスト通知（`--test_eew`）は、発表時刻−発生時刻（無ければ20秒）を経過秒数にして描く。
   - **ズーム**: 表示範囲は円がすべて収まるまで広がる（日本全体の枠を超える場合は枠の外まで広がる）。通常地図と海外向け地図の切り替えは、円で広げる前の範囲で判断する。
@@ -270,10 +271,12 @@ python3 bot.py
 | `GIS_ICON_CORNER_RADIUS_RATIO` | `0.15` | 震度アイコン（観測点マーカー・震度速報の区域アイコン）の角の丸さ。一辺に対する角丸半径の比率（0=四角、0.5=円） |
 | `GIS_ICON_BORDER_RATIO` | `0.1` | 震度アイコンの縁の太さ。一辺に対する比率（既定=アイコンの1/10）。縁はアイコンの**外側**に付く。0=縁なし |
 | `GIS_ICON_BORDER_SATURATION` | `0.6` | 縁の色＝アイコン色の彩度に掛ける係数（0〜1。小さいほど灰色寄り。1=アイコンと同じ彩度） |
-| `EEW_WAVE_CIRCLE_ENABLE` | false | EEWの地図にP波・S波の円を描くか（`GIS_MAP_ENABLE=true` が前提。JMA2001走時表が必要） |
+| `EEW_WAVE_CIRCLE_ENABLE` | false | EEWの地図にP波・S波の円を描くか（`GIS_MAP_ENABLE=true` が前提。走時表が必要） |
 | `EEW_WAVE_CIRCLE_TIME_BASE` | `render` | 経過秒数の基準時刻。`render`＝地図を描く時刻／`announce`＝気象庁の発表時刻。不正な値は`render` |
 | `EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC` | `180` | 地震発生からこの秒数を超えた情報には円を描かない（下限10。`announce` 基準でも、発生から現在までで判定する） |
-| `EEW_WAVE_TABLE_FILE` | `<プロジェクトルート>/data/tjma/tjma2001h/tjma2001h.+00000` | JMA2001走時表（標高0m）のファイル |
+| `EEW_WAVE_TABLE_MODEL` | `jma2001a` | 予報円の走時表モデル。`jma2001a`／`jma2020a`／`jma2020b`／`jma2020c`（不正な値は`jma2001a`。自動切り替えなし） |
+| `EEW_WAVE_TABLE_FILE` | `<プロジェクトルート>/data/tjma/tjma2001h/tjma2001h.+00000` | JMA2001A走時表（標高0m）のファイル（`jma2001a` のときだけ使用） |
+| `EEW_WAVE_TABLE_DIR` | `<プロジェクトルート>/data/tjma` | JMA2020系の走時表フォルダ（`tjma2020a` 等）の親フォルダ（`jma2020a/b/c` のときだけ使用） |
 | `EEW_WAVE_P_COLOR` / `EEW_WAVE_S_COLOR` | `0x1E78FF` / `0xFF6A00` | P波・S波の円の色 |
 | `GIS_ICON_TEXT_COLORS` | （空） | 震度ごとの文字色。`震度:RRGGBB`をカンマ区切り（震度は`0,1,2,3,4,5-,5+,6-,6+,7`）。例: `6-:FFFFFF,6+:FFFFFF,7:FFFFFF`。 |
 
@@ -823,7 +826,7 @@ python3 -m pytest tests/ -q
 | 取得・P2P 障害時の代替取得 | `test_quake_failover.py`・`test_quake_test_input.py`・`test_fetch_retry.py`・`test_fetch_network_errors.py`・`test_ws_helpers.py`・`test_startup_guard.py`・`test_quake_summary.py` | 代替取得と取得した XML の安全確認（DTD/ENTITY・UTF-16/32 の拒否）・取得失敗時の再試行と上限・想定内のネットワークエラーの扱い・WebSocket 再接続ループ・起動時の既存情報の扱い・地震サマリーの集計 |
 | 津波 | `test_tsunami_speech.py`・`test_tsunami_alert_wiring.py`・`test_tsunami_yomiage.py` | 読み上げ文・二重読み上げ防止（P2P・気象庁の両経路から届いても二重にならないこと）・テンプレート |
 | 読み上げ | `test_yomiage.py`・`test_eew_yomiage_integration.py`・`test_quake_yomiage_integration.py`・`test_yomiage_other_cogs.py`・`test_yomiage_test.py`・`test_speech_queue_order.py` | テンプレートの展開・検証・既定の文言が変わらないこと・`--test_yomiage`・読み上げキューの取り出し順 |
-| GIS 地図・予報円 | `test_gis_finalize.py`・`test_gis_long_period_area.py`・`test_gis_overseas_switch.py`・`test_gis_station_star.py`・`test_gis_theme_icon.py`・`test_gis_thread_safety.py`・`test_gis_wave_overlay.py`・`test_travel_time.py`・`test_eew_wave.py`・`test_eew_wave_integration.py`・`test_estimated_intensity.py` | 遠地地震向け地図への自動切り替え・テーマ／震度アイコン・描画倍率のスレッド分離・長周期の区域塗り・P波・S波の円（走時表・描かない条件・ズーム）・推計震度分布図 |
+| GIS 地図・予報円 | `test_gis_finalize.py`・`test_gis_long_period_area.py`・`test_gis_overseas_switch.py`・`test_gis_station_star.py`・`test_gis_theme_icon.py`・`test_gis_thread_safety.py`・`test_gis_wave_overlay.py`・`test_travel_time.py`・`test_wave_table_model.py`・`test_eew_wave.py`・`test_eew_wave_integration.py`・`test_estimated_intensity.py` | 遠地地震向け地図への自動切り替え・テーマ／震度アイコン・描画倍率のスレッド分離・長周期の区域塗り・P波・S波の円（走時表・描かない条件・ズーム）・推計震度分布図 |
 | 強震モニタ | `test_kyoshin_decode_failure.py`・`test_kyoshin_log_filter.py`・`test_kyoshin_maintenance.py`・`test_kyoshin_notify.py`・`test_kyoshin_notify_loop.py`・`test_kyoshin_phase.py`・`test_maintenance.py` | 受信・通知の集約・揺れの強さの段階・画像のデコード失敗・通知ループのエラー処理・ログ抑制・メンテナンスモード（状態管理と `/qtl_maintenance`） |
 | Web ダッシュボード | `test_dashboard_auth.py`・`test_dashboard_gis_payload.py`・`test_dashboard_logs.py`・`test_dashboard_security.py`・`test_web_static.py`・`test_estimated_web.py` | トークン認証・静的配信（許可リスト・`.env` を狙うパス探索の拒否）・秘密が返らないこと・セキュリティヘッダー・ログ閲覧 API・推計震度分布図 API・地図データ |
 | Discord コマンド・設定 | `test_command_access.py`・`test_qtl_logs_command.py`・`test_status_history_view.py`・`test_runtime_settings.py`・`test_env_writer.py`・`test_channels.py` | `/qtl_status`・`/qtl_logs` の権限と表示・`/qtl_config`（再起動不要の設定変更）・`.env` の安全な書き換え・通知チャンネルの複数指定 |
@@ -960,7 +963,8 @@ QTL_Bot/
 │   ├── quake_failover.py     P2P 障害時の代替取得（気象庁JSON/XML・Quake.One）と重複防止
 │   ├── startup_guard.py      起動時の「既存情報」判定の補助
 │   ├── eew_convert.py        P2P EEW → Wolfx 形式の変換、予想震度の整形（純関数）
-│   ├── travel_time.py        JMA2001走時表の読み込みと「経過秒数 → P波・S波の到達距離」の逆引き（純関数）
+│   ├── travel_time.py        走時表（JMA2001A / JMA2020系共通形式）の読み込みと「経過秒数 → P波・S波の到達距離」の逆引き（純関数）
+│   ├── wave_table_model.py   予報円に使う走時表モデル（jma2001a / jma2020a・b・c）の選択と、モデルごとのキャッシュ
 │   ├── eew_wave.py           P波・S波の円の材料（経過秒数・描かない条件・円周の頂点）（純関数）
 │   ├── tsunami_speech.py     津波の読み上げ文・状態変化の分類・二重読み上げ防止（純関数）
 │   ├── yomiage.py            読み上げテンプレート（.env.yomiage）の展開・検証（純関数。全分野のテンプレートの既定値を持つ）
@@ -1025,7 +1029,7 @@ QTL_Bot/
 MIT License
 
 ## 謝辞
-- 気象庁（JMA）API・防災情報・地震波走時表（JMA2001）
+- 気象庁（JMA）API・防災情報・地震波走時表（JMA2001A・JMA2020A/B/C。出典: 気象庁ホームページ「走時表・射出角表・速度構造データファイル」）
 - Wolfx EEW 配信サービス
 - P2P 地震情報
 - 米国地質調査所（USGS）
@@ -1035,5 +1039,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-23
+**最終更新**: 2026-11-24
 **対応 Python**: 3.11+
