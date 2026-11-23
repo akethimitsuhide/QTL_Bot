@@ -962,7 +962,7 @@ def _parse_icon_text_colors(raw: str) -> dict:
 GIS_ICON_TEXT_COLORS = _parse_icon_text_colors(os.getenv("GIS_ICON_TEXT_COLORS", ""))
 
 # 【2026-10-30追加】EEW地図のP波・S波の円（予報円）。デフォルト無効（実際のEEWで確認してから有効化）。
-# 震源の深さと発生からの経過秒数を JMA2001 走時表（core/travel_time.py）に当てはめ、
+# 震源の深さと発生からの経過秒数を気象庁の走時表（既定JMA2001A。core/travel_time.py）に当てはめ、
 # P波・S波の到達距離を円で描く（core/eew_wave.py）。仮定震源要素（PLUM法）・震源不明・
 # 深さ不明・経過秒数が上限超えの場合は描かない。GIS_MAP_ENABLE=true が前提。
 #   EEW_WAVE_CIRCLE_ENABLE          : 有効にする
@@ -970,7 +970,10 @@ GIS_ICON_TEXT_COLORS = _parse_icon_text_colors(os.getenv("GIS_ICON_TEXT_COLORS",
 #                                     announce=気象庁の発表時刻（得られなければ render で代用）
 #   EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC : 地震発生からこの秒数を超えた情報には円を描かない（既定180秒。
 #                                     announce 基準でも、発生から現在までで判定する）
-#   EEW_WAVE_TABLE_FILE             : 走時表ファイル（標高0m）。既定 data/tjma/tjma2001h/tjma2001h.+00000
+#   EEW_WAVE_TABLE_MODEL            : 走時表のモデル。jma2001a（既定）／jma2020a／jma2020b／jma2020c
+#                                     （core/wave_table_model.py。不正な値は jma2001a）
+#   EEW_WAVE_TABLE_FILE             : JMA2001A の走時表ファイル（標高0m）。既定 data/tjma/tjma2001h/tjma2001h.+00000
+#   EEW_WAVE_TABLE_DIR              : JMA2020系の走時表フォルダ（tjma2020a 等。標高0mは tjma2020a.-00000）の親。既定 data/tjma
 #   EEW_WAVE_P_COLOR / EEW_WAVE_S_COLOR : 円の色
 EEW_WAVE_CIRCLE_ENABLE = _env_bool("EEW_WAVE_CIRCLE_ENABLE", False)
 EEW_WAVE_CIRCLE_TIME_BASE = (_getenv_nonempty("EEW_WAVE_CIRCLE_TIME_BASE", "render") or "render").strip().lower()
@@ -981,6 +984,9 @@ EEW_WAVE_TABLE_FILE = _getenv_nonempty(
     "EEW_WAVE_TABLE_FILE",
     os.path.join(_PROJECT_ROOT_DIR, "data", "tjma", "tjma2001h", "tjma2001h.+00000"),
 )
+from core.wave_table_model import normalize_model as normalize_wave_table_model  # noqa: E402
+EEW_WAVE_TABLE_MODEL = normalize_wave_table_model(os.getenv("EEW_WAVE_TABLE_MODEL", ""))
+EEW_WAVE_TABLE_DIR = _getenv_nonempty("EEW_WAVE_TABLE_DIR", os.path.join(_PROJECT_ROOT_DIR, "data", "tjma"))
 EEW_WAVE_P_COLOR = _env_hex_color("EEW_WAVE_P_COLOR", 0x1E78FF)
 EEW_WAVE_S_COLOR = _env_hex_color("EEW_WAVE_S_COLOR", 0xFF6A00)
 

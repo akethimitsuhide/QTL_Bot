@@ -7,7 +7,7 @@ EEW地図に重ねるP波・S波の円（予報円）の材料を作る純関数
   circle_ring(lon, lat, r_km)   : 震源から r_km の円周上の頂点（緯度経度）
   parse_eew_time(text)          : OriginTime / AnnouncedTime の文字列 → datetime（JST）
 
-【円の半径】 core/travel_time.py（JMA2001走時表）で、震源の深さと経過秒数から求める。
+【円の半径】 core/travel_time.py（既定はJMA2001走時表。JMA2020系は core/wave_table_model.py で選ぶ）で、震源の深さと経過秒数から求める。
   経過秒数 = 基準時刻 − OriginTime（発生時刻）
   基準時刻（EEW_WAVE_CIRCLE_TIME_BASE）:
     "render"   : 地図を描く時刻（投稿時刻にいちばん近い。既定）
@@ -149,12 +149,14 @@ def build_wave_overlay(
     max_elapsed: float = 180.0,
     now: Optional[datetime] = None,
     test_mode: bool = False,
+    label: str = "",
 ) -> Optional[WaveOverlay]:
     """
     EEWデータからP波・S波の円を作る。描けない場合は None（理由は上の「描かない場合」）。
 
     test_mode=True（テスト通知）: サンプルJSONのOriginTimeは過去のため、経過秒数は
     「AnnouncedTime − OriginTime」（得られなければ TEST_DEFAULT_ELAPSED_SEC）を使う。
+    label: 使った走時表の表示名（例 "JMA2020A"）。空でなければ注記の末尾に添える（既定は空＝従来の注記）。
     """
     if table is None or not isinstance(data, dict):
         return None
@@ -205,4 +207,6 @@ def build_wave_overlay(
 
     ref_jst = ref.astimezone(JST)
     caption = f"{ref_jst:%H:%M:%S} JST  +{elapsed:.0f}s"
+    if label:
+        caption += f"  {label}"
     return WaveOverlay(circles=tuple(circles), caption=caption)

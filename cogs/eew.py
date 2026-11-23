@@ -56,7 +56,7 @@ from core.config import (
     YOMI_EEW_FIRST_WARN, YOMI_EEW_FIRST_FORECAST, YOMI_EEW_UPDATE_WARN,
     YOMI_EEW_UPDATE_INTENSITY, YOMI_EEW_UPDATE_HYPO, YOMI_EEW_CANCEL,
     EEW_WAVE_CIRCLE_ENABLE, EEW_WAVE_CIRCLE_TIME_BASE, EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC,
-    EEW_WAVE_TABLE_FILE,
+    EEW_WAVE_TABLE_FILE, EEW_WAVE_TABLE_MODEL, EEW_WAVE_TABLE_DIR,
 )
 from core.constants import INT_MAP, SHINDO_COLORS, REGION_MAP, collapse_regions_if_needed
 from core.yomiage import EEW_DEFAULTS, EEW_TAGS, TemplateSet, build_eew_values
@@ -75,7 +75,7 @@ from core.eew_convert import (
 )
 from core.gis_render import render_eew_warn_map, render_shindo_map, warmup_overseas_cache
 from core.eew_wave import build_wave_overlay
-from core.travel_time import get_table as get_travel_time_table
+from core.wave_table_model import get_wave_table, model_label
 from core.gis_data import ensure_gis_data_ready
 from core.gis_discord import build_gis_message_kwargs
 from core.ws_helpers import ws_connect_loop
@@ -428,10 +428,11 @@ class EewCog(commands.Cog, AudioClientMixin):
         """
         return build_wave_overlay(
             data,
-            get_travel_time_table(EEW_WAVE_TABLE_FILE),
+            get_wave_table(EEW_WAVE_TABLE_MODEL, EEW_WAVE_TABLE_FILE, EEW_WAVE_TABLE_DIR),
             basis=EEW_WAVE_CIRCLE_TIME_BASE,
             max_elapsed=EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC,
             test_mode=is_test,
+            label=model_label(EEW_WAVE_TABLE_MODEL),
         )
 
     async def notify_eew(self, data, is_test=False, channel_override=None,
