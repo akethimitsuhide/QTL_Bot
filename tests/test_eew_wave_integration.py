@@ -76,6 +76,7 @@ def cog(monkeypatch, tmp_path):
     monkeypatch.setattr(eew_mod, "EEW_WAVE_CIRCLE_TIME_BASE", "render")
     monkeypatch.setattr(eew_mod, "EEW_WAVE_CIRCLE_MAX_ELAPSED_SEC", 180.0)
     monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_FILE", write_table(tmp_path / "table"))
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_MODEL", "jma2001a")   # .env の EEW_WAVE_TABLE_MODEL に左右されない
     yield c
     travel_time.reset_for_tests()
 
@@ -136,3 +137,40 @@ def test_announce_basis_fresh_draws_and_stale_does_not(cog, monkeypatch):
     assert all(kw["wave_overlay"].caption.endswith("+8s") for _k, kw in cog.render_calls)
     _run(cog, _report(origin=datetime.now(JST) - timedelta(days=30)))   # 再送・再生された古いEEW
     assert cog.render_calls and all(kw["wave_overlay"] is None for _k, kw in cog.render_calls)
+
+
+def test_default_model_caption_is_unchanged(cog):
+    """JMA2001A（既定）の注記は JMA2020 対応前と同じ（ラベルなし）。"""
+    _run(cog, _report())
+    assert cog.render_calls and all(kw["wave_overlay"].caption.endswith("s") for _k, kw in cog.render_calls)
+    assert all("JMA" not in kw["wave_overlay"].caption for _k, kw in cog.render_calls)
+
+
+def test_jma2020_model_uses_its_own_table_and_labels_caption(cog, monkeypatch, tmp_path):
+    """EEW_WAVE_TABLE_MODEL=jma2020a のとき、tjma2020a フォルダの表（合成データ）で円を描き、注記に表示名を添える。"""
+    from core import wave_table_model as wtm
+    folder = tmp_path / "tjma2020a"
+    folder.mkdir()
+    write_table(folder / "tjma2020a.-00000")
+    wtm.reset_for_tests()
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_MODEL", "jma2020a")
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_DIR", str(tmp_path))
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_FILE", str(tmp_path / "missing"))   # JMA2001A の表は使われない
+    _run(cog, _report())
+    assert cog.render_calls
+    for _k, kw in cog.render_calls:
+        ov = kw["wave_overlay"]
+        assert ov is not None and {k for k, _ in ov.circles} == {"P", "S"}
+        assert ov.caption.endswith("  JMA2020A")
+    wtm.reset_for_tests()
+
+
+def test_jma2020_missing_table_passes_none_and_still_notifies(cog, monkeypatch, tmp_path):
+    from core import wave_table_model as wtm
+    wtm.reset_for_tests()
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_MODEL", "jma2020c")
+    monkeypatch.setattr(eew_mod, "EEW_WAVE_TABLE_DIR", str(tmp_path))
+    _run(cog, _report())
+    assert cog.sent and cog.render_calls
+    assert all(kw["wave_overlay"] is None for _k, kw in cog.render_calls)
+    wtm.reset_for_tests()
