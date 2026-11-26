@@ -29,6 +29,7 @@ SystemCog はこれらを `core.cog_utils.get_cog_attr(self.bot, "EewCog", "_las
 Cog名は固定文字列 "EewCog" 等を使うため、Cogクラス名を変更する際は
 この Cog 内の参照も合わせて更新すること。
 """
+import math
 import os
 import gzip
 import json
@@ -164,6 +165,20 @@ async def _status_prefix_check(ctx) -> bool:
 # 空（未取得）の結果はキャッシュしない（取得完了後に使えるようにするため）。
 _GIS_PAYLOAD_COORD_DECIMALS = 4   # 約11m。地図表示には十分
 _gis_payload_cache: dict = {}
+
+
+def _latency_ms(latency) -> int | None:
+    """
+    discord.py の Bot.latency（秒）をミリ秒の整数にする。
+    Discord ゲートウェイと切断中は inf（ハートビート未確立）または nan（接続自体が無い）が返り、
+    round() に渡すと OverflowError / ValueError になるため、その場合は None を返す。
+    """
+    try:
+        if latency is None or not math.isfinite(latency):
+            return None
+        return round(latency * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _round_coords(c, nd: int):
@@ -654,7 +669,7 @@ class SystemCog(commands.Cog):
         h, rem = divmod(int(uptime.total_seconds()), 3600)
         m, s   = divmod(rem, 60)
         uptime_str = f"{uptime.days}日 {h % 24}時間 {m}分 {s}秒"
-        ping_ms = round(self.bot.latency * 1000)
+        ping_ms = _latency_ms(self.bot.latency)
 
         last_recv = self._merged_last_recv()
         recv_count = self._merged_recv_count()
@@ -763,7 +778,8 @@ class SystemCog(commands.Cog):
                 wolfx_icon = "[NG]"
                 wolfx_detail = f"heartbeat TIMEOUT ({hb_elapsed:.1f}s > {WOLFX_HEARTBEAT_TIMEOUT}s)"
 
-        color = 0x00FF00 if ping_ms < 100 else (0xFFFF00 if ping_ms < 300 else 0xFF0000)
+        color = (0xFF0000 if ping_ms is None else
+                 0x00FF00 if ping_ms < 100 else (0xFFFF00 if ping_ms < 300 else 0xFF0000))
         embed = discord.Embed(
             title="QTL_Bot ステータス",
             color=color,
@@ -771,7 +787,7 @@ class SystemCog(commands.Cog):
         )
 
         # -- システム --
-        sys_lines = [f"稼働時間: {uptime_str}", f"Ping: {ping_ms}ms"]
+        sys_lines = [f"稼働時間: {uptime_str}", (f"Ping: {ping_ms}ms" if ping_ms is not None else "Ping: 切断中")]
         if _psutil_ok:
             if STATUS_SHOW_CPU:
                 sys_lines.append(f"CPU: {cpu:.1f}%")
@@ -1371,7 +1387,7 @@ class SystemCog(commands.Cog):
                     "bot_user": str(self.bot.user),
                     "uptime": uptime_str,
                     "uptime_seconds": uptime_seconds,
-                    "ping_ms": round(self.bot.latency * 1000),
+                    "ping_ms": _latency_ms(self.bot.latency),
                     "system": system_info,
                     "eew": eew_info,
                     "api_status": {
