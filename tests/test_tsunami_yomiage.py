@@ -6,7 +6,9 @@ os.environ.setdefault("BOT_TOKEN", "test")
 os.environ.setdefault("CHANNEL_ID", "1")
 
 import cogs.tsunami as tsunami_mod
-from core.tsunami_speech import build_offshore_observation_speech, build_tide_time_speech
+from core.tsunami_speech import (
+    build_coastal_observation_speech, build_offshore_observation_speech, build_tide_time_speech,
+)
 from core.yomiage import TSUNAMI_DEFAULTS, TSUNAMI_TAGS, TemplateSet
 
 
@@ -34,6 +36,17 @@ def test_offshore_custom_template():
 def test_offshore_default_unchanged_without_yomi():
     text, pri = build_offshore_observation_speech(_OFFSHORE)
     assert text == "沖合の津波観測に関する情報。17時44分頃、次の沖合で津波を観測しました。宮城金華山沖。" and pri == 2
+
+
+_COASTAL = {"Body": {"Tsunami": {"Observation": {"Item": [
+    {"Area": {"Name": "岩手県"}, "Station": [{"Name": "大船渡", "MaxHeight": {"TsunamiHeight": "1.2"}}]}]}}}}
+
+
+def test_coastal_custom_template_and_default():
+    assert build_coastal_observation_speech(_COASTAL)[0] == \
+        "津波観測に関する情報。岩手県の大船渡で、1.2メートルを観測しました。"
+    y = _yomi(TSUNAMI_COASTAL="{観測点}で{高さ}。[{地域}です。]")
+    assert build_coastal_observation_speech(_COASTAL, yomi=y)[0] == "大船渡で1.2メートル。岩手県です。"
 
 
 def test_tide_time_custom_template_and_default():
@@ -114,3 +127,35 @@ def test_jma_custom_templates(monkeypatch):
     asyncio.run(cog.notify_tsunami_forecast(_jma("51", "津波警報"), is_test=True))
     asyncio.run(cog.notify_tsunami_forecast(_jma("50", "津波警報解除"), is_test=True))
     assert cog.spoken == ["津波警報です。避難してください。", "津波警報の解除。"]
+
+
+# ---- notify_tsunami_observation_coastal（沿岸の津波観測情報）を実際に通す ----
+def _coastal_cog():
+    cog = _cog()
+    cog._obs_height_tracker = tsunami_mod.StationHeightTracker()
+    cog._coastal_speech_gate = tsunami_mod.EventGate(mode="rise")
+    return cog
+
+
+def _coastal_detail(height):
+    return {"Control": {"PublishingOffice": "気象庁"},
+            "Head": {"Title": "津波観測に関する情報", "ReportDateTime": "2026-04-20T17:00:00+09:00",
+                     "EventID": "E1"},
+            "Body": {"Tsunami": {"Observation": {"Item": [
+                {"Area": {"Name": "岩手県", "Code": "101"},
+                 "Station": [{"Name": "大船渡", "Code": "1", "MaxHeight": {"TsunamiHeight": height}}]}]}}}}
+
+
+def test_coastal_observation_is_spoken_once_per_tier():
+    cog = _coastal_cog()
+    for h in ("0.2", "0.3", "1.5", "0.4"):    # watch → watch → warning → 下降
+        asyncio.run(cog.notify_tsunami_observation_coastal(_coastal_detail(h)))
+    assert cog.spoken == ["津波観測に関する情報。岩手県の大船渡で、0.2メートルを観測しました。",
+                          "津波観測に関する情報。岩手県の大船渡で、1.5メートルを観測しました。"]
+
+
+def test_coastal_observation_test_notification_always_speaks():
+    cog = _coastal_cog()
+    for _ in range(2):
+        asyncio.run(cog.notify_tsunami_observation_coastal(_coastal_detail("0.2"), is_test=True))
+    assert len(cog.spoken) == 2

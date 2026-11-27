@@ -517,7 +517,8 @@ def station_raw_height(station: dict) -> str:
     return "欠測"
 
 
-def build_coastal_observation_speech(detail: dict) -> Optional[tuple[str, int, int]]:
+def build_coastal_observation_speech(detail: dict,
+                                     yomi: Optional[TemplateSet] = None) -> Optional[tuple[str, int, int]]:
     """
     「津波観測に関する情報」（VTSE51）の読み上げ。
     戻り値: (読み上げ文, 優先度, 最大階級 OBS_TIER値)。観測点が無ければ None。
@@ -537,12 +538,13 @@ def build_coastal_observation_speech(detail: dict) -> Optional[tuple[str, int, i
     if best is None or best[1] == "unknown":
         return None
     _, grade, area, name, raw = best
-    where = f"{area}の{name}" if area else name
     h = format_height_for_speech(raw)
-    if h:
-        text = f"津波観測に関する情報。{where}で、{h}を観測しました。"
-    else:
-        text = f"津波観測に関する情報。{where}で、津波を観測しています。"
+    text = (yomi or _DEFAULT_YOMI).render("TSUNAMI_COASTAL", {
+        "地域": area,
+        "観測点": name,
+        "高さ": h,
+        "観測状況": f"{h}を観測しました" if h else "津波を観測しています",
+    })
     return text, _OBS_TIER_PRIORITY[grade], OBS_TIER[grade]
 
 

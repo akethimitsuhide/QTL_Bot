@@ -78,13 +78,14 @@ from core.config import (
     TSUNAMI_COLOR_MAJOR_WARNING, TSUNAMI_COLOR_WARNING,
     TSUNAMI_COLOR_WATCH, TSUNAMI_COLOR_FORECAST, TSUNAMI_COLOR_UNKNOWN,
     YOMI_TSUNAMI_P2P_ISSUED, YOMI_TSUNAMI_P2P_ISSUED_PLAIN, YOMI_TSUNAMI_P2P_CANCEL,
-    YOMI_TSUNAMI_JMA_ISSUED, YOMI_TSUNAMI_JMA_CANCEL, YOMI_TSUNAMI_OFFSHORE,
+    YOMI_TSUNAMI_JMA_ISSUED, YOMI_TSUNAMI_JMA_CANCEL, YOMI_TSUNAMI_COASTAL, YOMI_TSUNAMI_OFFSHORE,
     YOMI_TSUNAMI_TIDE_TIME,
 )
 from core.constants import TSUNAMI_MAP, TSUNAMI_GRADE_ORDER, _tsunami_height_key, format_tsunami_height_value
 from core.tsunami_speech import (
     GRADE_LABEL, GRADE_ORDER as TIDE_GRADE_ORDER, OBS_TIER, AlertGate, AlertState, EventGate,
-    StationHeightTracker, build_offshore_observation_speech, build_tide_time_speech,
+    StationHeightTracker, build_coastal_observation_speech, build_offshore_observation_speech,
+    build_tide_time_speech,
     obs_grade_from_height, offshore_station_keys, state_from_jma_forecast, state_from_p2p_tsunami,
 )
 from core.helpers import truncate_embed_description, format_jma_time
@@ -111,6 +112,7 @@ _YOMI = TemplateSet(
         "TSUNAMI_P2P_CANCEL": YOMI_TSUNAMI_P2P_CANCEL,
         "TSUNAMI_JMA_ISSUED": YOMI_TSUNAMI_JMA_ISSUED,
         "TSUNAMI_JMA_CANCEL": YOMI_TSUNAMI_JMA_CANCEL,
+        "TSUNAMI_COASTAL": YOMI_TSUNAMI_COASTAL,
         "TSUNAMI_OFFSHORE": YOMI_TSUNAMI_OFFSHORE,
         "TSUNAMI_TIDE_TIME": YOMI_TSUNAMI_TIDE_TIME,
     },
@@ -180,6 +182,11 @@ class TsunamiCog(commands.Cog, AudioMixin):
         # （core/tsunami_speech.py の build_offshore_observation_speech /
         # offshore_station_keys 参照）。既存観測点の値の修正だけの続報は読まない。
         self._offshore_speech_gate = EventGate(mode="change")
+
+        # 沿岸の津波観測情報（VTSE51）の読み上げ重複防止。同じ津波（EventID）について、
+        # 初回、または最大階級（OBS_TIER）が上がった時だけ読み上げる
+        # （core/tsunami_speech.py の build_coastal_observation_speech 参照）。
+        self._coastal_speech_gate = EventGate(mode="rise")
 
         # 【2026-09-29追加】沿岸観測点（VTSE51）の「↑」表示用。前報の同じ
         # 観測点の値と比較して上昇していた場合のみ付ける
@@ -1075,6 +1082,17 @@ class TsunamiCog(commands.Cog, AudioMixin):
                 record_delivery(True, "津波観測情報（沿岸）")
                 record_notification("津波観測情報（沿岸）", title)
             logger.info(f"津波観測情報（沿岸）を通知しました: {title}")
+
+            # ── 読み上げ ──
+            # is_test時は本番の重複防止状態を汚染しないよう、判定を経ずに毎回読み上げる。
+            speech = build_coastal_observation_speech(detail, yomi=_YOMI)
+            if speech:
+                text, priority, tier = speech
+                gate_key = str(event_id or title)
+                if is_test or self._coastal_speech_gate.decide(
+                    gate_key, tier, datetime.now().timestamp()
+                ):
+                    await self.speak_local(text, priority)
 
         except Exception as e:
             record_delivery(False, "津波観測情報（沿岸）", str(e))

@@ -313,3 +313,14 @@ def test_tide_time_speech():
     assert build_tide_time_speech(forecast_only) is None
     watch = _jma(("北海道太平洋沿岸東部", "津波注意報", "2026-04-20T17:30:00+09:00", "1"))
     assert build_tide_time_speech(watch)[1] == 3
+
+
+def test_coastal_speech_gate_reads_only_when_tier_rises():
+    """沿岸観測の重複防止: 同じ EventID では最大階級が上がった時だけ読む（EventGate mode=rise）。"""
+    gate = EventGate(mode="rise")
+    key = "20261127000001"
+    tier = lambda h: build_coastal_observation_speech(_obs(("岩手県", "宮古", {"TsunamiHeight": h})))[2]
+    assert gate.decide(key, tier("0.2"), 100.0) is True      # 初回（0.1m以上=watch）
+    assert gate.decide(key, tier("0.3"), 200.0) is False     # 同階級の続報
+    assert gate.decide(key, tier("1.5"), 210.0) is True      # warning へ上昇（cooldown 対象外）
+    assert gate.decide(key, tier("0.4"), 220.0) is False     # 下降は読まない
