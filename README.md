@@ -46,7 +46,7 @@ P2P地震情報 WebSocket が使えないときに、地震情報（震度速報
   - 上記以外の観測系は汎用の `notify_tsunami_observation`。南海トラフ地震臨時情報・震源要素更新のお知らせは `OtherInfoCog` に委譲する。
 - 読み上げの文生成・状態変化の分類・二重読み上げ防止ゲートは `core/tsunami_speech.py`（純関数）。
   - **警報・注意報・予報**（P2P の `notify_tsunami`・気象庁の `notify_tsunami_forecast`）の読み上げと EWS 信号音は、`AlertGate` が情報源をまたいで判定する（予報区名と区分の「状態」を比較するため、P2P の id と気象庁の EventID が違っても同じ津波を二重に読まない）。読み上げるのは、新規発表・最上位区分の変化（切り上げ・切り下げ）・注意報以上の予報区の追加・解除のときだけで、高さの修正などの続報は読まない。EWS は新規発表と警報区分の切り上げ時だけ鳴る。Embed の通知は抑止しない。読み上げの文言は従来どおり `.env.yomiage` のテンプレート（`YOMI_TSUNAMI_*`）を使う。Bot 再起動後に最初に届いた解除は、状態が無くても第一報として読む。`--test_*` のテスト通知は判定を経ずに毎回読み上げ・再生する。
-  - `EventGate` は満潮時刻・沖合観測の読み上げの重複防止に使う。沿岸観測（VTSE51）の読み上げは未対応（`build_coastal_observation_speech` は未配線）。
+  - `EventGate` は満潮時刻・沖合観測・沿岸観測の読み上げの重複防止に使う。沿岸観測（VTSE51）は、最大階級（5m以上／1m以上／0.1m以上／微弱）の観測点を1つ読み、同じ津波（EventID）では最大階級が上がった時だけ再度読む。
 - 津波情報の発表時に MP3 は再生しない（読み上げと EWS 信号音のみ）。
 - **EWS（緊急警報放送）信号音**: `EWS_ENABLE=true`（既定 false）のとき、津波警報・大津波警報の発表・更新時（P2P・気象庁HPの両形式、および地震情報の `domesticTsunami` 経由）に、昭和60年郵政省告示第405号準拠の AFSK 信号音（第二種開始信号）を再生する。同一イベントの警報区分が上がったときだけ再度鳴らす。波形は `core/ews_signal.py` がメモリ上で合成し、`pygame.mixer.Sound(buffer=...)` で再生する（ミキサーは 44100Hz・モノラルで初期化）。CLI テストでは `EWS_ENABLE` に関わらず再生する。
 
@@ -89,7 +89,7 @@ JMA の `list.json` 等をポーリングする処理は、起動直後の最初
 
 ### 運用・監視
 - **ログ**: `RotatingFileHandler`（既定 10MB × 7世代）。ファイル／コンソールのログレベルを別々に設定でき、同一メッセージは `LOG_DUPLICATE_THRESHOLD`（既定60）秒以内なら抑制する（ERROR 以上は常に出力）。
-- **エラー自動通知**: `ADMIN_CHANNEL_ID` を設定すると、ERROR 以上のログを管理者チャンネルへ自動通知する（同じエラーは1時間に1回）。毎日 00:00 に前日のエラー集計を投稿する。`ADMIN_CHANNEL_ID` 未設定（0）なら無効。
+- **エラー自動通知**: `ADMIN_CHANNEL_ID` を設定すると、ERROR 以上のログを管理者チャンネルへ自動通知する（同じエラーは1時間に1回）。毎日 00:00 に前日のエラー集計を投稿する。`ADMIN_CHANNEL_ID` 未設定（0）なら無効。回線断・DNS障害などで Discord に接続できず通知を送れなかった場合は、通知を捨てずに保留し（最大50件、同じエラーは件数を加算）、接続の再開時と60秒ごとの再試行で、1通にまとめて送る。切断中のログはトレースバックなしの1行 WARNING になる。権限エラーなど再送しても直らない失敗は保留しない。
 - **ヘルスチェック**: Wolfx・JMA・P2P の疎通確認（`/health/full`、結果は30秒キャッシュ）。
 - **リソース監視**: 既定で1時間ごとに CPU・メモリ・ディスク使用率を記録し、ディスク使用率が80%以上で WARNING、90%以上で ERROR を出す。
 - **配信成功率**: 各 Cog の `channel.send()` の成否を記録し、直近24時間の成功率を `!status`・`GET /status` で確認できる。
@@ -427,6 +427,7 @@ python3 bot.py
 | `YOMI_QUAKE_OTHER` | 地震情報: その他の情報 |
 | `YOMI_TSUNAMI_P2P_ISSUED` / `_ISSUED_PLAIN` / `_CANCEL` | 津波（P2P地震情報）: 発表（地域・区分あり／なし）・解除 |
 | `YOMI_TSUNAMI_JMA_ISSUED` / `_CANCEL` | 津波（気象庁の警報・注意報・予報）: 発表・解除 |
+| `YOMI_TSUNAMI_COASTAL` | 津波: 津波観測に関する情報（沿岸） |
 | `YOMI_TSUNAMI_OFFSHORE` | 津波: 沖合の津波観測に関する情報 |
 | `YOMI_TSUNAMI_TIDE_TIME` | 津波: 満潮時刻・津波到達予想時刻に関する情報 |
 | `YOMI_OTHER_LONG_PERIOD` | 長周期地震動に関する観測情報 |
@@ -679,7 +680,7 @@ bandit -r . --ini .bandit       # 指摘が 0 件なら "No issues identified."
 
 | エンドポイント | 内容 |
 |:---|:---|
-| `GET /status` | 稼働状況の JSON（`system`・`eew`・`api_status`・`recv_count`・`monitoring`・`tasks`・`delivery`・`memory_usage_mb` など） |
+| `GET /status` | 稼働状況の JSON（`system`・`eew`・`api_status`・`recv_count`・`monitoring`・`tasks`・`delivery`・`gateway`・`memory_usage_mb` など）。`ping_ms` は Discord ゲートウェイ切断中は `null`。`gateway` は Discord との接続状態（`connected`）と、起動後の切断履歴（開始・復旧・継続時間。新しい順で最大20件）・累計切断回数・合計時間・最長時間で、`/dashboard` の「Discord接続」と「Discord 切断履歴」に表示される（メモリ上のみ、Bot 再起動でリセット） |
 | `GET /health` | 軽量ヘルスチェック（`{"status": "online"}`） |
 | `GET /health/full` | Wolfx・JMA・P2P（・USGS）の疎通確認（`overall_status`・各 API の `ok`／`latency_ms`／`error`）。30秒キャッシュ |
 | `GET /status/history` | CPU・メモリ・ディスク・受信件数の推移（`STATUS_HISTORY_INTERVAL` 秒ごと、メモリ上のみ）。`?format=csv` で CSV（UTF-8 BOM付き） |
@@ -830,7 +831,7 @@ python3 -m pytest tests/ -q
 | 強震モニタ | `test_kyoshin_decode_failure.py`・`test_kyoshin_log_filter.py`・`test_kyoshin_maintenance.py`・`test_kyoshin_notify.py`・`test_kyoshin_notify_loop.py`・`test_kyoshin_phase.py`・`test_maintenance.py` | 受信・通知の集約・揺れの強さの段階・画像のデコード失敗・通知ループのエラー処理・ログ抑制・メンテナンスモード（状態管理と `/qtl_maintenance`） |
 | Web ダッシュボード | `test_dashboard_auth.py`・`test_dashboard_gis_payload.py`・`test_dashboard_logs.py`・`test_dashboard_security.py`・`test_web_static.py`・`test_estimated_web.py` | トークン認証・静的配信（許可リスト・`.env` を狙うパス探索の拒否）・秘密が返らないこと・セキュリティヘッダー・ログ閲覧 API・推計震度分布図 API・地図データ |
 | Discord コマンド・設定 | `test_command_access.py`・`test_qtl_logs_command.py`・`test_status_history_view.py`・`test_runtime_settings.py`・`test_env_writer.py`・`test_channels.py` | `/qtl_status`・`/qtl_logs` の権限と表示・`/qtl_config`（再起動不要の設定変更）・`.env` の安全な書き換え・通知チャンネルの複数指定 |
-| 送信・Webhook・ログ・監視 | `test_discord_send.py`・`test_webhook_notify.py`・`test_webhook_event_urls.py`・`test_log_archive.py`・`test_log_mask.py`・`test_error_notify_handler.py`・`test_apm_expected_errors.py` | 送信の再送（nonce 固定・指数バックオフ）・Webhook 通知・ログの圧縮保存と伏せ字・ERROR ログの管理者通知・APM の想定内エラー |
+| 送信・Webhook・ログ・監視 | `test_discord_send.py`・`test_webhook_notify.py`・`test_webhook_event_urls.py`・`test_log_archive.py`・`test_log_mask.py`・`test_error_notify_handler.py`・`test_error_notify_queue.py`・`test_gateway_history.py`・`test_apm_expected_errors.py` | 送信の再送（nonce 固定・指数バックオフ）・Webhook 通知・ログの圧縮保存と伏せ字・ERROR ログの管理者通知・回線断時の保留とまとめ送信・ゲートウェイ切断履歴・APM の想定内エラー |
 | CLI・環境・依存 | `test_env_merge.py`・`test_env_bool.py`・`test_doctor.py`・`test_dependency_audit.py`・`test_test_runner_input.py` | `--merge_env`・真偽値の綴りミス警告・`--doctor`・`--audit_deps`・CLI テストの入力 JSON |
 
 ---
@@ -951,6 +952,8 @@ QTL_Bot/
 │   ├── dependency_audit.py      --audit_deps（版ずれ確認・脆弱性照合）
 │   ├── status_history_view.py   /qtl_status 履歴オプションの表示整形
 │   ├── error_notify_handler.py  ERROR ログ → 管理者チャンネル通知のログハンドラー
+│   ├── error_notify_queue.py    回線断で送れなかったエラー通知の保留キュー・接続系例外の判定
+│   ├── gateway_history.py       Discord ゲートウェイの切断・復旧の履歴（ダッシュボード表示用）
 │   ├── qtlbot_log_files.py   qtlbot.log と圧縮済み・圧縮待ちの列挙
 │   ├── pid_guard.py          二重起動の防止
 │   ├── cog_utils.py          Cog 共通のユーティリティ
@@ -1039,5 +1042,5 @@ MIT License
 
 ---
 
-**最終更新**: 2026-11-24
+**最終更新**: 2026-11-28
 **対応 Python**: 3.11+
