@@ -67,6 +67,44 @@
   function dotText(dotClass, text) {
     return [h('span', { class: 'dot ' + dotClass }), String(text)];
   }
+
+  // 秒数を「1時間05分」「3分12秒」「45秒」の形にする
+  function fmtDuration(sec) {
+    sec = Math.max(0, Math.round(Number(sec) || 0));
+    var hh = Math.floor(sec / 3600), mm = Math.floor((sec % 3600) / 60), ss = sec % 60;
+    if (hh > 0) return hh + '時間' + pad2(mm) + '分';
+    if (mm > 0) return mm + '分' + pad2(ss) + '秒';
+    return ss + '秒';
+  }
+  function fmtDateTime(iso) {
+    var d = new Date(iso);
+    return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  }
+
+  // Discord ゲートウェイの接続状態と切断履歴（/status の gateway。Bot 再起動でリセット）
+  function renderGateway(gw) {
+    if (!gw) return;
+    var connected = !!gw.connected;
+    QTL.setContent($('sumGateway'), h('span', null, dotText(connected ? 'dot-green' : 'dot-red',
+      (connected ? '接続中（' : '切断中（') + fmtDuration(gw.state_duration_sec) + '）')));
+
+    $('gatewaySummary').textContent = '起動後の切断 ' + gw.total_disconnects + ' 回 ／ 合計 ' +
+      fmtDuration(gw.total_downtime_sec) + ' ／ 最長 ' + fmtDuration(gw.longest_sec);
+    var events = gw.events || [];
+    if (events.length === 0) {
+      QTL.setContent($('gatewayContent'), QTL.messageBox('notif-empty', '起動後に切断はありません'));
+      return;
+    }
+    var head = h('tr', null, [h('th', { text: '切断' }), h('th', { text: '復旧' }), h('th', { text: '継続時間' })]);
+    var rows = events.map(function (e) {
+      return h('tr', null, [
+        h('td', { class: 'nowrap', text: fmtDateTime(e.start) }),
+        h('td', { class: 'nowrap', text: e.end ? fmtDateTime(e.end) : '切断中' }),
+        h('td', { class: 'nowrap', text: fmtDuration(e.duration_sec) }),
+      ]);
+    });
+    QTL.setContent($('gatewayContent'), h('table', { class: 'notif-table' }, [h('thead', null, head), h('tbody', null, rows)]));
+  }
   async function loadSummary() {
     if (document.hidden) return;
     try {
@@ -75,6 +113,7 @@
       QTL.setContent($('sumStatus'), h('span', null, dotText(ok ? 'dot-green' : 'dot-red', data.bot_user || (ok ? 'オンライン' : 'オフライン'))));
       $('sumUptime').textContent = data.uptime || '-';
       $('sumPing').textContent = data.ping_ms != null ? data.ping_ms + ' ms' : '-';
+      renderGateway(data.gateway);
 
       var wolfx = (data.eew && data.eew.wolfx) || {};
       var ws = wolfx.ws_status || 'unknown';

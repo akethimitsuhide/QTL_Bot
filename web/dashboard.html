@@ -26,6 +26,7 @@
     <div class="summary-chip"><div class="chip-label">Bot状態</div><div class="chip-value" id="sumStatus">読み込み中...</div></div>
     <div class="summary-chip"><div class="chip-label">稼働時間</div><div class="chip-value" id="sumUptime">-</div></div>
     <div class="summary-chip"><div class="chip-label">Ping</div><div class="chip-value" id="sumPing">-</div></div>
+    <div class="summary-chip"><div class="chip-label">Discord接続</div><div class="chip-value" id="sumGateway">-</div></div>
     <div class="summary-chip"><div class="chip-label">Wolfx EEW</div><div class="chip-value" id="sumWolfx">-</div></div>
     <div class="summary-chip"><div class="chip-label">CPU / メモリ</div><div class="chip-value" id="sumResource">-</div></div>
     <div class="summary-chip"><div class="chip-label">ディスク</div><div class="chip-value" id="sumDisk">-</div></div>
@@ -44,6 +45,14 @@
     <div class="card"><h2>メモリ使用量 (MB)</h2><canvas id="memChart"></canvas></div>
     <div class="card"><h2>ディスク使用率 (%)</h2><canvas id="diskChart"></canvas></div>
     <div class="card"><h2>受信件数（累積）</h2><canvas id="recvChart"></canvas></div>
+  </div>
+
+  <div id="gatewaySection" class="grid grid-spaced">
+    <div class="card notif-card">
+      <h2>Discord 切断履歴</h2>
+      <div class="subtitle" id="gatewaySummary">読み込み中...</div>
+      <div id="gatewayContent" class="table-wrap"><div class="notif-empty">読み込み中...</div></div>
+    </div>
   </div>
 
   <div id="notifSection" class="grid grid-spaced">

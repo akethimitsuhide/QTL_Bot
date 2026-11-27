@@ -83,6 +83,8 @@ from core.dashboard_auth import DashboardAuth, MIN_RECOMMENDED_TOKEN_LENGTH
 from core.cog_utils import get_cog_attr
 from core.notification_log import load_notification_history
 from core.error_notify_handler import AdminErrorLogHandler, SKIP_ATTR
+from core.error_notify_queue import PendingErrorQueue, build_flush_text, is_network_error
+from core.gateway_history import GatewayHistory
 from core.delivery_stats import get_delivery_stats
 from core.quake_history_log import load_quake_history, display_record
 from core.log_view import list_log_files, find_log_file, read_entries, parse_level, LEVELS, MAX_TAIL
@@ -269,6 +271,12 @@ class SystemCog(commands.Cog):
         self.error_summary_task: asyncio.Task | None = None
         self._error_log_handler: AdminErrorLogHandler | None = None  # ERROR ログ → 管理者通知
         self.error_notification_cache: dict = {}
+        # Discord ゲートウェイの切断・復旧の履歴（ダッシュボードの /status の "gateway"）
+        self._gateway_history = GatewayHistory(datetime.now())
+        # ネットワーク断で管理者チャンネルへ送れなかったエラー通知の保留（復旧後にまとめて送る）
+        self._pending_errors = PendingErrorQueue()
+        self._pending_flush_lock = asyncio.Lock()
+        self._pending_flush_task: asyncio.Task | None = None
         self.error_count_today: int = 0
         self.daily_error_summary: dict = {}
 
@@ -323,6 +331,9 @@ class SystemCog(commands.Cog):
             self.error_summary_task.cancel()
             logger.info("error_summary_worker タスクをキャンセルしました")
 
+        if self._pending_flush_task and not self._pending_flush_task.done():
+            self._pending_flush_task.cancel()
+
         if self.resource_monitor_task and not self.resource_monitor_task.done():
             self.resource_monitor_task.cancel()
             logger.info("resource_monitor タスクをキャンセルしました")
@@ -343,7 +354,13 @@ class SystemCog(commands.Cog):
             logger.info("SystemCog: aiohttp セッションを閉じました")
 
     @commands.Cog.listener()
+    async def on_disconnect(self):
+        """Discord ゲートウェイの切断を記録する（切断中の重複通知は GatewayHistory 側で1回にまとめる）。"""
+        self._gateway_history.on_disconnect(datetime.now())
+
+    @commands.Cog.listener()
     async def on_ready(self):
+        self._gateway_history.on_connected(datetime.now())
         self.channel = resolve_channels(self.bot, CHANNEL_IDS)
 
         if ADMIN_CHANNEL_IDS:
@@ -412,7 +429,16 @@ class SystemCog(commands.Cog):
             # 他Cogのon_readyが出揃うのを少し待ってから送る
             self.bot.loop.create_task(self._notify_startup())
 
+        # 切断中に送れなかったエラー通知があれば、再接続後にまとめて送る
+        await self._flush_pending_errors()
+
         logger.info("SystemCog: on_ready 完了")
+
+    @commands.Cog.listener()
+    async def on_resumed(self):
+        """ゲートウェイが再開（切断からの復旧）したら、復旧を記録し、保留中のエラー通知をまとめて送る。"""
+        self._gateway_history.on_connected(datetime.now())
+        await self._flush_pending_errors()
 
     async def _notify_startup(self) -> None:
         """Bot起動完了を管理者チャンネルに通知する。"""
@@ -1388,6 +1414,7 @@ class SystemCog(commands.Cog):
                     "uptime": uptime_str,
                     "uptime_seconds": uptime_seconds,
                     "ping_ms": _latency_ms(self.bot.latency),
+                    "gateway": self._gateway_history.snapshot(datetime.now()),
                     "system": system_info,
                     "eew": eew_info,
                     "api_status": {
@@ -2131,7 +2158,64 @@ class SystemCog(commands.Cog):
 
         except Exception as e:
             # skip_admin_notify: この失敗ログが再び管理者通知を呼ぶ再帰を防ぐ
-            logger.error(f"エラー通知の送信に失敗: {e}", exc_info=True, extra={SKIP_ATTR: True})
+            if is_network_error(e):
+                # 回線断・DNS障害など: 通知を捨てず保留し、復旧後にまとめて送る。
+                # 切断中にログが荒れないよう、トレースバックなしの1行 WARNING にする
+                self._pending_errors.add(error_hash, error_type, error_msg, datetime.now())
+                logger.warning(
+                    f"エラー通知を保留しました（Discord に接続できません: {type(e).__name__}）。"
+                    f"復旧後にまとめて送信します（保留 {len(self._pending_errors)} 件）",
+                    extra={SKIP_ATTR: True},
+                )
+                self._ensure_pending_flush_worker()
+            else:
+                logger.error(f"エラー通知の送信に失敗: {e}", exc_info=True, extra={SKIP_ATTR: True})
+
+    def _ensure_pending_flush_worker(self) -> None:
+        """保留がある間だけ、定期的に再送を試すタスクを動かす（無ければ起動、あれば何もしない）。"""
+        if self._pending_flush_task is None or self._pending_flush_task.done():
+            self._pending_flush_task = self.bot.loop.create_task(self._pending_flush_worker())
+
+    async def _pending_flush_worker(self) -> None:
+        """保留が空になるまで 60 秒ごとに再送を試す（空になったら終了）。"""
+        try:
+            while len(self._pending_errors) > 0 and not self.bot.is_closed():
+                await asyncio.sleep(60)
+                await self._flush_pending_errors()
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_pending_errors(self) -> bool:
+        """
+        保留中のエラー通知を1通にまとめて管理者チャンネルへ送る。
+        送れた（または保留が無い）場合は True。接続できない場合は保留へ戻して False。
+        """
+        if not self.admin_channel or len(self._pending_errors) == 0:
+            return True
+        async with self._pending_flush_lock:
+            items, dropped = self._pending_errors.drain()
+            if not items:
+                return True
+            try:
+                embed = discord.Embed(
+                    title="エラー通知（接続回復後にまとめて送信）",
+                    description=build_flush_text(items, dropped),
+                    color=discord.Color.red(),
+                    timestamp=datetime.now(),
+                )
+                embed.add_field(name="保留していた件数", value=f"{len(items) + dropped} 件", inline=True)
+                embed.set_footer(text="QTL_Bot エラー監視")
+                await self.admin_channel.send(embed=embed)
+                logger.info(f"保留していたエラー通知 {len(items)} 件をまとめて送信しました")
+                return True
+            except Exception as e:
+                if is_network_error(e):
+                    self._pending_errors.restore(items, dropped)       # まだ繋がらない。次回に再試行
+                    logger.debug(f"保留中のエラー通知の再送を見送りました（接続できません）: {type(e).__name__}")
+                    return False
+                # 権限エラーなど再送しても直らない失敗は、保留を捨てて無限リトライを避ける
+                logger.error(f"保留中のエラー通知の送信に失敗（破棄します）: {e}", extra={SKIP_ATTR: True})
+                return False
 
     async def error_summary_worker(self) -> None:
         """毎日 00:00 に日次エラーサマリーを生成・送信"""
@@ -2174,7 +2258,12 @@ class SystemCog(commands.Cog):
                 logger.info("error_summary_worker が停止しました")
                 break
             except Exception as e:
-                logger.error(f"error_summary_worker エラー: {e}", exc_info=True, extra={SKIP_ATTR: True})
+                if is_network_error(e):
+                    # 回線断で日次サマリーを送れなかった。トレースバックは出さない（件数は次回に持ち越し）
+                    logger.warning(f"日次エラーサマリーを送れませんでした（Discord に接続できません: {type(e).__name__}）",
+                                   extra={SKIP_ATTR: True})
+                else:
+                    logger.error(f"error_summary_worker エラー: {e}", exc_info=True, extra={SKIP_ATTR: True})
                 await asyncio.sleep(60)
 
     # ===============================
